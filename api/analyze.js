@@ -82,7 +82,10 @@ Respond ONLY with a valid JSON array. No text before or after. No markdown. No c
     });
 
     const data = await response.json();
-    return res.status(200).json({ result: data.content[0].text });
+const text = data.content[0].text;
+const jsonMatch = text.match(/\[[\s\S]*\]/);
+const result = jsonMatch ? jsonMatch[0] : text;
+return res.status(200).json({ result });
 
   } catch (error) {
     return res.status(500).json({ error: error.message });
