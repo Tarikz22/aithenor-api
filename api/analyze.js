@@ -1,6 +1,6 @@
 const XLSX = require('xlsx');
 
-export default async function handler(req, res) {
+async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -108,3 +108,5 @@ Respond ONLY with a valid JSON array. No text before or after. No markdown. No c
     return res.status(500).json({ error: error.message });
   }
 }
+
+module.exports = { default: handler };
