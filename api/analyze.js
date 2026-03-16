@@ -12,6 +12,7 @@ const context = req.body.context;
 
     const buffer = Buffer.from(fileData, 'base64');
     const workbook = XLSX.read(buffer, { type: 'buffer' });
+    if (!workbook.SheetNames.length) return res.status(400).json({ error: 'Could not parse Excel file' });
 
     let allData = '';
     workbook.SheetNames.forEach((sheetName, index) => {
