@@ -6,7 +6,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { fileData, hotelCode, context } = req.body;
+const fileData = req.body.fileData || req.body.filedata;
+const hotelCode = req.body.hotelCode || req.body.hotelcode;
+const context = req.body.context;
 
     const buffer = Buffer.from(fileData, 'base64');
     const workbook = XLSX.read(buffer, { type: 'buffer' });
