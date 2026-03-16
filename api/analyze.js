@@ -98,8 +98,19 @@ Respond ONLY with a valid JSON array. No text before or after. No markdown. No c
       })
     });
 
-    const data = await response.json();
-    const text = data.content[0].text;
+const data = await response.json();
+console.log('Anthropic status:', response.status);
+console.log('Anthropic response:', JSON.stringify(data));
+
+if (!data.content || !data.content[0] || !data.content[0].text) {
+  return res.status(500).json({
+    error: 'Anthropic response invalid',
+    anthropic_status: response.status,
+    anthropic_data: data
+  });
+}
+
+const text = data.content[0].text;
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     const result = jsonMatch ? jsonMatch[0] : text;
     return res.status(200).json({ result });
