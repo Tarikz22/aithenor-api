@@ -8,11 +8,17 @@ async function handler(req, res) {
   try {
     const fileUrl = req.body.fileUrl || req.body.fileurl;
     const hotelCode = req.body.hotelCode || req.body.hotelcode;
-    const context = req.body.context;
+    const context = req.body.context || '';
+
+    if (!fileUrl) {
+      return res.status(400).json({ error: 'Missing fileUrl' });
+    }
 
     const fileResponse = await fetch(fileUrl);
     if (!fileResponse.ok) {
-      return res.status(400).json({ error: `Failed to download file: ${fileResponse.status}` });
+      return res
+        .status(400)
+        .json({ error: `Failed to download file: ${fileResponse.status}` });
     }
 
     const arrayBuffer = await fileResponse.arrayBuffer();
@@ -24,11 +30,13 @@ async function handler(req, res) {
     workbook.SheetNames.forEach((sheetName, index) => {
       const sheet = workbook.Sheets[sheetName];
       const csv = XLSX.utils.sheet_to_csv(sheet);
-      
-      // Skip first 2 rows (title and instructions) and use the rest
-      const lines = csv.split('\n').filter(line => line.replace(/,/g, '').trim() !== '');
-      const dataLines = lines.slice(2); // Skip title and instructions rows
-      
+
+      const lines = csv
+        .split('\n')
+        .filter((line) => line.replace(/,/g, '').trim() !== '');
+
+      const dataLines = lines.slice(2);
+
       allData += `\n=== TAB ${index + 1}: ${sheetName} ===\n`;
       allData += dataLines.join('\n');
       allData += '\n\n';
@@ -49,7 +57,7 @@ STEP 1 - TRIGGER CONFIRMATION
 From Tab 1 STR Daily Report, the columns are: Date, Day of Week, Hotel Occupancy %, Comp Set Occupancy %, Occ % Change vs LY, Occ % Change Comp Set, MPI (Index), MPI % Change, Hotel ADR, Comp Set ADR, ADR % Change vs LY, ADR % Change Comp Set, ARI (Index), ARI % Change, Hotel RevPAR, Comp Set RevPAR, RevPAR % Change vs LY, RevPAR % Change Comp Set, RGI (Index), RGI % Change, Occ Rank, ADR Rank, RevPAR Rank.
 Column 7 is MPI (Index) and Column 13 is ARI (Index).
 If the majority of data rows show MPI < 100 AND ARI > 100, the trigger is met. Continue with full analysis.
-If trigger not met, output: [{"trigger_met": false}] and stop.
+If trigger not met, output: {"trigger_met": false, "findings": [], "actions": []} and stop.
 
 STEP 2 - MARKET VALIDATION
 IF market occupancy UP and hotel occupancy DOWN: market healthy, hotel not capturing fair share, continue.
@@ -131,6 +139,7 @@ No text before or after.
 No markdown.
 No code blocks.
 The response must start with { and end with }.
+`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -146,24 +155,26 @@ The response must start with { and end with }.
       })
     });
 
-const data = await response.json();
-console.log('Anthropic status:', response.status);
-console.log('Anthropic response:', JSON.stringify(data));
+    const data = await response.json();
+    console.log('Anthropic status:', response.status);
+    console.log('Anthropic response:', JSON.stringify(data));
 
-if (!data.content || !data.content[0] || !data.content[0].text) {
-  return res.status(500).json({
-    error: 'Anthropic response invalid',
-    anthropic_status: response.status,
-    anthropic_data: data
-  });
-}
+    if (!data.content || !data.content[0] || !data.content[0].text) {
+      return res.status(500).json({
+        error: 'Anthropic response invalid',
+        anthropic_status: response.status,
+        anthropic_data: data
+      });
+    }
 
-const text = data.content[0].text;
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    const text = data.content[0].text;
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
     const result = jsonMatch ? jsonMatch[0] : text;
-    return res.status(200).json({ result });
 
+    return res.status(200).json({ result });
   } catch (error) {
+    console.error('Handler error:', error);
     return res.status(500).json({ error: error.message });
   }
 }
