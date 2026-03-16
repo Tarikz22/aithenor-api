@@ -69,20 +69,68 @@ Coefficients: OTA 0.65 / Pricing 0.55 / Negotiated 0.50 / Groups 0.45 / Brand.co
 Show full calculation. Annual = monthly x 12.
 
 OUTPUT RULES:
-- finding_title: Max 8 words. Specific channel or segment. Never generic.
-- priority: Critical / High / Medium / Low only
-- department: Revenue Management / Sales / Marketing / Distribution / General Management only
-- situation: 2-3 sentences. Use ACTUAL numbers from the data. Quote specific metrics, percentages, and values from the Excel.
-- diagnosis: 1-2 sentences. Specific operational failure with actual numbers. Never use: potential, may, possibly, could.
-- cause: ONE root cause from approved list only.
-- action: 3-5 bullets. Department + timeframe on each.
-- expected_outcome: Specific metric improvement with numbers from the data.
-- gop_saving: Full calculation shown transparently using actual ADR and room night figures from the data.
-- trigger_metric: Specific metric for THIS finding. Max 15 characters.
 
-Generate 3 to 6 findings supported by the data. Do not invent findings not in the data. Use the actual numbers from the Excel in every finding.
+Return exactly one valid JSON object with this structure:
 
-Respond ONLY with a valid JSON array. No text before or after. No markdown. No code blocks. Just raw JSON starting with [ and ending with ].`;
+{
+  "hotel_name": "string",
+  "period": "string",
+  "findings": [
+    {
+      "finding_title": "string",
+      "priority": "Critical | High | Medium | Low",
+      "department": "Revenue Management | Sales | Marketing | Distribution | General Management",
+      "module": "string",
+      "trigger_metric": "string",
+      "situation": "string",
+      "diagnosis": "string",
+      "cause": "string"
+    }
+  ],
+  "actions": [
+    {
+      "finding_title_reference": "string",
+      "action_title": "string",
+      "action_detail": "string",
+      "owner_department": "Revenue Management | Sales | Marketing | Distribution | General Management",
+      "owner_role": "string",
+      "urgency": "Critical | High | Medium | Low",
+      "expected_outcome": "string",
+      "estimated_revenue_upside": number,
+      "estimated_gop_saving": "string",
+      "due_date": "YYYY-MM-DD"
+    }
+  ]
+}
+
+RULES FOR FINDINGS:
+- finding_title: max 8 words, specific channel or segment, never generic
+- module: identify the analytical area, for example STR / PMS / Corporate / Delphi / Distribution
+- trigger_metric: specific metric for this finding, max 15 characters
+- situation: 2-3 sentences using actual numbers from the data
+- diagnosis: 1-2 sentences, specific operational failure with actual numbers
+- cause: choose ONE root cause only from the approved list
+
+RULES FOR ACTIONS:
+- Create at least one action for each finding
+- finding_title_reference must exactly match the finding_title
+- action_title: concise and operational
+- action_detail: 2-4 concrete actions with department and timeframe
+- owner_role: assign the most relevant owner such as DOSM, Director of Revenue, Director of Marketing, Distribution Manager, General Manager
+- expected_outcome: specific metric improvement using actual numbers where possible
+- estimated_revenue_upside: numeric only, no currency symbol
+- estimated_gop_saving: show full calculation transparently using actual ADR and room night figures from the data
+- due_date: choose a realistic due date within the next 30 days
+
+Generate 3 to 6 findings supported by the data.
+Do not invent findings not present in the data.
+Use actual numbers from the Excel in every finding and every action outcome where possible.
+
+Respond ONLY with one valid JSON object.
+No text before or after.
+No markdown.
+No code blocks.
+The response must start with { and end with }.
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
