@@ -133,6 +133,62 @@ RULES FOR ACTIONS:
 - estimated_gop_saving: show full calculation transparently using actual ADR and room night figures from the data
 - due_date: choose a realistic due date within the next 30 days
 
+OUTPUT QUALITY RULES (STRICT):
+
+- Each finding MUST include multiple quantified metrics (€, %, ADR, occupancy, index).
+- Findings without numerical evidence are invalid.
+- Generic statements are forbidden (e.g., “underperformance”, “opportunity”, “suboptimal” without numbers).
+
+- Each finding must clearly state:
+  1. What is happening (with data)
+  2. Why it is happening (root cause)
+  3. What it impacts financially (revenue and/or GOP)
+
+- Each finding must include an estimated financial impact expressed in revenue and, when possible, translated into GOP impact using a clear flow-through logic.
+
+- Findings must be distinct and non-overlapping.
+- Do not repeat the same issue using different wording.
+- Each finding must address a unique problem or opportunity.
+
+- Each action must:
+  - Be specific and operational (who does what)
+  - Reference real levers (pricing, segment mix, channels, accounts)
+  - Avoid generic recommendations like “optimize”, “improve”, “review”
+
+- If output is vague or not data-backed, it is invalid.
+
+ADVANCED ANALYSIS RULES (CRITICAL):
+
+- The system must not only identify issues, but challenge commercial decisions.
+
+- For each finding, the analysis must include cross-checks across:
+  - segment mix (Transient, Group, Corporate, etc.)
+  - pricing vs mix (ADR vs contribution)
+  - historical trends (same period last year or typical pattern)
+  - market benchmarks (MPI, ARI, competitors)
+
+- The system must explicitly detect and highlight trade-offs, such as:
+  - high occupancy driven by low-rated segments
+  - displacement of higher-value demand
+  - mix distortion impacting ADR or GOP
+
+- When relevant, the system must:
+  - challenge the decision taken
+  - identify displaced higher-value demand
+  - quantify the financial impact of the decision
+
+- Findings must go beyond description and include:
+  - decision critique
+  - missed opportunity estimation
+  - alternative strategy suggestion
+
+- The system must identify pacing gaps:
+  - segment underperformance vs last year
+  - segment underperformance vs market
+  - forward-looking risks when data is available
+
+- If no cross-check or decision logic is applied, the output is considered incomplete.
+
 Generate 3 to 6 findings supported by the data.
 Do not invent findings not present in the data.
 Use actual numbers from the Excel in every finding and every action outcome where possible.
