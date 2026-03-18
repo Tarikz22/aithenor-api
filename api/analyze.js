@@ -121,7 +121,10 @@ RULES FOR FINDINGS:
 
 RULES FOR ACTIONS:
 - Create at least one action for each finding
-- finding_title_reference must exactly match the finding_title
+- finding_title_reference MUST be copied EXACTLY from the finding_title with zero modification.
+- Do NOT rephrase, shorten, or reinterpret the title.
+- The value must be a strict character-by-character match.
+- If mismatch occurs, the output is considered invalid.
 - action_title: concise and operational
 - action_detail: 2-4 concrete actions with department and timeframe
 - owner_role: assign the most relevant owner such as DOSM, Director of Revenue, Director of Marketing, Distribution Manager, General Manager
