@@ -70,6 +70,34 @@ const ALLOWED_DEPARTMENTS = [
 ];
 
 const XLSX = require('xlsx');
+async function getHotelMemory(supabase, hotelId) {
+  const { data: recentFindings } = await supabase
+    .from("findings")
+    .select("finding_id, department, strategic_angle, title")
+    .eq("hotel_id", hotelId)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  const { data: recentActions } = await supabase
+    .from("recommended_actions")
+    .select("action_id, finding_id, action_text")
+    .eq("hotel_id", hotelId)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  const { data: openIssues } = await supabase
+    .from("issue_memory")
+    .select("finding_id, times_flagged, last_strategic_angle, status")
+    .eq("hotel_id", hotelId)
+    .in("status", ["open", "recurring"])
+    .limit(10);
+
+  return {
+    recentFindings: recentFindings || [],
+    recentActions: recentActions || [],
+    openIssues: openIssues || []
+  };
+}
 
 async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -79,6 +107,7 @@ async function handler(req, res) {
   try {
     const fileUrl = req.body.fileUrl || req.body.fileurl;
     const hotelCode = req.body.hotelCode || req.body.hotelcode;
+    const memory = await getHotelMemory(supabase, hotelCode);
     const context = req.body.context || '';
 
     if (!fileUrl) {
