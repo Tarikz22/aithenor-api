@@ -87,8 +87,11 @@ async function storeResults(hotelId, findings) {
 // ===== HANDLER =====
 async function handler(req, res) {
   try {
-    const fileUrl = req.body.fileUrl;
-    const hotelId = req.body.hotelCode;
+    const fileUrl = req.body.fileUrl || req.body.fileurl;
+    const hotelId = req.body.hotel_id || req.body.hotelId || req.body.hotelCode || req.body.hotelcode || '';
+    const hotelName = req.body.hotel_name || req.body.hotelName || '';
+    const context = req.body.context || '';
+    
 
     const memory = await getHotelMemory(hotelId);
 
@@ -160,7 +163,11 @@ OUTPUT JSON:
     // ===== STORE =====
     await storeResults(hotelId, json.findings);
 
-    return res.json(json);
+    return res.json({
+      hotel_id: hotelId,
+      hotel_name: hotelName,
+      findings: json.findings
+});
 
   } catch (e) {
     console.error(e);
