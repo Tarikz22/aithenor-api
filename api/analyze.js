@@ -1,3 +1,74 @@
+const ALLOWED_FINDING_IDS = [
+  // Revenue
+  "REV_OCC_DROP",
+  "REV_ADR_UNDERPERFORM",
+  "REV_REVPAR_GAP",
+  "REV_SEGMENT_IMBALANCE",
+  "REV_WEAK_WEEKDAY_BASE",
+  "REV_WEAK_WEEKEND_BASE",
+  "REV_LOW_PACING",
+
+  // Sales
+  "SALES_LOW_CORPORATE_PRODUCTION",
+  "SALES_WEAK_ACCOUNT_BASE",
+  "SALES_POOR_CONVERSION",
+  "SALES_GROUP_PIPELINE_GAP",
+  "SALES_RFP_UNDERPERFORMANCE",
+
+  // Marketing
+  "MKT_LOW_CAMPAIGN_RETURN",
+  "MKT_LOW_DIRECT_TRAFFIC",
+  "MKT_WEAK_BRAND_VISIBILITY",
+  "MKT_POOR_LEAD_QUALITY",
+
+  // Distribution
+  "DIST_HIGH_OTA_DEPENDENCY",
+  "DIST_RATE_PARITY_ISSUE",
+  "DIST_CHANNEL_MIX_ISSUE",
+  "DIST_LOW_DIRECT_SHARE",
+
+  // Finance
+  "FIN_COST_OVERSPEND",
+  "FIN_LOW_FLOWTHROUGH",
+  "FIN_MARGIN_DILUTION",
+  "FIN_POOR_EXPENSE_CONTROL",
+
+  // Operations
+  "OPS_LOW_GUEST_SATISFACTION",
+  "OPS_HIGH_CANCELLATION",
+  "OPS_HIGH_REFUND_OR_COMP",
+  "OPS_SERVICE_DELIVERY_GAP",
+  "OPS_LOW_UPSELL_CAPTURE",
+
+  // Ownership / Strategy
+  "OWN_FORECAST_RISK",
+  "OWN_BUDGET_GAP",
+  "OWN_CAPEX_RETURN_CONCERN",
+  "OWN_STRATEGIC_EXECUTION_GAP"
+];
+
+const ALLOWED_STRATEGIC_ANGLES = [
+  "pricing",
+  "segmentation",
+  "distribution",
+  "sales",
+  "marketing",
+  "operations",
+  "cost_optimization",
+  "forecasting",
+  "owner_strategy"
+];
+
+const ALLOWED_DEPARTMENTS = [
+  "Revenue",
+  "Sales",
+  "Marketing",
+  "Distribution",
+  "Finance",
+  "Operations",
+  "Ownership"
+];
+
 const XLSX = require('xlsx');
 
 async function handler(req, res) {
