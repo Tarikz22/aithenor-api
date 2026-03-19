@@ -187,10 +187,11 @@ OUTPUT JSON:
     // ===== STORE =====
     await storeResults(hotelId, json.findings);
 
-    return res.json({
-      hotel_id: hotelId,
-      hotel_name: hotelName,
-      findings: json.findings
+return res.json({
+  hotel_id: hotelId,
+  hotel_name: hotelName,
+  period: "2026-03",
+  findings: json.findings
 });
 
   } catch (e) {
