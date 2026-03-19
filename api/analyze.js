@@ -122,12 +122,24 @@ hotelName = hotelRow.hotel_name || '';
     const fileResponse = await fetch(fileUrl);
     const buffer = Buffer.from(await fileResponse.arrayBuffer());
     const workbook = XLSX.read(buffer, { type: 'buffer' });
+    let period = '';
 
-    let allData = '';
-    workbook.SheetNames.forEach((sheetName) => {
-      const sheet = workbook.Sheets[sheetName];
-      allData += XLSX.utils.sheet_to_csv(sheet);
-    });
+let allData = '';
+let period = '';
+
+workbook.SheetNames.forEach((sheetName) => {
+  const sheet = workbook.Sheets[sheetName];
+  const csv = XLSX.utils.sheet_to_csv(sheet);
+
+  if (!period) {
+    const match = csv.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}/i);
+    if (match) {
+      period = match[0];
+    }
+  }
+
+  allData += csv;
+});
 
     // ===== CLAUDE PROMPT =====
     const prompt = `
@@ -190,7 +202,7 @@ OUTPUT JSON:
 return res.json({
   hotel_id: hotelId,
   hotel_name: hotelName,
-  period: "2026-03",
+  period: period,
   findings: json.findings
 });
 
