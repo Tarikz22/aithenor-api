@@ -87,9 +87,33 @@ async function storeResults(hotelId, findings) {
 // ===== HANDLER =====
 async function handler(req, res) {
   try {
-    const fileUrl = req.body.fileUrl || req.body.fileurl;
-    const hotelId = req.body.hotel_id || req.body.hotelId || req.body.hotelCode || req.body.hotelcode || '';
-    const hotelName = req.body.hotel_name || req.body.hotelName || '';
+const fileUrl = req.body.fileUrl || req.body.fileurl;
+const hotelId = req.body.hotel_id || req.body.hotelId || req.body.hotelCode || req.body.hotelcode || '';
+let hotelName = '';
+
+if (!fileUrl) {
+  return res.status(400).json({ error: 'Missing fileUrl' });
+}
+
+if (!hotelId) {
+  return res.status(400).json({ error: 'Missing hotel code' });
+}
+
+const { data: hotelRow, error: hotelLookupError } = await supabase
+  .from('hotels')
+  .select('hotel_name, hotel_code')
+  .eq('hotel_code', hotelId)
+  .maybeSingle();
+
+if (hotelLookupError) {
+  return res.status(500).json({ error: 'Hotel lookup failed', details: hotelLookupError.message });
+}
+
+if (!hotelRow) {
+  return res.status(400).json({ error: 'Hotel code does not exist, please review.' });
+}
+
+hotelName = hotelRow.hotel_name || '';
     const context = req.body.context || '';
     
 
