@@ -121,8 +121,7 @@ hotelName = hotelRow.hotel_name || '';
 
     const fileResponse = await fetch(fileUrl);
     const buffer = Buffer.from(await fileResponse.arrayBuffer());
-    const workbook = XLSX.read(buffer, { type: 'buffer' });
-    let period = '';
+ const workbook = XLSX.read(buffer, { type: 'buffer' });
 
 let allData = '';
 let period = '';
@@ -140,6 +139,10 @@ workbook.SheetNames.forEach((sheetName) => {
 
   allData += csv;
 });
+
+if (!period) {
+  period = 'Unknown';
+}
 
     // ===== CLAUDE PROMPT =====
     const prompt = `
