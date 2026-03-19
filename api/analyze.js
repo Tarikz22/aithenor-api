@@ -14,166 +14,129 @@ const ALLOWED_FINDING_IDS = [
   "OWN_FORECAST_RISK","OWN_BUDGET_GAP","OWN_CAPEX_RETURN_CONCERN","OWN_STRATEGIC_EXECUTION_GAP"
 ];
 
-const ALLOWED_STRATEGIC_ANGLES = [
-  "pricing","segmentation","distribution","sales","marketing",
-  "operations","cost_optimization","forecasting","owner_strategy"
-];
-
-const ALLOWED_DEPARTMENTS = [
-  "Revenue","Sales","Marketing","Distribution","Finance","Operations","Ownership"
-];
-
-// ===== IMPORTS =====
 const XLSX = require('xlsx');
 const { createClient } = require('@supabase/supabase-js');
 
-// ===== SUPABASE INIT (FIXED) =====
+// ===== INIT =====
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ===== MEMORY FUNCTION =====
-async function getHotelMemory(supabase, hotelId) {
-  const { data: recentFindings } = await supabase
-    .from("findings")
-    .select("finding_id, department, strategic_angle, title")
-    .eq("hotel_id", hotelId)
-    .order("created_at", { ascending: false })
-    .limit(10);
-
-  const { data: recentActions } = await supabase
-    .from("recommended_actions")
-    .select("action_id, finding_id, action_text")
-    .eq("hotel_id", hotelId)
-    .order("created_at", { ascending: false })
-    .limit(10);
-
+// ===== MEMORY =====
+async function getHotelMemory(hotelId) {
   const { data: openIssues } = await supabase
     .from("issue_memory")
-    .select("finding_id, times_flagged, last_strategic_angle, status")
+    .select("*")
     .eq("hotel_id", hotelId)
-    .in("status", ["open", "recurring"])
-    .limit(10);
+    .in("status", ["open", "recurring"]);
 
   return {
-    recentFindings: recentFindings || [],
-    recentActions: recentActions || [],
     openIssues: openIssues || []
   };
 }
 
-// ===== MAIN HANDLER =====
-async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+// ===== SAVE =====
+async function storeResults(hotelId, findings) {
+  for (const item of findings) {
+    // FINDINGS
+    await supabase.from("findings").insert({
+      hotel_id: hotelId,
+      title: item.title,
+      department: item.department,
+      finding_text: item.finding,
+      impact_value: item.impact_value,
+      impact_type: item.impact_type
+    });
 
-  try {
-    const fileUrl = req.body.fileUrl || req.body.fileurl;
-    const hotelCode = req.body.hotelCode || req.body.hotelcode;
-    const context = req.body.context || '';
+    // ACTIONS
+    await supabase.from("recommended_actions").insert({
+      hotel_id: hotelId,
+      action_text: item.action.action_text,
+      expected_impact_value: item.action.expected_impact_value,
+      status: "pending"
+    });
 
-    if (!fileUrl) {
-      return res.status(400).json({ error: 'Missing fileUrl' });
+    // MEMORY UPSERT
+    const { data: existing } = await supabase
+      .from("issue_memory")
+      .select("*")
+      .eq("hotel_id", hotelId)
+      .eq("finding_id", item.title) // temp mapping
+      .maybeSingle();
+
+    if (!existing) {
+      await supabase.from("issue_memory").insert({
+        hotel_id: hotelId,
+        finding_id: item.title,
+        status: "open",
+        times_flagged: 1
+      });
+    } else {
+      await supabase
+        .from("issue_memory")
+        .update({
+          times_flagged: existing.times_flagged + 1,
+          status: "recurring"
+        })
+        .eq("id", existing.id);
     }
+  }
+}
 
-    // ✅ MEMORY FETCH (CORRECT POSITION)
-    const memory = await getHotelMemory(supabase, hotelCode);
+// ===== HANDLER =====
+async function handler(req, res) {
+  try {
+    const fileUrl = req.body.fileUrl;
+    const hotelId = req.body.hotelCode;
+
+    const memory = await getHotelMemory(hotelId);
 
     const fileResponse = await fetch(fileUrl);
-    if (!fileResponse.ok) {
-      return res.status(400).json({ error: `Failed to download file: ${fileResponse.status}` });
-    }
-
-    const arrayBuffer = await fileResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const buffer = Buffer.from(await fileResponse.arrayBuffer());
     const workbook = XLSX.read(buffer, { type: 'buffer' });
 
     let allData = '';
-
-    workbook.SheetNames.forEach((sheetName, index) => {
+    workbook.SheetNames.forEach((sheetName) => {
       const sheet = workbook.Sheets[sheetName];
-      const csv = XLSX.utils.sheet_to_csv(sheet);
-
-      const lines = csv
-        .split('\n')
-        .filter((line) => line.replace(/,/g, '').trim() !== '');
-
-      const dataLines = lines.slice(2);
-
-      allData += `\n=== TAB ${index + 1}: ${sheetName} ===\n`;
-      allData += dataLines.join('\n');
-      allData += '\n\n';
+      allData += XLSX.utils.sheet_to_csv(sheet);
     });
 
-const prompt = `
-You are Aithenor, a hotel-wide decision intelligence engine.
+    // ===== CLAUDE PROMPT =====
+    const prompt = `
+You are Aithenor.
 
-You analyze full hotel performance across:
-Revenue, Sales, Marketing, Distribution, Finance, Operations, Ownership.
-
-You do NOT describe data.
-You identify issues, challenge decisions, and recommend measurable actions.
-
---------------------------------
-CURRENT HOTEL: ${hotelCode}
---------------------------------
+Analyze hotel data and detect high-impact issues.
 
 DATA:
-${allData.substring(0, 20000)}
+${allData.substring(0, 15000)}
 
---------------------------------
-MEMORY — PREVIOUS FINDINGS:
-${JSON.stringify(memory.recentFindings, null, 2)}
-
-MEMORY — PREVIOUS ACTIONS:
-${JSON.stringify(memory.recentActions, null, 2)}
-
-MEMORY — OPEN ISSUES:
-${JSON.stringify(memory.openIssues, null, 2)}
---------------------------------
+OPEN ISSUES:
+${JSON.stringify(memory.openIssues)}
 
 RULES:
+- Do not repeat same issue unless worsening
+- If repeat → mark is_repeat = true
+- Give measurable financial impact
+- Actions must be concrete
 
-1. Do NOT repeat the same issue unless unresolved.
-2. If repeated → explain why situation persists or worsens.
-3. Rotate strategic angle (pricing, sales, marketing, cost, operations).
-4. Every finding MUST include numbers (ADR, Occ, %, revenue).
-5. Every action MUST be concrete and executable.
-6. No generic wording (no "improve", "optimize", etc).
-7. Cover multiple departments.
-
---------------------------------
-
-OUTPUT:
-
-Return ONLY valid JSON:
-
+OUTPUT JSON:
 {
   "findings": [
     {
-      "title": "short title",
-      "department": "Revenue | Sales | Marketing | Distribution | Finance | Operations | Ownership",
-      "finding": "data-based explanation",
-      "impact_value": number,
-      "impact_type": "revenue | cost | gop",
-      "is_repeat": true/false,
+      "title": "",
+      "department": "",
+      "finding": "",
+      "impact_value": 0,
+      "impact_type": "revenue",
+      "is_repeat": false,
       "action": {
-        "action_text": "clear action",
-        "expected_impact_value": number
+        "action_text": "",
+        "expected_impact_value": 0
       }
     }
   ]
 }
-
---------------------------------
-
-QUALITY:
-
-- 3 to 6 findings max
-- Must be different issues
-- Must be financially relevant
 `;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -185,26 +148,23 @@ QUALITY:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 4000,
+        max_tokens: 2000,
         messages: [{ role: 'user', content: prompt }]
       })
     });
 
     const data = await response.json();
+    const text = data.content?.[0]?.text || "{}";
+    const json = JSON.parse(text.match(/\{[\s\S]*\}/)[0]);
 
-    if (!data.content || !data.content[0]?.text) {
-      return res.status(500).json({ error: 'Anthropic response invalid', data });
-    }
+    // ===== STORE =====
+    await storeResults(hotelId, json.findings);
 
-    const text = data.content[0].text;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const result = jsonMatch ? jsonMatch[0] : text;
+    return res.json(json);
 
-    return res.status(200).json({ result });
-
-  } catch (error) {
-    console.error('Handler error:', error);
-    return res.status(500).json({ error: error.message });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e.message });
   }
 }
 
