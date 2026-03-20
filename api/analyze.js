@@ -41,12 +41,15 @@ const recommendationsToInsert = data.map((row) => ({
 }));
 
     // 4. Build actions
-    const actionsToInsert = data.map((row) => ({
-      hotel_code: normalizedHotelCode,
-      action_text: row.action || "Review item",
-      status: "open",
-      period: row.period || null
-    }));
+const actionsToInsert = data.map((row) => ({
+  hotel_name: normalizedHotelCode,
+  title: row.title || "Imported action",
+  action_text: row.action || "Review item",
+  hotel_id: normalizedHotelCode,
+  expected_impact_value: row.expected_impact_value || row.value || 0,
+  status: row.status || "open",
+  period: row.period || null
+}));
 
     // 5. Insert Recommendations (IMPORTANT: capital R)
     const { error: recError } = await supabase
