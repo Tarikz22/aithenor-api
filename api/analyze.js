@@ -1,218 +1,75 @@
-// ===== AITHENOR TAXONOMY =====
-const ALLOWED_FINDING_IDS = [
-  "REV_OCC_DROP","REV_ADR_UNDERPERFORM","REV_REVPAR_GAP","REV_SEGMENT_IMBALANCE",
-  "REV_WEAK_WEEKDAY_BASE","REV_WEAK_WEEKEND_BASE","REV_LOW_PACING",
-  "SALES_LOW_CORPORATE_PRODUCTION","SALES_WEAK_ACCOUNT_BASE","SALES_POOR_CONVERSION",
-  "SALES_GROUP_PIPELINE_GAP","SALES_RFP_UNDERPERFORMANCE",
-  "MKT_LOW_CAMPAIGN_RETURN","MKT_LOW_DIRECT_TRAFFIC","MKT_WEAK_BRAND_VISIBILITY",
-  "MKT_POOR_LEAD_QUALITY",
-  "DIST_HIGH_OTA_DEPENDENCY","DIST_RATE_PARITY_ISSUE","DIST_CHANNEL_MIX_ISSUE",
-  "DIST_LOW_DIRECT_SHARE",
-  "FIN_COST_OVERSPEND","FIN_LOW_FLOWTHROUGH","FIN_MARGIN_DILUTION","FIN_POOR_EXPENSE_CONTROL",
-  "OPS_LOW_GUEST_SATISFACTION","OPS_HIGH_CANCELLATION","OPS_HIGH_REFUND_OR_COMP",
-  "OPS_SERVICE_DELIVERY_GAP","OPS_LOW_UPSELL_CAPTURE",
-  "OWN_FORECAST_RISK","OWN_BUDGET_GAP","OWN_CAPEX_RETURN_CONCERN","OWN_STRATEGIC_EXECUTION_GAP"
-];
-
-const XLSX = require('xlsx');
 const { createClient } = require('@supabase/supabase-js');
+const axios = require('axios');
+const XLSX = require('xlsx');
 
-// ===== INIT =====
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ===== MEMORY =====
-async function getHotelMemory(hotelId) {
-  const { data: openIssues } = await supabase
-    .from("issue_memory")
-    .select("*")
-    .eq("hotel_id", hotelId)
-    .in("status", ["open", "recurring"]);
-
-  return {
-    openIssues: openIssues || []
-  };
-}
-
-// ===== SAVE =====
-async function storeResults(hotelId, findings) {
-  for (const item of findings) {
-    // FINDINGS
-    await supabase.from("findings").insert({
-      hotel_id: hotelId,
-      title: item.title,
-      department: item.department,
-      finding_text: item.finding,
-      impact_value: item.impact_value,
-      impact_type: item.impact_type
-    });
-
-    // ACTIONS
-    await supabase.from("recommended_actions").insert({
-      hotel_id: hotelId,
-      action_text: item.action.action_text,
-      expected_impact_value: item.action.expected_impact_value,
-      status: "pending"
-    });
-
-    // MEMORY UPSERT
-    const { data: existing } = await supabase
-      .from("issue_memory")
-      .select("*")
-      .eq("hotel_id", hotelId)
-      .eq("finding_id", item.title) // temp mapping
-      .maybeSingle();
-
-    if (!existing) {
-      await supabase.from("issue_memory").insert({
-        hotel_id: hotelId,
-        finding_id: item.title,
-        status: "open",
-        times_flagged: 1
-      });
-    } else {
-      await supabase
-        .from("issue_memory")
-        .update({
-          times_flagged: existing.times_flagged + 1,
-          status: "recurring"
-        })
-        .eq("id", existing.id);
-    }
-  }
-}
-
-// ===== HANDLER =====
-async function handler(req, res) {
+module.exports = async function analyzeHandler(req, res) {
   try {
-const fileUrl = req.body.fileUrl || req.body.fileurl;
-const hotelId = req.body.hotel_id || req.body.hotelId || req.body.hotelCode || req.body.hotelcode || '';
-let hotelName = '';
+    const { hotelCode, fileUrl, context } = req.body;
 
-if (!fileUrl) {
-  return res.status(400).json({ error: 'Missing fileUrl' });
-}
+    const normalizedHotelCode = (hotelCode || "").trim().toUpperCase();
 
-if (!hotelId) {
-  return res.status(400).json({ error: 'Missing hotel code' });
-}
+    // 1. Download file
+    const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
 
-const { data: hotelRow, error: hotelLookupError } = await supabase
-  .from('hotels')
-  .select('hotel_name, hotel_code')
-  .eq('hotel_code', hotelId)
-  .maybeSingle();
+    // 2. Read Excel
+    const workbook = XLSX.read(response.data, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(sheet);
 
-if (hotelLookupError) {
-  return res.status(500).json({ error: 'Hotel lookup failed', details: hotelLookupError.message });
-}
+    console.log("Rows parsed:", data.length);
 
-if (!hotelRow) {
-  return res.status(400).json({ error: 'Hotel code does not exist, please review.' });
-}
+    // 3. Build recommendations
+    const recommendationsToInsert = data.map((row) => ({
+      hotel_code: normalizedHotelCode,
+      category: row.category || "Revenue",
+      insight: row.insight || JSON.stringify(row),
+      value: row.value || 0,
+      period: row.period || null
+    }));
 
-hotelName = hotelRow.hotel_name || '';
-    const context = req.body.context || '';
-    
+    // 4. Build actions
+    const actionsToInsert = data.map((row) => ({
+      hotel_code: normalizedHotelCode,
+      action_text: row.action || "Review item",
+      status: "open",
+      period: row.period || null
+    }));
 
-    const memory = await getHotelMemory(hotelId);
+    // 5. Insert Recommendations (IMPORTANT: capital R)
+    const { error: recError } = await supabase
+      .from("Recommendations")
+      .insert(recommendationsToInsert);
 
-    const fileResponse = await fetch(fileUrl);
-    const buffer = Buffer.from(await fileResponse.arrayBuffer());
- const workbook = XLSX.read(buffer, { type: 'buffer' });
-
-let allData = '';
-let period = '';
-
-workbook.SheetNames.forEach((sheetName) => {
-  const sheet = workbook.Sheets[sheetName];
-  const csv = XLSX.utils.sheet_to_csv(sheet);
-
-  if (!period) {
-    const match = csv.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}/i);
-    if (match) {
-      period = match[0];
+    if (recError) {
+      console.error("Recommendations insert error:", recError);
+      return res.status(500).json({ error: recError.message });
     }
-  }
 
-  allData += csv;
-});
+    // 6. Insert actions (lowercase a)
+    const { error: actError } = await supabase
+      .from("actions")
+      .insert(actionsToInsert);
 
-if (!period) {
-  period = 'Unknown';
-}
-
-    // ===== CLAUDE PROMPT =====
-    const prompt = `
-You are Aithenor.
-
-Analyze hotel data and detect high-impact issues.
-
-DATA:
-${allData.substring(0, 15000)}
-
-OPEN ISSUES:
-${JSON.stringify(memory.openIssues)}
-
-RULES:
-- Do not repeat same issue unless worsening
-- If repeat → mark is_repeat = true
-- Give measurable financial impact
-- Actions must be concrete
-
-OUTPUT JSON:
-{
-  "findings": [
-    {
-      "title": "",
-      "department": "",
-      "finding": "",
-      "impact_value": 0,
-      "impact_type": "revenue",
-      "is_repeat": false,
-      "action": {
-        "action_text": "",
-        "expected_impact_value": 0
-      }
+    if (actError) {
+      console.error("Actions insert error:", actError);
+      return res.status(500).json({ error: actError.message });
     }
-  ]
-}
-`;
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
-        messages: [{ role: 'user', content: prompt }]
-      })
+    // 7. Return success
+    return res.json({
+      success: true,
+      recommendationsInserted: recommendationsToInsert.length,
+      actionsInserted: actionsToInsert.length
     });
 
-    const data = await response.json();
-    const text = data.content?.[0]?.text || "{}";
-    const json = JSON.parse(text.match(/\{[\s\S]*\}/)[0]);
-
-    // ===== STORE =====
-    await storeResults(hotelId, json.findings);
-
-return res.json({
-  hotel_id: hotelId,
-  hotel_name: hotelName,
-  period: period,
-  findings: json.findings
-});
-
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error("Analyze error:", error);
+    return res.status(500).json({ error: error.message });
   }
-}
-
-module.exports = { default: handler };
+};
