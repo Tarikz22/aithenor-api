@@ -37,7 +37,7 @@ const recommendationsToInsert = data.map((row) => ({
   is_repeat: row.is_repeat || false,
   expected_impact_value: row.expected_impact_value || row.value || 0,
   status: row.status || "open",
- period: "2025"
+ period: "2026"
 }));
 
     // 4. Build actions
@@ -48,7 +48,7 @@ const actionsToInsert = data.map((row) => ({
   hotel_id: normalizedHotelCode,
   expected_impact_value: row.expected_impact_value || row.value || 0,
   status: row.status || "open",
-  period: "2025"
+  period: "2026"
 }));
 
     // 5. Insert Recommendations (IMPORTANT: capital R)
