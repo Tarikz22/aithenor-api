@@ -25,13 +25,20 @@ module.exports = async function analyzeHandler(req, res) {
     console.log("Rows parsed:", data.length);
 
     // 3. Build recommendations
-    const recommendationsToInsert = data.map((row) => ({
-      hotel_code: normalizedHotelCode,
-      category: row.category || "Revenue",
-      insight: row.insight || JSON.stringify(row),
-      value: row.value || 0,
-      period: row.period || null
-    }));
+const recommendationsToInsert = data.map((row) => ({
+  hotel_name: normalizedHotelCode,
+  title: row.title || "Imported finding",
+  department: row.department || "Revenue",
+  finding: row.finding || row.insight || JSON.stringify(row),
+  "action.action_text": row.action || "Review item",
+  hotel_id: normalizedHotelCode,
+  impact_value: row.impact_value || row.value || 0,
+  impact_type: row.impact_type || "SAR",
+  is_repeat: row.is_repeat || false,
+  expected_impact_value: row.expected_impact_value || row.value || 0,
+  status: row.status || "open",
+  period: row.period || null
+}));
 
     // 4. Build actions
     const actionsToInsert = data.map((row) => ({
