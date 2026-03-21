@@ -68,15 +68,13 @@ module.exports = async function analyzeHandler(req, res) {
     const avgRGI = totalRGI / count;
     const avgCompOcc = totalCompOcc / count;
 
-    let performancePosition = "";
+let performancePosition = "";
 
-    if (avgCompOcc < 50) {
-      if (avgMPI >= 100) {
-        performancePosition = "outperforming";
-      } else {
-        performancePosition = "underperforming";
-      }
-    }
+if (avgMPI >= 100) {
+  performancePosition = "outperforming";
+} else {
+  performancePosition = "underperforming";
+}
 
     // ===== SEVERITY =====
     let severity = "low";
@@ -127,28 +125,22 @@ module.exports = async function analyzeHandler(req, res) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    let recommendationTitle = `${segmentFocus} pressure within ${scenario === 'market_down' ? 'soft' : 'strong'} market conditions`;
-    let recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market condition is ${scenario === 'market_down' ? 'soft' : 'strong'} and hotel position is ${performancePosition || 'not yet differentiated'} versus the comp set. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
+// ===== v2-final — CLEANER OUTPUT STRUCTURE =====
 
-    if (avgCompOcc < 50 && performancePosition === "outperforming") {
-      recommendationTitle = `Groups resilience within soft market conditions`;
-      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), but the hotel is outperforming the comp set. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
-    } else if (avgCompOcc < 50 && performancePosition === "underperforming") {
-      recommendationTitle = `Retail pressure within soft market conditions`;
-      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), and the hotel is underperforming competitors. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
-    } else if (scenario === "market_down") {
-      recommendationTitle = `Retail pressure within soft market conditions`;
-      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), impacting occupancy. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
-    } else {
-      recommendationTitle = `Negotiated pressure within strong market conditions`;
-      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is stronger (Comp Occ ${Math.round(avgCompOcc)}%), but the hotel under-indexes versus the comp set. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
-    }
+let diagnosisText = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is ${scenario === 'market_down' ? 'weak' : 'strong'} (Comp Occ ${Math.round(avgCompOcc)}%), and the hotel is ${performancePosition} versus the comp set.`;
+
+let rootCauseText = segmentReason;
+
+let expectedOutcomeText = `Addressing ${segmentFocus.toLowerCase()} performance gaps should improve occupancy penetration, strengthen market share, and support short-term revenue recovery.`;
+
+let recommendationTitle = `${segmentFocus} underperformance in a ${scenario === 'market_down' ? 'soft' : 'strong'} market`;
+let recommendationFinding = `${diagnosisText} ${rootCauseText}`;
 
     const recommendation = {
       hotel_name: hotelCode,
       title: recommendationTitle,
       department: "Commercial",
-      finding: recommendationFinding,
+      finding: diagnosisText,
       hotel_id: hotelCode,
       impact_value: Math.round((100 - avgMPI) * 120),
       impact_type: "EUR",
@@ -158,8 +150,11 @@ module.exports = async function analyzeHandler(req, res) {
       period: period
     };
 
-    console.log('STR v2 segment focus:', segmentFocus);
-    console.log('STR v2 segment reason:', segmentReason);
+console.log('STR v2 segment focus:', segmentFocus);
+console.log('STR v2 segment reason:', segmentReason);
+console.log('STR v2 diagnosis:', diagnosisText);
+console.log('STR v2 root cause:', rootCauseText);
+console.log('STR v2 expected outcome:', expectedOutcomeText);
 
     const recRes = await fetch(`${supabaseUrl}/rest/v1/Recommendations`, {
       method: "POST",
