@@ -67,6 +67,16 @@ let count = 0;
     const avgARI = totalARI / count;
     const avgRGI = totalRGI / count;
     const avgCompOcc = totalCompOcc / count;
+    
+    let performancePosition = "";
+
+if (avgCompOcc < 50) {
+  if (avgMPI >= 100) {
+    performancePosition = "outperforming";
+  } else {
+    performancePosition = "underperforming";
+  }
+}
 
     // ===== SEVERITY =====
 let severity = "low";
@@ -98,17 +108,28 @@ if (avgCompOcc < 60) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+let recommendationTitle = "";
+let recommendationFinding = "";
+
+if (avgCompOcc < 50 && performancePosition === "outperforming") {
+  recommendationTitle = `Market softness detected but hotel outperforming (MPI ${Math.round(avgMPI)})`;
+  recommendationFinding = `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), but the hotel is still outperforming competitors with MPI ${Math.round(avgMPI)}. The priority is to defend share without overreacting on price.`;
+} else if (avgCompOcc < 50 && performancePosition === "underperforming") {
+  recommendationTitle = `Market softness with underperformance vs comp set (MPI ${Math.round(avgMPI)})`;
+  recommendationFinding = `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), and the hotel is also underperforming competitors with MPI ${Math.round(avgMPI)}. The issue is not only market softness, but also internal commercial inefficiency.`;
+} else if (scenario === "market_down") {
+  recommendationTitle = `Market softness detected (Comp Occ ${Math.round(avgCompOcc)}%)`;
+  recommendationFinding = `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), impacting occupancy. MPI (${Math.round(avgMPI)}) decline is driven by external demand conditions.`;
+} else {
+  recommendationTitle = `Hotel underperformance in strong market`;
+  recommendationFinding = `Market demand is strong (Comp Occ ${Math.round(avgCompOcc)}%) but hotel under-indexes (MPI ${Math.round(avgMPI)}), indicating internal commercial inefficiencies.`;
+}
+
 const recommendation = {
   hotel_name: hotelCode,
-  title:
-    scenario === "market_down"
-      ? `Market softness detected (Comp Occ ${Math.round(avgCompOcc)}%)`
-      : `Hotel underperformance in strong market`,
+  title: recommendationTitle,
   department: "Commercial",
-  finding:
-    scenario === "market_down"
-      ? `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), impacting occupancy. MPI (${Math.round(avgMPI)}) decline is driven by external demand conditions.`
-      : `Market demand is strong (Comp Occ ${Math.round(avgCompOcc)}%) but hotel under-indexes (MPI ${Math.round(avgMPI)}), indicating internal commercial inefficiencies.`,
+  finding: recommendationFinding,
   hotel_id: hotelCode,
   impact_value: Math.round((100 - avgMPI) * 120),
   impact_type: "EUR",
@@ -136,7 +157,19 @@ const recommendation = {
 
 let actions = [];
 
-if (scenario === "market_down") {
+if (performancePosition === "outperforming") {
+  actions = [
+    "Protect ADR and avoid unnecessary discounting",
+    "Maintain visibility on high-performing channels",
+    "Focus on premium segments and upsell opportunities"
+  ];
+} else if (performancePosition === "underperforming") {
+  actions = [
+    "Increase OTA visibility and promotional exposure",
+    "Activate short-lead and local demand segments",
+    "Review channel mix and distribution strategy"
+  ];
+} else if (scenario === "market_down") {
   actions = [
     "Focus on demand stimulation rather than price reductions",
     "Activate local and short-lead segments to capture limited demand",
