@@ -1,108 +1,126 @@
-const { createClient } = require('@supabase/supabase-js');
+import * as XLSX from 'xlsx';
+import fetch from 'node-fetch';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-module.exports = async function analyzeHandler(req, res) {
+export default async function handler(req, res) {
   try {
-    const hotelName =
-      req.body.hotel_name ||
-      req.body.hotelName ||
-      req.body.hotelCode ||
-      "UNKNOWN-HOTEL";
+    const { fileUrl, hotelCode } = req.body;
 
-    const normalizedHotelName = String(hotelName).trim().toUpperCase();
+    // 1. Download file
+    const response = await fetch(fileUrl);
+    const buffer = await response.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawData = XLSX.utils.sheet_to_json(sheet);
 
-    // Optional cleanup of previous temporary imported rows for this hotel/period
-    await supabase
-      .from("Recommendations")
-      .delete()
-      .eq("hotel_name", normalizedHotelName)
-      .eq("period", "2026")
-      .eq("title", "Imported finding");
+    // 2. Extract STR metrics
+    let totalMPI = 0;
+    let totalARI = 0;
+    let totalRGI = 0;
+    let count = 0;
 
-    // 1) Insert one main recommendation
-    const { data: recommendation, error: recError } = await supabase
-      .from("Recommendations")
-      .insert([
-        {
-          hotel_name: normalizedHotelName,
-          title: "Weekend RevPAR underperformance vs comp set",
-          department: "Commercial",
-          finding:
-            "ADR premium is not converting into occupancy, which suggests weak demand capture on peak days versus competitors.",
-          hotel_id: normalizedHotelName,
-          impact_value: 85000,
-          impact_type: "SAR",
-          is_repeat: false,
-          expected_impact_value: 85000,
-          status: "open",
-          period: "2026"
-        }
-      ])
-      .select()
-      .single();
+    rawData.forEach(row => {
+      const mpi = parseFloat(row["__EMPTY_5"]); // MPI
+      const ari = parseFloat(row["__EMPTY_11"]); // ARI
+      const rgi = parseFloat(row["__EMPTY_17"]); // RGI
 
-    if (recError) {
-      throw recError;
+      if (!isNaN(mpi) && !isNaN(ari) && !isNaN(rgi)) {
+        totalMPI += mpi;
+        totalARI += ari;
+        totalRGI += rgi;
+        count++;
+      }
+    });
+
+    const avgMPI = totalMPI / count;
+    const avgARI = totalARI / count;
+    const avgRGI = totalRGI / count;
+
+    // 3. TRIGGER (COM-001)
+    let triggerMet = avgMPI < 100 && avgARI > 100;
+
+    if (!triggerMet) {
+      return res.status(200).json({ message: "No issue detected" });
     }
 
-    // 2) Insert linked actions
-    const actionsPayload = [
+    // 4. SCENARIO (simplified v1)
+    let scenario = "Overpricing / Mix Issue";
+
+    // 5. ROOT CAUSE
+    let rootCause = "Rate positioning too aggressive vs perceived value";
+
+    // 6. ACTIONS (multi-department)
+    const actions = [
       {
-        hotel_name: normalizedHotelName,
-        title: "Revenue action",
-        action_text:
-          "Adjust weekend pricing strategy and test a narrower ADR premium against the comp set.",
-        hotel_id: normalizedHotelName,
-        expected_impact_value: 30000,
-        status: "open",
-        period: "2026"
+        department: "Revenue",
+        action_text: "Adjust pricing strategy on low MPI days (weekday focus)"
       },
       {
-        hotel_name: normalizedHotelName,
-        title: "Sales action",
-        action_text:
-          "Push short-lead transient and local demand opportunities for Friday-Saturday need periods.",
-        hotel_id: normalizedHotelName,
-        expected_impact_value: 25000,
-        status: "open",
-        period: "2026"
+        department: "Marketing",
+        action_text: "Launch targeted campaigns to stimulate short-lead demand"
       },
       {
-        hotel_name: normalizedHotelName,
-        title: "Marketing action",
-        action_text:
-          "Activate targeted weekend campaign support on high-conversion channels to improve demand capture.",
-        hotel_id: normalizedHotelName,
-        expected_impact_value: 30000,
-        status: "open",
-        period: "2026"
+        department: "Sales",
+        action_text: "Activate corporate accounts to support base occupancy"
       }
     ];
 
-    const { data: actions, error: actError } = await supabase
-      .from("actions")
-      .insert(actionsPayload)
-      .select();
+    // 7. IMPACT (simple v1)
+    const impactValue = Math.round((100 - avgMPI) * 100); // placeholder logic
 
-    if (actError) {
-      throw actError;
+    // 8. BUILD RECOMMENDATION
+    const recommendation = {
+      hotel_name: hotelCode,
+      title: "MPI underperformance with strong ADR positioning",
+      department: "Commercial",
+      finding: "Hotel is priced above market but failing to capture demand",
+      impact_value: impactValue,
+      impact_type: "EUR",
+      status: "open",
+      period: "2026"
+    };
+
+    // 9. INSERT INTO SUPABASE
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    // Insert recommendation
+    const recRes = await fetch(`${supabaseUrl}/rest/v1/Recommendations`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`
+      },
+      body: JSON.stringify(recommendation)
+    });
+
+    // Insert actions
+    for (let action of actions) {
+      await fetch(`${supabaseUrl}/rest/v1/actions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": supabaseKey,
+          "Authorization": `Bearer ${supabaseKey}`
+        },
+        body: JSON.stringify({
+          hotel_name: hotelCode,
+          action_text: action.action_text,
+          status: "open",
+          period: "2026"
+        })
+      });
     }
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      message: "Aithenor Brain v1 completed successfully",
-      recommendationInserted: recommendation,
-      actionsInserted: actions?.length || 0
+      avgMPI,
+      avgARI,
+      avgRGI
     });
+
   } catch (error) {
-    console.error("Analyze error:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Unknown analyze error"
-    });
+    console.error(error);
+    res.status(500).json({ error: error.message });
   }
-};
+}
