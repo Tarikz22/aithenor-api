@@ -125,15 +125,34 @@ if (avgMPI >= 100) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+    // ===== v3 — SEGMENT DRIVER HYPOTHESIS LAYER =====
+
+let driverCategory = "general_commercial_pressure";
+let driverConfidence = "hypothesis";
+let driverReason = "The current KPI pattern suggests a general commercial performance issue that should be validated with deeper segment-level data later.";
+
+if (segmentFocus === "Retail") {
+  if (avgARI > 100 && avgMPI < 100) {
+    driverCategory = "pricing_positioning";
+    driverReason = "The current KPI pattern suggests retail underperformance is likely driven by pricing positioning. The hotel appears to be holding rate above the comp set while failing to capture enough occupancy share. This is a hypothesis based on blended STR indexes and should later be validated with retail-specific ADR and channel data.";
+  } else if (avgARI < 100 && avgMPI < 100) {
+    driverCategory = "visibility_demand_capture";
+    driverReason = "The current KPI pattern suggests retail underperformance is likely driven by weaker visibility or demand capture. The hotel is neither leading on rate nor occupancy penetration, which may indicate insufficient channel exposure, weaker digital presence, or low demand capture. This is a hypothesis based on blended STR indexes and should later be validated with channel-level data.";
+  } else {
+    driverCategory = "conversion_channel_performance";
+    driverReason = "The current KPI pattern suggests retail underperformance is likely driven by conversion or channel-performance inefficiency. The hotel may be visible in the market but not converting demand efficiently into bookings. This is a hypothesis based on blended STR indexes and should later be validated with website, booking engine, and channel-conversion data.";
+  }
+}
+
 // ===== v2-final — CLEANER OUTPUT STRUCTURE =====
 
 let diagnosisText = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is ${scenario === 'market_down' ? 'weak' : 'strong'} (Comp Occ ${Math.round(avgCompOcc)}%), and the hotel is ${performancePosition} versus the comp set.`;
 
-let rootCauseText = segmentReason;
+let rootCauseText = `${segmentReason} ${driverReason}`;
 
-let expectedOutcomeText = `Addressing ${segmentFocus.toLowerCase()} performance gaps should improve occupancy penetration, strengthen market share, and support short-term revenue recovery.`;
+let expectedOutcomeText = `Validating and addressing the likely ${driverCategory.replace(/_/g, ' ')} issue should improve ${segmentFocus.toLowerCase()} performance, strengthen market share, and support short-term revenue recovery.`;
 
-let recommendationTitle = `${segmentFocus} underperformance in a ${scenario === 'market_down' ? 'soft' : 'strong'} market`;
+let recommendationTitle = `${segmentFocus} underperformance likely driven by ${driverCategory.replace(/_/g, ' ')} in a ${scenario === 'market_down' ? 'soft' : 'strong'} market`;
 let recommendationFinding = `${diagnosisText} ${rootCauseText}`;
 
     const recommendation = {
@@ -155,6 +174,9 @@ console.log('STR v2 segment reason:', segmentReason);
 console.log('STR v2 diagnosis:', diagnosisText);
 console.log('STR v2 root cause:', rootCauseText);
 console.log('STR v2 expected outcome:', expectedOutcomeText);
+console.log('STR v3 driver category:', driverCategory);
+console.log('STR v3 driver confidence:', driverConfidence);
+console.log('STR v3 driver reason:', driverReason);
 
     const recRes = await fetch(`${supabaseUrl}/rest/v1/Recommendations`, {
       method: "POST",
@@ -174,12 +196,27 @@ console.log('STR v2 expected outcome:', expectedOutcomeText);
 
     let actions = [];
 
-    if (segmentFocus === "Retail") {
-      actions = [
-        "Review retail pricing position, OTA visibility, and digital conversion versus the comp set",
-        "Validate whether transient demand erosion is coming from price competitiveness, channel mix, or weaker pace",
-        "Launch a short-cycle retail recovery plan across revenue, marketing, and distribution teams"
-      ];
+if (segmentFocus === "Retail") {
+  if (driverCategory === "pricing_positioning") {
+    actions = [
+      "Validate whether retail pricing positioning is limiting share capture versus the comp set",
+      "Review transient rate architecture, fenced offers, and need-date price competitiveness",
+      "Align revenue and distribution teams on short-cycle pricing adjustments to recover occupancy without unnecessary ADR dilution"
+    ];
+  } else if (driverCategory === "visibility_demand_capture") {
+    actions = [
+      "Validate whether weaker retail demand capture is linked to OTA visibility, digital presence, or distribution exposure",
+      "Review channel visibility, parity, and share of voice across key booking windows",
+      "Align marketing and distribution teams on a short-cycle visibility recovery plan to strengthen demand capture"
+    ];
+  } else if (driverCategory === "conversion_channel_performance") {
+    actions = [
+      "Validate whether retail underperformance is linked to conversion inefficiency across direct and third-party channels",
+      "Review website journey, booking engine friction, and channel conversion performance",
+      "Align digital, marketing, and distribution teams on a short-cycle conversion improvement plan"
+    ];
+  }
+}
     } else if (segmentFocus === "Negotiated") {
       actions = [
         "Review negotiated account production, contracted rate positioning, and displaced account opportunities",
