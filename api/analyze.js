@@ -11,35 +11,35 @@ module.exports = async function analyzeHandler(req, res) {
     const rawData = XLSX.utils.sheet_to_json(sheet);
 
     // ===== PERIOD EXTRACTION =====
-const dates = rawData
-  .map(row => row["AITHENOR — STR DAILY REPORT TEMPLATE"])
-  .filter(val => typeof val === "string" && val.includes("/"))
-  .map(d => {
-    const [day, month, year] = d.split("/");
-    return new Date(`${year}-${month}-${day}`);
-  })
-  .filter(d => !isNaN(d));
+    const dates = rawData
+      .map(row => row["AITHENOR — STR DAILY REPORT TEMPLATE"])
+      .filter(val => typeof val === "string" && val.includes("/"))
+      .map(d => {
+        const [day, month, year] = d.split("/");
+        return new Date(`${year}-${month}-${day}`);
+      })
+      .filter(d => !isNaN(d));
 
-let period = "unknown";
+    let period = "unknown";
 
-if (dates.length > 0) {
-  const minDate = new Date(Math.min(...dates));
-  const maxDate = new Date(Math.max(...dates));
+    if (dates.length > 0) {
+      const minDate = new Date(Math.min(...dates));
+      const maxDate = new Date(Math.max(...dates));
 
-  const format = (d) =>
-    `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth()+1).padStart(2, "0")}/${d.getFullYear()}`;
+      const format = (d) =>
+        `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
 
-  period =
-    minDate.getTime() === maxDate.getTime()
-      ? format(minDate)
-      : `${format(minDate)} → ${format(maxDate)}`;
-}
+      period =
+        minDate.getTime() === maxDate.getTime()
+          ? format(minDate)
+          : `${format(minDate)} → ${format(maxDate)}`;
+    }
 
-let totalMPI = 0;
-let totalARI = 0;
-let totalRGI = 0;
-let totalCompOcc = 0;
-let count = 0;
+    let totalMPI = 0;
+    let totalARI = 0;
+    let totalRGI = 0;
+    let totalCompOcc = 0;
+    let count = 0;
 
     rawData.forEach((row) => {
       const mpi = parseFloat(row["__EMPTY_5"]);
@@ -67,23 +67,23 @@ let count = 0;
     const avgARI = totalARI / count;
     const avgRGI = totalRGI / count;
     const avgCompOcc = totalCompOcc / count;
-    
+
     let performancePosition = "";
 
-if (avgCompOcc < 50) {
-  if (avgMPI >= 100) {
-    performancePosition = "outperforming";
-  } else {
-    performancePosition = "underperforming";
-  }
-}
+    if (avgCompOcc < 50) {
+      if (avgMPI >= 100) {
+        performancePosition = "outperforming";
+      } else {
+        performancePosition = "underperforming";
+      }
+    }
 
     // ===== SEVERITY =====
-let severity = "low";
+    let severity = "low";
 
-if (avgMPI < 90) severity = "critical";
-else if (avgMPI < 95) severity = "high";
-else severity = "medium";
+    if (avgMPI < 90) severity = "critical";
+    else if (avgMPI < 95) severity = "high";
+    else severity = "medium";
 
     const triggerMet = avgMPI < 100 && avgARI > 100;
 
@@ -96,48 +96,70 @@ else severity = "medium";
         avgRGI
       });
     }
-    // ===== SCENARIO =====
-let scenario = "unknown";
 
-if (avgCompOcc < 60) {
-  scenario = "market_down";
-} else {
-  scenario = "market_up";
-}
+    // ===== SCENARIO =====
+    let scenario = "unknown";
+
+    if (avgCompOcc < 60) {
+      scenario = "market_down";
+    } else {
+      scenario = "market_up";
+    }
+
+    // ===== STR v2 — SEGMENTATION ENTRY LAYER =====
+    let segmentFocus = "Retail";
+    let segmentReason = "Transient demand appears to be the most likely source of underperformance at this stage.";
+
+    if (avgCompOcc < 50 && performancePosition === "underperforming") {
+      segmentFocus = "Retail";
+      segmentReason = "In a soft market where the hotel is underperforming, the most likely first pressure point is transient retail demand, including pricing, visibility, conversion, or channel mix.";
+    } else if (avgCompOcc < 50 && performancePosition === "outperforming") {
+      segmentFocus = "Groups";
+      segmentReason = "In a soft market where the hotel is outperforming, stronger base business support is the most likely explanation, typically from group or negotiated demand.";
+    } else if (scenario === "market_down") {
+      segmentFocus = "Retail";
+      segmentReason = "When the market is soft overall, transient retail is the first segment to validate because it reacts fastest to weak demand conditions.";
+    } else {
+      segmentFocus = "Negotiated";
+      segmentReason = "When the market is holding but the hotel under-indexes, the issue is more likely structural and linked to negotiated accounts, account production, or contracted base demand.";
+    }
 
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-let recommendationTitle = "";
-let recommendationFinding = "";
+    let recommendationTitle = `${segmentFocus} pressure within ${scenario === 'market_down' ? 'soft' : 'strong'} market conditions`;
+    let recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market condition is ${scenario === 'market_down' ? 'soft' : 'strong'} and hotel position is ${performancePosition || 'not yet differentiated'} versus the comp set. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
 
-if (avgCompOcc < 50 && performancePosition === "outperforming") {
-  recommendationTitle = `Market softness detected but hotel outperforming (MPI ${Math.round(avgMPI)})`;
-  recommendationFinding = `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), but the hotel is still outperforming competitors with MPI ${Math.round(avgMPI)}. The priority is to defend share without overreacting on price.`;
-} else if (avgCompOcc < 50 && performancePosition === "underperforming") {
-  recommendationTitle = `Market softness with underperformance vs comp set (MPI ${Math.round(avgMPI)})`;
-  recommendationFinding = `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), and the hotel is also underperforming competitors with MPI ${Math.round(avgMPI)}. The issue is not only market softness, but also internal commercial inefficiency.`;
-} else if (scenario === "market_down") {
-  recommendationTitle = `Market softness detected (Comp Occ ${Math.round(avgCompOcc)}%)`;
-  recommendationFinding = `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), impacting occupancy. MPI (${Math.round(avgMPI)}) decline is driven by external demand conditions.`;
-} else {
-  recommendationTitle = `Hotel underperformance in strong market`;
-  recommendationFinding = `Market demand is strong (Comp Occ ${Math.round(avgCompOcc)}%) but hotel under-indexes (MPI ${Math.round(avgMPI)}), indicating internal commercial inefficiencies.`;
-}
+    if (avgCompOcc < 50 && performancePosition === "outperforming") {
+      recommendationTitle = `Groups resilience within soft market conditions`;
+      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), but the hotel is outperforming the comp set. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
+    } else if (avgCompOcc < 50 && performancePosition === "underperforming") {
+      recommendationTitle = `Retail pressure within soft market conditions`;
+      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), and the hotel is underperforming competitors. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
+    } else if (scenario === "market_down") {
+      recommendationTitle = `Retail pressure within soft market conditions`;
+      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), impacting occupancy. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
+    } else {
+      recommendationTitle = `Negotiated pressure within strong market conditions`;
+      recommendationFinding = `MPI is ${Math.round(avgMPI)}, ARI is ${Math.round(avgARI)}, and RGI is ${Math.round(avgRGI)}. Market demand is stronger (Comp Occ ${Math.round(avgCompOcc)}%), but the hotel under-indexes versus the comp set. Likely primary segment to investigate: ${segmentFocus}. ${segmentReason}`;
+    }
 
-const recommendation = {
-  hotel_name: hotelCode,
-  title: recommendationTitle,
-  department: "Commercial",
-  finding: recommendationFinding,
-  hotel_id: hotelCode,
-  impact_value: Math.round((100 - avgMPI) * 120),
-  impact_type: "EUR",
-  is_repeat: false,
-  expected_impact_value: Math.round((100 - avgMPI) * 120),
-  status: "open",
-  period: period
-};
+    const recommendation = {
+      hotel_name: hotelCode,
+      title: recommendationTitle,
+      department: "Commercial",
+      finding: recommendationFinding,
+      hotel_id: hotelCode,
+      impact_value: Math.round((100 - avgMPI) * 120),
+      impact_type: "EUR",
+      is_repeat: false,
+      expected_impact_value: Math.round((100 - avgMPI) * 120),
+      status: "open",
+      period: period
+    };
+
+    console.log('STR v2 segment focus:', segmentFocus);
+    console.log('STR v2 segment reason:', segmentReason);
 
     const recRes = await fetch(`${supabaseUrl}/rest/v1/Recommendations`, {
       method: "POST",
@@ -155,57 +177,54 @@ const recommendation = {
       throw new Error(`Recommendation insert failed: ${recError}`);
     }
 
-let actions = [];
+    let actions = [];
 
-if (performancePosition === "outperforming") {
-  actions = [
-    "Protect ADR and avoid unnecessary discounting",
-    "Maintain visibility on high-performing channels",
-    "Focus on premium segments and upsell opportunities"
-  ];
-} else if (performancePosition === "underperforming") {
-  actions = [
-    "Increase OTA visibility and promotional exposure",
-    "Activate short-lead and local demand segments",
-    "Review channel mix and distribution strategy"
-  ];
-} else if (scenario === "market_down") {
-  actions = [
-    "Focus on demand stimulation rather than price reductions",
-    "Activate local and short-lead segments to capture limited demand",
-    "Optimize channel mix to maximize visibility in low-demand periods"
-  ];
-} else {
-  actions = [
-    "Adjust pricing strategy on low MPI dates to improve competitiveness",
-    "Strengthen conversion strategy across direct and OTA channels",
-    "Engage sales teams to reinforce base business and account production"
-  ];
-}
+    if (segmentFocus === "Retail") {
+      actions = [
+        "Review retail pricing position, OTA visibility, and digital conversion versus the comp set",
+        "Validate whether transient demand erosion is coming from price competitiveness, channel mix, or weaker pace",
+        "Launch a short-cycle retail recovery plan across revenue, marketing, and distribution teams"
+      ];
+    } else if (segmentFocus === "Negotiated") {
+      actions = [
+        "Review negotiated account production, contracted rate positioning, and displaced account opportunities",
+        "Validate whether the hotel is missing structural base demand from key corporate or government accounts",
+        "Build an account-recovery plan with sales leadership focused on top production gaps and dormant accounts"
+      ];
+    } else if (segmentFocus === "Groups") {
+      actions = [
+        "Review group base contribution, pipeline strength, and pace of conversion for upcoming need periods",
+        "Validate whether group support is protecting occupancy or whether reliance on group business is masking transient weakness",
+        "Align sales and revenue on a group optimization plan focused on need dates, conversion, and displacement quality"
+      ];
+    }
 
-for (const text of actions) {
-  await fetch(`${supabaseUrl}/rest/v1/actions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "apikey": supabaseKey,
-      "Authorization": `Bearer ${supabaseKey}`
-    },
-    body: JSON.stringify({
-      hotel_name: hotelCode,
-      action_text: text,
-      status: "open",
-      period: period
-    })
-  });
-}
+    for (const text of actions) {
+      await fetch(`${supabaseUrl}/rest/v1/actions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": supabaseKey,
+          "Authorization": `Bearer ${supabaseKey}`
+        },
+        body: JSON.stringify({
+          hotel_name: hotelCode,
+          title: recommendationTitle,
+          action_text: text,
+          status: "open",
+          expected_impact_value: Math.round((100 - avgMPI) * 120),
+          period: period
+        })
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      message: "COM-001 executed",
+      message: "COM-001 STR v2 executed",
       avgMPI,
       avgARI,
-      avgRGI
+      avgRGI,
+      segmentFocus
     });
   } catch (error) {
     console.error("Analyze error:", error);
