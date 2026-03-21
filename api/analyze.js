@@ -167,6 +167,8 @@ let recommendationFinding = `${diagnosisText} ${rootCauseText}`;
       expected_impact_value: Math.round((100 - avgMPI) * 120),
       status: "open",
       period: period
+      expected_impact_value: Math.round((100 - avgMPI) * 120),
+      root_cause: rootCauseText,
     };
 
 console.log('STR v2 segment focus:', segmentFocus);
