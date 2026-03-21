@@ -1,5 +1,4 @@
 import * as XLSX from 'xlsx';
-import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
   try {
