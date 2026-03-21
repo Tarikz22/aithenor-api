@@ -166,7 +166,7 @@ let recommendationFinding = `${diagnosisText} ${rootCauseText}`;
       is_repeat: false,
       expected_impact_value: Math.round((100 - avgMPI) * 120),
       status: "open",
-      period: period
+      period: period,
       expected_impact_value: Math.round((100 - avgMPI) * 120),
       root_cause: rootCauseText,
     };
