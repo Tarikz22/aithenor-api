@@ -35,20 +35,23 @@ if (dates.length > 0) {
       : `${format(minDate)} → ${format(maxDate)}`;
 }
 
-    let totalMPI = 0;
-    let totalARI = 0;
-    let totalRGI = 0;
-    let count = 0;
+let totalMPI = 0;
+let totalARI = 0;
+let totalRGI = 0;
+let totalCompOcc = 0;
+let count = 0;
 
     rawData.forEach((row) => {
       const mpi = parseFloat(row["__EMPTY_5"]);
       const ari = parseFloat(row["__EMPTY_11"]);
       const rgi = parseFloat(row["__EMPTY_17"]);
+      const compOcc = parseFloat(row["__EMPTY_2"]);
 
-      if (!isNaN(mpi) && !isNaN(ari) && !isNaN(rgi)) {
+      if (!isNaN(mpi) && !isNaN(ari) && !isNaN(rgi) && !isNaN(compOcc)) {
         totalMPI += mpi;
         totalARI += ari;
         totalRGI += rgi;
+        totalCompOcc += compOcc;
         count++;
       }
     });
@@ -63,6 +66,7 @@ if (dates.length > 0) {
     const avgMPI = totalMPI / count;
     const avgARI = totalARI / count;
     const avgRGI = totalRGI / count;
+    const avgCompOcc = totalCompOcc / count;
 
     // ===== SEVERITY =====
 let severity = "low";
@@ -82,15 +86,29 @@ else severity = "medium";
         avgRGI
       });
     }
+    // ===== SCENARIO =====
+let scenario = "unknown";
+
+if (avgCompOcc < 60) {
+  scenario = "market_down";
+} else {
+  scenario = "market_up";
+}
 
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const recommendation = {
   hotel_name: hotelCode,
-  title: `MPI underperformance (${Math.round(avgMPI)}) vs ARI (${Math.round(avgARI)})`,
+  title:
+    scenario === "market_down"
+      ? `Market softness detected (Comp Occ ${Math.round(avgCompOcc)}%)`
+      : `Hotel underperformance in strong market`,
   department: "Commercial",
-  finding: `Hotel is priced above market (ARI ${Math.round(avgARI)}) but under-indexing on demand (MPI ${Math.round(avgMPI)}), resulting in weak RGI (${Math.round(avgRGI)}).`,
+  finding:
+    scenario === "market_down"
+      ? `Market demand is weak (Comp Occ ${Math.round(avgCompOcc)}%), impacting occupancy. MPI (${Math.round(avgMPI)}) decline is driven by external demand conditions.`
+      : `Market demand is strong (Comp Occ ${Math.round(avgCompOcc)}%) but hotel under-indexes (MPI ${Math.round(avgMPI)}), indicating internal commercial inefficiencies.`,
   hotel_id: hotelCode,
   impact_value: Math.round((100 - avgMPI) * 120),
   impact_type: "EUR",
@@ -118,23 +136,17 @@ const recommendation = {
 
 let actions = [];
 
-if (severity === "critical") {
+if (scenario === "market_down") {
   actions = [
-    "Immediate pricing correction on all need dates (remove ADR premium)",
-    "Activate all demand channels (OTA, direct, partners) with tactical offers",
-    "Deploy sales blitz on top accounts to rebuild base occupancy"
-  ];
-} else if (severity === "high") {
-  actions = [
-    "Adjust pricing on low pickup dates and monitor elasticity",
-    "Launch short-term marketing campaigns targeting conversion segments",
-    "Engage key accounts to support weekday base demand"
+    "Focus on demand stimulation rather than price reductions",
+    "Activate local and short-lead segments to capture limited demand",
+    "Optimize channel mix to maximize visibility in low-demand periods"
   ];
 } else {
   actions = [
-    "Fine-tune pricing strategy on specific low-MPI dates",
-    "Monitor pace and adjust distribution exposure",
-    "Support demand through light tactical campaigns"
+    "Adjust pricing strategy on low MPI dates to improve competitiveness",
+    "Strengthen conversion strategy across direct and OTA channels",
+    "Engage sales teams to reinforce base business and account production"
   ];
 }
 
