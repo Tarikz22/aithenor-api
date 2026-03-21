@@ -10,6 +10,31 @@ module.exports = async function analyzeHandler(req, res) {
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rawData = XLSX.utils.sheet_to_json(sheet);
 
+    // ===== PERIOD EXTRACTION =====
+const dates = rawData
+  .map(row => row["AITHENOR — STR DAILY REPORT TEMPLATE"])
+  .filter(val => typeof val === "string" && val.includes("/"))
+  .map(d => {
+    const [day, month, year] = d.split("/");
+    return new Date(`${year}-${month}-${day}`);
+  })
+  .filter(d => !isNaN(d));
+
+let period = "unknown";
+
+if (dates.length > 0) {
+  const minDate = new Date(Math.min(...dates));
+  const maxDate = new Date(Math.max(...dates));
+
+  const format = (d) =>
+    `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth()+1).padStart(2, "0")}/${d.getFullYear()}`;
+
+  period =
+    minDate.getTime() === maxDate.getTime()
+      ? format(minDate)
+      : `${format(minDate)} → ${format(maxDate)}`;
+}
+
     let totalMPI = 0;
     let totalARI = 0;
     let totalRGI = 0;
@@ -39,6 +64,13 @@ module.exports = async function analyzeHandler(req, res) {
     const avgARI = totalARI / count;
     const avgRGI = totalRGI / count;
 
+    // ===== SEVERITY =====
+let severity = "low";
+
+if (avgMPI < 90) severity = "critical";
+else if (avgMPI < 95) severity = "high";
+else severity = "medium";
+
     const triggerMet = avgMPI < 100 && avgARI > 100;
 
     if (!triggerMet) {
@@ -54,19 +86,19 @@ module.exports = async function analyzeHandler(req, res) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    const recommendation = {
-      hotel_name: hotelCode,
-      title: "MPI underperformance with strong ADR positioning",
-      department: "Commercial",
-      finding: "Hotel is priced above market but failing to capture enough demand versus the comp set.",
-      hotel_id: hotelCode,
-      impact_value: Math.round((100 - avgMPI) * 100),
-      impact_type: "EUR",
-      is_repeat: false,
-      expected_impact_value: Math.round((100 - avgMPI) * 100),
-      status: "open",
-      period: "2026"
-    };
+const recommendation = {
+  hotel_name: hotelCode,
+  title: `MPI underperformance (${Math.round(avgMPI)}) vs ARI (${Math.round(avgARI)})`,
+  department: "Commercial",
+  finding: `Hotel is priced above market (ARI ${Math.round(avgARI)}) but under-indexing on demand (MPI ${Math.round(avgMPI)}), resulting in weak RGI (${Math.round(avgRGI)}).`,
+  hotel_id: hotelCode,
+  impact_value: Math.round((100 - avgMPI) * 120),
+  impact_type: "EUR",
+  is_repeat: false,
+  expected_impact_value: Math.round((100 - avgMPI) * 120),
+  status: "open",
+  period: period
+};
 
     const recRes = await fetch(`${supabaseUrl}/rest/v1/Recommendations`, {
       method: "POST",
@@ -84,52 +116,44 @@ module.exports = async function analyzeHandler(req, res) {
       throw new Error(`Recommendation insert failed: ${recError}`);
     }
 
-    const actions = [
-      {
-        hotel_name: hotelCode,
-        title: "Revenue action",
-        action_text: "Review BAR and fenced pricing on low-MPI dates to reduce unnecessary ADR premium.",
-        hotel_id: hotelCode,
-        expected_impact_value: 0,
-        status: "open",
-        period: "2026"
-      },
-      {
-        hotel_name: hotelCode,
-        title: "Marketing action",
-        action_text: "Activate short-lead campaigns on high-conversion channels to stimulate incremental demand.",
-        hotel_id: hotelCode,
-        expected_impact_value: 0,
-        status: "open",
-        period: "2026"
-      },
-      {
-        hotel_name: hotelCode,
-        title: "Sales action",
-        action_text: "Target priority accounts and local demand segments to reinforce base occupancy on need dates.",
-        hotel_id: hotelCode,
-        expected_impact_value: 0,
-        status: "open",
-        period: "2026"
-      }
-    ];
+let actions = [];
 
-    for (const action of actions) {
-      const actRes = await fetch(`${supabaseUrl}/rest/v1/actions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "apikey": supabaseKey,
-          "Authorization": `Bearer ${supabaseKey}`
-        },
-        body: JSON.stringify(action)
-      });
+if (severity === "critical") {
+  actions = [
+    "Immediate pricing correction on all need dates (remove ADR premium)",
+    "Activate all demand channels (OTA, direct, partners) with tactical offers",
+    "Deploy sales blitz on top accounts to rebuild base occupancy"
+  ];
+} else if (severity === "high") {
+  actions = [
+    "Adjust pricing on low pickup dates and monitor elasticity",
+    "Launch short-term marketing campaigns targeting conversion segments",
+    "Engage key accounts to support weekday base demand"
+  ];
+} else {
+  actions = [
+    "Fine-tune pricing strategy on specific low-MPI dates",
+    "Monitor pace and adjust distribution exposure",
+    "Support demand through light tactical campaigns"
+  ];
+}
 
-      if (!actRes.ok) {
-        const actError = await actRes.text();
-        throw new Error(`Action insert failed: ${actError}`);
-      }
-    }
+for (const text of actions) {
+  await fetch(`${supabaseUrl}/rest/v1/actions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": supabaseKey,
+      "Authorization": `Bearer ${supabaseKey}`
+    },
+    body: JSON.stringify({
+      hotel_name: hotelCode,
+      action_text: text,
+      status: "open",
+      period: period
+    })
+  });
+}
 
     return res.status(200).json({
       success: true,
