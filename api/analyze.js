@@ -209,27 +209,26 @@ if (segmentFocus === "Retail") {
       "Review channel visibility, parity, and share of voice across key booking windows",
       "Align marketing and distribution teams on a short-cycle visibility recovery plan to strengthen demand capture"
     ];
-  } else if (driverCategory === "conversion_channel_performance") {
+  } else {
     actions = [
       "Validate whether retail underperformance is linked to conversion inefficiency across direct and third-party channels",
       "Review website journey, booking engine friction, and channel conversion performance",
       "Align digital, marketing, and distribution teams on a short-cycle conversion improvement plan"
     ];
   }
+} else if (segmentFocus === "Negotiated") {
+  actions = [
+    "Review negotiated account production, contracted rate positioning, and displaced account opportunities",
+    "Validate whether the hotel is missing structural base demand from key corporate or government accounts",
+    "Build an account-recovery plan with sales leadership focused on top production gaps and dormant accounts"
+  ];
+} else if (segmentFocus === "Groups") {
+  actions = [
+    "Review group base contribution, pipeline strength, and pace of conversion for upcoming need periods",
+    "Validate whether group support is protecting occupancy or whether reliance on group business is masking transient weakness",
+    "Align sales and revenue on a group optimization plan focused on need dates, conversion, and displacement quality"
+  ];
 }
-    } else if (segmentFocus === "Negotiated") {
-      actions = [
-        "Review negotiated account production, contracted rate positioning, and displaced account opportunities",
-        "Validate whether the hotel is missing structural base demand from key corporate or government accounts",
-        "Build an account-recovery plan with sales leadership focused on top production gaps and dormant accounts"
-      ];
-    } else if (segmentFocus === "Groups") {
-      actions = [
-        "Review group base contribution, pipeline strength, and pace of conversion for upcoming need periods",
-        "Validate whether group support is protecting occupancy or whether reliance on group business is masking transient weakness",
-        "Align sales and revenue on a group optimization plan focused on need dates, conversion, and displacement quality"
-      ];
-    }
 
     for (const text of actions) {
       await fetch(`${supabaseUrl}/rest/v1/actions`, {
