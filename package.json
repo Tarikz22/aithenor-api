@@ -6,10 +6,11 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "xlsx": "^0.18.5",
+    "@anthropic-ai/sdk": "^0.27.3",
     "@supabase/supabase-js": "^2.45.0",
-    "express": "^4.19.2",
+    "axios": "^1.7.7",
     "cors": "^2.8.5",
-    "axios": "^1.7.7"
+    "express": "^4.19.2",
+    "xlsx": "^0.18.5"
   }
 }
