@@ -280,19 +280,19 @@ function buildDiagnosisText({ avgMPI, avgARI, avgRGI, driverCategory, segmentFoc
   const kpis = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
 
   if (driverCategory === 'pricing_positioning') {
-    return `${segmentFocus} is priced above market, with ARI at ${avgARI?.toFixed(1)}, while under-indexing occupancy, with MPI at ${avgMPI?.toFixed(1)}, resulting in RevPAR underperformance, with RGI at ${avgRGI?.toFixed(1)}. Current pricing strategy is not converting rate premium into market share.`;
+    return `${segmentFocus} is priced above market (${ariText}), but this premium is not translating into occupancy share, indicating a pricing-positioning imbalance.`;
   }
 
   if (driverCategory === 'visibility_demand_capture') {
-    return `${segmentFocus} performance indicates a demand capture issue. ${kpis}. Market visibility and channel demand conversion appear below potential.`;
+    return `${segmentFocus} shows weak demand capture despite available market opportunity. Visibility and share penetration are below potential relative to competitors.`;
   }
 
   if (driverCategory === 'conversion_channel_performance') {
-    return `${segmentFocus} performance indicates a conversion issue. ${kpis}. Available demand is not being converted efficiently into revenue share.`;
+    return `${segmentFocus} shows a conversion gap. ${kpis}. Available demand is not being efficiently converted into revenue share, indicating inefficiencies in channel or booking performance.`;
   }
 
   if (driverCategory === 'commercial_strategy_mix') {
-    return `${segmentFocus} performance indicates a commercial mix optimization opportunity. ${kpis}. Current segment approach may not be maximizing revenue contribution.`;
+    return `${segmentFocus} shows a commercial mix optimization opportunity. ${kpis}. Current segment strategy is not maximizing revenue contribution or market share potential.`;
   }
 
   return `${segmentFocus} performance shows a commercial opportunity. ${kpis}.`;
