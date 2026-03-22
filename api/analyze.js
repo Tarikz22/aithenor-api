@@ -280,7 +280,7 @@ function buildDiagnosisText({ avgMPI, avgARI, avgRGI, driverCategory, segmentFoc
   const kpis = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
 
   if (driverCategory === 'pricing_positioning') {
-    return `${segmentFocus} is priced above market (ARI ${avgARI?.toFixed(1)}) while under-indexing occupancy (MPI ${avgMPI?.toFixed(1)}), resulting in RevPAR underperformance (RGI ${avgRGI?.toFixed(1)}). Current pricing strategy is not converting rate premium into market share.`;
+    return `${segmentFocus} is priced above market, with ARI at ${avgARI?.toFixed(1)}, while under-indexing occupancy, with MPI at ${avgMPI?.toFixed(1)}, resulting in RevPAR underperformance, with RGI at ${avgRGI?.toFixed(1)}. Current pricing strategy is not converting rate premium into market share.`;
   }
 
   if (driverCategory === 'visibility_demand_capture') {
