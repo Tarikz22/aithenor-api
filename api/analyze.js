@@ -344,7 +344,7 @@ async function composeExecutiveNarrative(input) {
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-latest',
+      model: 'claude-3-sonnet-20240229',
       max_tokens: 500,
       messages: [
         {
@@ -480,18 +480,13 @@ async function handler(req, res) {
     const expectedOutcome =
       aiNarrative?.expectedOutcome || 'Improve share capture and strengthen retail commercial performance.';
 
-    const recommendationPayload = {
-      hotel_name: hotelCode,
-      period,
-      title,
-      finding_title: title,
-      finding: `Retail driver identified: ${driverCategory}`,
-      diagnosis: `Average RGI ${avgRGI.toFixed(1)} | Average ARI ${avgARI.toFixed(1)} | Driver ${driverCategory}`,
-      root_cause: finalRootCause,
-      expected_outcome: expectedOutcome,
-      department: block.department,
-      priority: block.priority
-    };
+const recommendationPayload = {
+  hotel_name: hotelCode,
+  period,
+  title,
+  root_cause: finalRootCause,
+  expected_outcome: expectedOutcome
+};
 
     const { error: recommendationError } = await supabase
       .from('Recommendations')
@@ -501,16 +496,12 @@ async function handler(req, res) {
       throw recommendationError;
     }
 
-    const actionsPayload = finalActions.map(actionText => ({
-      hotel_name: hotelCode,
-      period,
-      title,
-      action: actionText,
-      action_text: actionText,
-      expected_outcome: expectedOutcome,
-      owner_department: block.department,
-      urgency: block.priority
-    }));
+const actionsPayload = finalActions.map(actionText => ({
+  hotel_name: hotelCode,
+  period,
+  title,
+  action: actionText
+}));
 
     const { error: actionsError } = await supabase
       .from('actions')
