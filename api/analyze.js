@@ -1,22 +1,21 @@
-import { createClient } from '@supabase/supabase-js';
-import Anthropic from '@anthropic-ai/sdk';
-import * as XLSX from 'xlsx';
+const { createClient } = require('@supabase/supabase-js');
+const Anthropic = require('@anthropic-ai/sdk');
+const XLSX = require('xlsx');
+const axios = require('axios');
 
 // --------------------
 // INIT
 // --------------------
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  throw new Error("Missing Supabase environment variables");
+  throw new Error('Missing Supabase environment variables');
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const anthropic = anthropicApiKey ? new Anthropic({ apiKey: anthropicApiKey }) : null;
 
 // --------------------
 // LIBRARY (v3.2 CORE)
@@ -24,121 +23,373 @@ const anthropic = new Anthropic({
 const library = {
   Retail: {
     pricing_positioning: {
+      department: 'Revenue',
+      priority: 'high',
       root_causes: [
-        "Price positioning above comp set without corresponding demand support or share performance",
-        "Pricing approach not fully aligned with current demand elasticity and booking pace patterns",
-        "Rate strategy prioritizing ADR stability over occupancy penetration and market share capture",
-        "Yield management not fully optimized across peak and need periods, limiting compression benefits",
-        "Pricing decisions not consistently aligned with demand cycles, reflecting gaps in demand anticipation"
+        'Price positioning above comp set without corresponding demand support or share performance',
+        'Pricing approach not fully aligned with current demand elasticity and booking pace patterns',
+        'Rate strategy prioritizing ADR stability over occupancy penetration and market share capture',
+        'Yield management not fully optimized across peak and need periods, limiting compression benefits',
+        'Pricing decisions not consistently aligned with demand cycles, reflecting gaps in demand anticipation'
       ],
       actions: [
-        "Adjust pricing corridors dynamically across need and compression periods to improve share capture",
-        "Recalibrate rate positioning against key competitors across booking windows and demand levels",
-        "Optimize suite and room category pricing hierarchy to strengthen overall revenue contribution"
+        'Adjust pricing corridors dynamically across need and compression periods to improve share capture',
+        'Recalibrate rate positioning against key competitors across booking windows and demand levels',
+        'Optimize suite and room category pricing hierarchy to strengthen overall revenue contribution'
       ]
     },
 
     visibility_demand_capture: {
+      department: 'Revenue & Marketing',
+      priority: 'high',
       root_causes: [
-        "Limited visibility across key distribution channels impacting overall demand capture",
-        "Digital presence not fully optimized to generate qualified traffic and brand exposure",
-        "Brand.com content and offer presentation not sufficiently compelling to drive direct demand"
+        'Limited visibility across key distribution channels impacting overall demand capture',
+        'Digital presence not fully optimized to generate qualified traffic and brand exposure',
+        'Brand.com content and offer presentation not sufficiently compelling to drive direct demand'
       ],
       actions: [
-        "Strengthen OTA positioning and visibility across high-impact booking windows",
-        "Enhance digital marketing effectiveness through targeted campaigns and optimized budget allocation",
-        "Improve Brand.com content, storytelling, and offer visibility to support direct channel performance"
+        'Strengthen OTA positioning and visibility across high-impact booking windows',
+        'Enhance digital marketing effectiveness through targeted campaigns and optimized budget allocation',
+        'Improve Brand.com content, storytelling, and offer visibility to support direct channel performance'
       ]
     },
 
     conversion_channel_performance: {
+      department: 'Revenue & Marketing',
+      priority: 'high',
       root_causes: [
-        "Conversion performance below potential across key distribution channels despite available demand",
-        "Booking journey friction impacting user experience and limiting conversion efficiency"
+        'Conversion performance below potential across key distribution channels despite available demand',
+        'Booking journey friction impacting user experience and limiting conversion efficiency'
       ],
       actions: [
-        "Optimize booking engine and website journey to reduce drop-off and improve conversion rates",
-        "Conduct structured channel performance reviews to identify and address conversion gaps"
+        'Optimize booking engine and website journey to reduce drop-off and improve conversion rates',
+        'Conduct structured channel performance reviews to identify and address conversion gaps'
       ]
     },
 
-commercial_strategy_mix: {
-  root_causes: [
-    "Current segment mix is not aligned with revenue optimization opportunities"
-  ],
-  actions: [
-    "Rebalance segment mix toward higher contribution segments",
-    "Refine commercial strategy to align with demand patterns and profitability drivers",
-    "Conduct structured segment performance reviews to identify optimization opportunities"
-  ]
-}
+    commercial_strategy_mix: {
+      department: 'Commercial',
+      priority: 'high',
+      root_causes: [
+        'Current segment mix is not aligned with revenue optimization opportunities'
+      ],
+      actions: [
+        'Rebalance segment mix toward higher contribution segments',
+        'Refine commercial strategy to align with demand patterns and profitability drivers',
+        'Conduct structured segment performance reviews to identify optimization opportunities'
+      ]
+    }
   }
 };
 
 // --------------------
-// HELPER FUNCTIONS
+// HELPERS
 // --------------------
+function normalizeKey(value) {
+  return (value || '')
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
 function getRandomItem(array) {
   return array[Math.floor(Math.random() * array.length)];
 }
 
 function getMultipleRandomItems(array, count = 2) {
-  const shuffled = [...array].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, count);
+  const pool = [...array];
+  const selected = [];
+
+  while (pool.length && selected.length < count) {
+    const index = Math.floor(Math.random() * pool.length);
+    selected.push(pool.splice(index, 1)[0]);
+  }
+
+  return selected;
 }
 
-// --------------------
-// CLAUDE FUNCTION
-// --------------------
+function findSheetByAliases(workbook, aliases) {
+  const names = workbook.SheetNames || [];
+  const normalizedMap = new Map(names.map(name => [normalizeKey(name), name]));
+
+  for (const alias of aliases) {
+    const exact = normalizedMap.get(normalizeKey(alias));
+    if (exact) return exact;
+  }
+
+  for (const name of names) {
+    const normalizedName = normalizeKey(name);
+    if (aliases.some(alias => normalizedName.includes(normalizeKey(alias)))) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+function getSheetRows(workbook, aliases) {
+  const sheetName = findSheetByAliases(workbook, aliases);
+  if (!sheetName) {
+    return [];
+  }
+
+  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: null });
+}
+
+function getRowValue(row, candidateKeys) {
+  if (!row || typeof row !== 'object') return undefined;
+
+  const entries = Object.entries(row);
+  for (const candidate of candidateKeys) {
+    const normalizedCandidate = normalizeKey(candidate);
+    const match = entries.find(([key]) => normalizeKey(key) === normalizedCandidate);
+    if (match && match[1] !== null && match[1] !== undefined && `${match[1]}`.trim() !== '') {
+      return match[1];
+    }
+  }
+
+  for (const candidate of candidateKeys) {
+    const normalizedCandidate = normalizeKey(candidate);
+    const partial = entries.find(([key]) => normalizeKey(key).includes(normalizedCandidate));
+    if (partial && partial[1] !== null && partial[1] !== undefined && `${partial[1]}`.trim() !== '') {
+      return partial[1];
+    }
+  }
+
+  return undefined;
+}
+
+function toNumber(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const cleaned = value
+    .toString()
+    .replace(/,/g, '')
+    .replace(/%/g, '')
+    .trim();
+
+  if (!cleaned) return null;
+
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function averageMetric(rows, candidateKeys) {
+  const values = rows
+    .map(row => toNumber(getRowValue(row, candidateKeys)))
+    .filter(value => value !== null);
+
+  if (!values.length) return null;
+
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function parseExcelDate(value) {
+  if (!value && value !== 0) return null;
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
+    }
+  }
+
+  const parsedDate = new Date(value);
+  if (!Number.isNaN(parsedDate.getTime())) {
+    return parsedDate;
+  }
+
+  return null;
+}
+
+function extractPeriodLabel(strRows) {
+  const candidateDates = strRows
+    .map(row => getRowValue(row, ['Date', 'Business Date', 'Stay Date', 'Day', 'Report Date']))
+    .map(parseExcelDate)
+    .filter(Boolean)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  if (!candidateDates.length) {
+    return new Date().toISOString().slice(0, 7);
+  }
+
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'UTC'
+  });
+
+  return `${formatter.format(candidateDates[0])} → ${formatter.format(candidateDates[candidateDates.length - 1])}`;
+}
+
+function deriveDriverCategory(avgRGI, avgARI) {
+  if (avgRGI === null || avgARI === null) {
+    return 'pricing_positioning';
+  }
+
+  if (avgRGI < 100 && avgARI > 100) {
+    return 'pricing_positioning';
+  }
+
+  if (avgRGI < 100 && avgARI < 100) {
+    return 'visibility_demand_capture';
+  }
+
+  if (avgRGI >= 100 && avgARI < 100) {
+    return 'conversion_channel_performance';
+  }
+
+  return 'commercial_strategy_mix';
+}
+
+function deriveMixSignal(pmsRows) {
+  if (!pmsRows.length) return 'PMS segment mix signal not available';
+
+  const retailRows = pmsRows.filter(row => {
+    const segment = normalizeKey(
+      getRowValue(row, ['Segment', 'Market Segment', 'Business Segment', 'Segment Name'])
+    );
+    return segment.includes('retail') || segment.includes('transient');
+  });
+
+  if (!retailRows.length) return 'Retail segment mix not isolated in PMS sheet';
+
+  const totalRevenue = retailRows.reduce((sum, row) => {
+    return sum + (toNumber(getRowValue(row, ['Revenue', 'Room Revenue', 'Rooms Revenue'])) || 0);
+  }, 0);
+
+  const yoy = averageMetric(retailRows, ['YoY', 'YOY', 'Revenue YoY', 'Revenue % Change']);
+
+  const parts = [];
+  if (totalRevenue > 0) {
+    parts.push(`Retail revenue observed in PMS extract: ${Math.round(totalRevenue)}`);
+  }
+  if (yoy !== null) {
+    parts.push(`Retail YoY signal: ${yoy.toFixed(1)}%`);
+  }
+
+  return parts.length ? parts.join(' | ') : 'Retail segment mix signal available but limited';
+}
+
+function deriveTargetSignal(profileRows) {
+  if (!profileRows.length) return 'Hotel profile targets not available';
+
+  const firstRow = profileRows[0];
+  const occupancyTarget = toNumber(getRowValue(firstRow, ['Target Occupancy', 'Occupancy Target']));
+  const adrTarget = toNumber(getRowValue(firstRow, ['Target ADR', 'ADR Target']));
+  const revparTarget = toNumber(getRowValue(firstRow, ['Target RevPAR', 'RevPAR Target']));
+
+  const parts = [];
+  if (occupancyTarget !== null) parts.push(`Occupancy target ${occupancyTarget}`);
+  if (adrTarget !== null) parts.push(`ADR target ${adrTarget}`);
+  if (revparTarget !== null) parts.push(`RevPAR target ${revparTarget}`);
+
+  return parts.length ? parts.join(' | ') : 'Hotel profile targets present but not readable';
+}
+
+function parseClaudeJson(rawText) {
+  if (!rawText) return null;
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    const start = rawText.indexOf('{');
+    const end = rawText.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(rawText.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
 async function composeExecutiveNarrative(input) {
+  if (!anthropic) {
+    return null;
+  }
+
   try {
     const response = await anthropic.messages.create({
-      model: "claude-3-sonnet-20240229",
+      model: 'claude-3-5-sonnet-latest',
       max_tokens: 500,
       messages: [
         {
-          role: "user",
+          role: 'user',
           content: `
 You are a senior hotel commercial strategist.
 
-Rewrite the following into an executive-level recommendation.
+Rewrite the recommendation below into precise executive language.
+Do not invent new facts.
+Use the provided KPI signals when relevant.
 
-Constraints:
-- Be concise
-- Be specific
-- Reference KPIs when relevant
-- Keep a strategic tone
+Return valid JSON only with this schema:
+{
+  "title": "string",
+  "rootCause": "string",
+  "actions": ["string", "string"],
+  "expectedOutcome": "string"
+}
 
-INPUT:
+Input:
 Driver: ${input.driver}
 Segment: ${input.segment}
+Department: ${input.department}
+Priority: ${input.priority}
+Average RGI: ${input.avgRGI ?? 'n/a'}
+Average ARI: ${input.avgARI ?? 'n/a'}
+Mix Signal: ${input.mixSignal}
+Target Signal: ${input.targetSignal}
+Context: ${input.context || 'None'}
 
 Root Cause:
 ${input.rootCauseText}
 
 Actions:
-${input.actions.join("\n")}
-
-Signals:
-Mix: ${input.mixSignal}
-Targets: ${input.targetSignal}
-
-OUTPUT FORMAT:
-Title:
-Root Cause:
-Actions:
-Expected Outcome:
+${input.actions.join('\n')}
 `
         }
       ]
     });
 
-    return response.content[0].text;
-
+    const rawText = response.content?.[0]?.text || '';
+    return parseClaudeJson(rawText);
   } catch (error) {
-    console.error("Claude error:", error);
+    console.error('Claude error:', error);
     return null;
   }
+}
+
+async function getWorkbookFromRequest(req) {
+  const fileUrl = req.body?.fileUrl;
+  if (!fileUrl) {
+    throw new Error('Missing fileUrl in request body');
+  }
+
+  const downloadResponse = await axios.get(fileUrl, {
+    responseType: 'arraybuffer',
+    timeout: 30000,
+    maxContentLength: 15 * 1024 * 1024,
+    maxBodyLength: 15 * 1024 * 1024
+  });
+
+  return XLSX.read(Buffer.from(downloadResponse.data), { type: 'buffer' });
 }
 
 // --------------------
@@ -146,120 +397,124 @@ Expected Outcome:
 // --------------------
 async function handler(req, res) {
   try {
-if (!req.files || !req.files.file) {
-  return res.status(400).json({ error: 'No file uploaded' });
-}
+    const hotelCode = (req.body?.hotelCode || 'Unknown Hotel').toString().trim();
+    const context = (req.body?.context || '').toString().trim();
 
-const file = req.files.file;
-const workbook = XLSX.read(file.data);
+    const workbook = await getWorkbookFromRequest(req);
 
-    // --------------------
-    // BASIC KPI EXTRACTION (SIMPLIFIED)
-    // --------------------
-    const strSheet = XLSX.utils.sheet_to_json(workbook.Sheets["STR"]);
+    const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
+    const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
+    const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
 
-    const avgRGI = strSheet.reduce((acc, row) => acc + (row.RGI || 0), 0) / strSheet.length;
-    const avgARI = strSheet.reduce((acc, row) => acc + (row.ARI || 0), 0) / strSheet.length;
-
-    let driverCategory = "pricing_positioning";
-
-    if (avgRGI < 100 && avgARI > 100) {
-      driverCategory = "pricing_positioning";
-    } else if (avgRGI < 100 && avgARI < 100) {
-      driverCategory = "visibility_demand_capture";
-    } else if (avgRGI >= 100 && avgARI < 100) {
-      driverCategory = "conversion_channel_performance";
+    if (!strRows.length) {
+      return res.status(400).json({ error: 'STR sheet not found or empty' });
     }
 
-    const segmentFocus = "Retail";
+    const avgRGI = averageMetric(strRows, ['RGI', 'RevPAR Index']);
+    const avgARI = averageMetric(strRows, ['ARI', 'ADR Index']);
 
-    // --------------------
-    // LIBRARY SELECTION
-    // --------------------
-    const block = library[segmentFocus][driverCategory];
+    if (avgRGI === null || avgARI === null) {
+      return res.status(400).json({ error: 'Required STR KPI columns (RGI/ARI) were not found' });
+    }
 
-let rootCauseText;
-let actions;
+    const period = extractPeriodLabel(strRows);
+    const driverCategory = deriveDriverCategory(avgRGI, avgARI);
+    const segmentFocus = 'Retail';
+    const block = library[segmentFocus]?.[driverCategory];
 
-if (driverCategory === "commercial_strategy_mix") {
-  // Action-driven logic
-  rootCauseText = block.root_causes[0]; // fixed context
-  actions = getMultipleRandomItems(block.actions, 2);
+    if (!block) {
+      throw new Error(`Library block not found for ${segmentFocus}/${driverCategory}`);
+    }
 
-} else {
-  // Standard logic
-  rootCauseText = getRandomItem(block.root_causes);
-  actions = getMultipleRandomItems(block.actions, 2);
-}
+    const rootCauseText =
+      driverCategory === 'commercial_strategy_mix'
+        ? block.root_causes[0]
+        : getRandomItem(block.root_causes);
 
-    console.log("v3.2 root cause:", rootCauseText);
-    console.log("v3.2 actions:", actions);
+    const actions = getMultipleRandomItems(block.actions, Math.min(2, block.actions.length));
 
-    // --------------------
-    // CLAUDE ENRICHMENT
-    // --------------------
-    const aiResponse = await composeExecutiveNarrative({
+    const mixSignal = deriveMixSignal(pmsRows);
+    const targetSignal = deriveTargetSignal(profileRows);
+
+    console.log('v3.2 driver:', driverCategory);
+    console.log('v3.2 root cause seed:', rootCauseText);
+    console.log('v3.2 selected actions:', actions);
+
+    const aiNarrative = await composeExecutiveNarrative({
       rootCauseText,
       actions,
       driver: driverCategory,
       segment: segmentFocus,
-      mixSignal: "balanced",
-      targetSignal: "below target"
+      department: block.department,
+      priority: block.priority,
+      avgRGI: Number(avgRGI.toFixed(2)),
+      avgARI: Number(avgARI.toFixed(2)),
+      mixSignal,
+      targetSignal,
+      context
     });
 
-    let title = "Revenue Opportunity Identified";
-    let finalRootCause = rootCauseText;
-    let finalActions = actions;
-    let expectedOutcome = "Improve performance vs comp set";
+    const title = aiNarrative?.title || 'Retail revenue opportunity identified';
+    const finalRootCause = aiNarrative?.rootCause || rootCauseText;
+    const finalActions =
+      Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
+        ? aiNarrative.actions.slice(0, 3)
+        : actions;
+    const expectedOutcome =
+      aiNarrative?.expectedOutcome || 'Improve share capture and strengthen retail commercial performance.';
 
-    if (aiResponse) {
-      const parts = aiResponse.split("\n");
+    const recommendationPayload = {
+      hotel_name: hotelCode,
+      period,
+      title,
+      finding_title: title,
+      finding: `Retail driver identified: ${driverCategory}`,
+      diagnosis: `Average RGI ${avgRGI.toFixed(1)} | Average ARI ${avgARI.toFixed(1)} | Driver ${driverCategory}`,
+      root_cause: finalRootCause,
+      expected_outcome: expectedOutcome,
+      department: block.department,
+      priority: block.priority
+    };
 
-      title = parts.find(p => p.startsWith("Title:"))?.replace("Title:", "").trim() || title;
-      finalRootCause = parts.find(p => p.startsWith("Root Cause:"))?.replace("Root Cause:", "").trim() || rootCauseText;
-      expectedOutcome = parts.find(p => p.startsWith("Expected Outcome:"))?.replace("Expected Outcome:", "").trim() || expectedOutcome;
+    const { error: recommendationError } = await supabase
+      .from('Recommendations')
+      .insert([recommendationPayload]);
 
-      finalActions = parts
-        .filter(p => p.startsWith("-"))
-        .map(a => a.replace("-", "").trim());
-
-      if (finalActions.length === 0) finalActions = actions;
+    if (recommendationError) {
+      throw recommendationError;
     }
 
-    // --------------------
-    // SAVE TO SUPABASE
-    // --------------------
-    await supabase.from("Recommendations").insert([
-      {
-        hotel_name: "Demo Hotel",
-        period: "Test",
-        title,
-        diagnosis: driverCategory,
-        root_cause: finalRootCause,
-        expected_outcome: expectedOutcome,
-      }
-    ]);
+    const actionsPayload = finalActions.map(actionText => ({
+      hotel_name: hotelCode,
+      period,
+      title,
+      action: actionText,
+      action_text: actionText,
+      expected_outcome: expectedOutcome,
+      owner_department: block.department,
+      urgency: block.priority
+    }));
 
-    for (const action of finalActions) {
-      await supabase.from("Actions").insert([
-        {
-          hotel_name: "Demo Hotel",
-          period: "Test",
-          title,
-          action
-        }
-      ]);
+    const { error: actionsError } = await supabase
+      .from('actions')
+      .insert(actionsPayload);
+
+    if (actionsError) {
+      throw actionsError;
     }
 
-    res.status(200).json({
-      message: "v3.2 completed",
+    return res.status(200).json({
+      message: 'v3.2 completed',
+      hotelCode,
+      period,
       driver: driverCategory
     });
-
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Processing failed" });
+    console.error('Analyze handler error:', error);
+    return res.status(500).json({
+      error: error.message || 'Processing failed'
+    });
   }
 }
 
-export default handler;
+module.exports = handler;
