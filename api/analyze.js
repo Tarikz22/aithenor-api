@@ -144,7 +144,7 @@ Expected Outcome:
 // --------------------
 // MAIN HANDLER
 // --------------------
-export default async function handler(req, res) {
+async function handler(req, res) {
   try {
     const file = req.files.file;
     const workbook = XLSX.read(file.data);
@@ -257,3 +257,4 @@ if (driverCategory === "commercial_strategy_mix") {
     res.status(500).json({ error: "Processing failed" });
   }
 }
+module.exports = handler;
