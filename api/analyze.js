@@ -272,6 +272,72 @@ function deriveDriverCategory(avgRGI, avgARI) {
   return 'commercial_strategy_mix';
 }
 
+function buildDiagnosisText({ avgMPI, avgARI, avgRGI, driverCategory, segmentFocus }) {
+  const mpiText = avgMPI !== null ? `MPI is ${avgMPI.toFixed(1)}` : null;
+  const ariText = avgARI !== null ? `ARI is ${avgARI.toFixed(1)}` : null;
+  const rgiText = avgRGI !== null ? `RGI is ${avgRGI.toFixed(1)}` : null;
+
+  const kpis = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
+
+  if (driverCategory === 'pricing_positioning') {
+    return `${segmentFocus} performance indicates a pricing-positioning issue. ${kpis}. Current rate premium is not translating into sufficient share capture.`;
+  }
+
+  if (driverCategory === 'visibility_demand_capture') {
+    return `${segmentFocus} performance indicates a demand capture issue. ${kpis}. Market visibility and channel demand conversion appear below potential.`;
+  }
+
+  if (driverCategory === 'conversion_channel_performance') {
+    return `${segmentFocus} performance indicates a conversion issue. ${kpis}. Available demand is not being converted efficiently into revenue share.`;
+  }
+
+  if (driverCategory === 'commercial_strategy_mix') {
+    return `${segmentFocus} performance indicates a commercial mix optimization opportunity. ${kpis}. Current segment approach may not be maximizing revenue contribution.`;
+  }
+
+  return `${segmentFocus} performance shows a commercial opportunity. ${kpis}.`;
+}
+
+function buildDynamicTitle({ driverCategory, segmentFocus, avgMPI, avgARI, avgRGI }) {
+  if (driverCategory === 'pricing_positioning') {
+    return `${segmentFocus} Pricing Positioning — Occupancy Share Leakage in Soft Market`;
+  }
+
+  if (driverCategory === 'visibility_demand_capture') {
+    return `${segmentFocus} Demand Capture Gap — Visibility and Traffic Underperformance`;
+  }
+
+  if (driverCategory === 'conversion_channel_performance') {
+    return `${segmentFocus} Conversion Efficiency Issue — Demand Not Translating into Revenue`;
+  }
+
+  if (driverCategory === 'commercial_strategy_mix') {
+    return `${segmentFocus} Commercial Mix Opportunity — Segment Strategy Misalignment`;
+  }
+
+  return `${segmentFocus} Revenue Opportunity Identified`;
+}
+
+function buildExpectedOutcome({ driverCategory, segmentFocus }) {
+  if (driverCategory === 'pricing_positioning') {
+    return `Improve ${segmentFocus.toLowerCase()} occupancy penetration, strengthen RevPAR index performance, and recover share without unnecessary ADR dilution.`;
+  }
+
+  if (driverCategory === 'visibility_demand_capture') {
+    return `Increase qualified demand capture across key channels and improve ${segmentFocus.toLowerCase()} revenue contribution.`;
+  }
+
+  if (driverCategory === 'conversion_channel_performance') {
+    return `Improve conversion efficiency, reduce demand leakage, and strengthen revenue capture from existing traffic.`;
+  }
+
+  if (driverCategory === 'commercial_strategy_mix') {
+    return `Improve revenue quality through better segment balance and stronger alignment with profitable demand opportunities.`;
+  }
+
+  return `Strengthen ${segmentFocus.toLowerCase()} commercial performance.`;
+}
+
 function deriveMixSignal(pmsRows) {
   if (!pmsRows.length) return 'PMS segment mix signal not available';
 
@@ -429,6 +495,7 @@ async function handler(req, res) {
 
     const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index', 'RevPAR Index (RGI)']);
     const avgARI = averageMetric(strRows, ['ARI', 'ARI (Index)', 'ADR Index', 'ADR Index (ARI)']);
+    const avgMPI = averageMetric(strRows, ['MPI', 'MPI (Index)', 'Occupancy Index', 'Occ Index']);
 
     if (avgRGI === null || avgARI === null) {
       return res.status(400).json({ error: 'Required STR KPI columns (RGI/ARI) were not found' });
@@ -471,21 +538,46 @@ async function handler(req, res) {
       context
     });
 
-    const title = aiNarrative?.title || 'Retail revenue opportunity identified';
-    const finalRootCause = aiNarrative?.rootCause || rootCauseText;
-    const finalActions =
-      Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
-        ? aiNarrative.actions.slice(0, 3)
-        : actions;
-    const expectedOutcome =
-      aiNarrative?.expectedOutcome || 'Improve share capture and strengthen retail commercial performance.';
+const diagnosisText = buildDiagnosisText({
+  avgMPI,
+  avgARI,
+  avgRGI,
+  driverCategory,
+  segmentFocus
+});
+
+const title =
+  aiNarrative?.title ||
+  buildDynamicTitle({
+    driverCategory,
+    segmentFocus,
+    avgMPI,
+    avgARI,
+    avgRGI
+  });
+
+const finalRootCause = aiNarrative?.rootCause || rootCauseText;
+
+const finalActions =
+  Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
+    ? aiNarrative.actions.slice(0, 3)
+    : actions;
+
+const expectedOutcome =
+  aiNarrative?.expectedOutcome ||
+  buildExpectedOutcome({
+    driverCategory,
+    segmentFocus
+  });
 
 const recommendationPayload = {
   hotel_name: hotelCode,
   period,
   title,
+  finding: diagnosisText,
   root_cause: finalRootCause,
-  expected_outcome: expectedOutcome
+  expected_outcome: expectedOutcome,
+  category: block.department
 };
 
     const { error: recommendationError } = await supabase
