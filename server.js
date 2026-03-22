@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const fileUpload = require('express-fileupload');
 const analyzeModule = require('./api/analyze');
 const analyzeHandler = analyzeModule.default || analyzeModule;
 
@@ -17,6 +18,11 @@ app.use(cors({
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: '10mb' }));
+
+app.use(fileUpload({
+  useTempFiles: false,
+  limits: { fileSize: 10 * 1024 * 1024 }
+}));
 
 app.post('/api/analyze', (req, res) => analyzeHandler(req, res));
 
