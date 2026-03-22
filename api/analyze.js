@@ -257,4 +257,5 @@ if (driverCategory === "commercial_strategy_mix") {
     res.status(500).json({ error: "Processing failed" });
   }
 }
-module.exports = handler;
+
+export default handler;
