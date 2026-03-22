@@ -146,8 +146,12 @@ Expected Outcome:
 // --------------------
 async function handler(req, res) {
   try {
-    const file = req.files.file;
-    const workbook = XLSX.read(file.data);
+if (!req.files || !req.files.file) {
+  return res.status(400).json({ error: 'No file uploaded' });
+}
+
+const file = req.files.file;
+const workbook = XLSX.read(file.data);
 
     // --------------------
     // BASIC KPI EXTRACTION (SIMPLIFIED)
