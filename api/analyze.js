@@ -280,7 +280,7 @@ function buildDiagnosisText({ avgMPI, avgARI, avgRGI, driverCategory, segmentFoc
   const kpis = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
 
   if (driverCategory === 'pricing_positioning') {
-    return `${segmentFocus} performance indicates a pricing-positioning issue. ${kpis}. Current rate premium is not translating into sufficient share capture.`;
+    return `${segmentFocus} is priced above market (ARI ${avgARI?.toFixed(1)}) while under-indexing occupancy (MPI ${avgMPI?.toFixed(1)}), resulting in RevPAR underperformance (RGI ${avgRGI?.toFixed(1)}). Current pricing strategy is not converting rate premium into market share.`;
   }
 
   if (driverCategory === 'visibility_demand_capture') {
