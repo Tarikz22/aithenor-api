@@ -500,7 +500,7 @@ const actionsPayload = finalActions.map(actionText => ({
   hotel_name: hotelCode,
   period,
   title,
-  action: actionText
+  action_text: actionText
 }));
 
     const { error: actionsError } = await supabase
