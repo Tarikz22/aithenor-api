@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const analyzeHandler = require('./api/analyze');
+const analyzeModule = require('./api/analyze');
+const analyzeHandler = analyzeModule.default || analyzeModule;
 
 const app = express();
 
