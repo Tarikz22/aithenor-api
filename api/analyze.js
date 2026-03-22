@@ -577,7 +577,7 @@ const recommendationPayload = {
   finding: diagnosisText,
   root_cause: finalRootCause,
   expected_outcome: expectedOutcome,
-  category: block.department
+  owner_department: block.department
 };
 
     const { error: recommendationError } = await supabase
