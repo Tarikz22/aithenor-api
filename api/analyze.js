@@ -135,7 +135,24 @@ function getSheetRows(workbook, aliases) {
     return [];
   }
 
-  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: null });
+  const sheet = workbook.Sheets[sheetName];
+
+  const rowsDefault = XLSX.utils.sheet_to_json(sheet, { defval: null });
+  const rowsOffset3 = XLSX.utils.sheet_to_json(sheet, { range: 3, defval: null });
+
+  const hasKpiHeaders = (rows) => {
+    if (!rows.length) return false;
+    const keys = Object.keys(rows[0]).map(normalizeKey);
+    return (
+      keys.some(k => k.includes('rgi')) &&
+      keys.some(k => k.includes('ari'))
+    );
+  };
+
+  if (hasKpiHeaders(rowsDefault)) return rowsDefault;
+  if (hasKpiHeaders(rowsOffset3)) return rowsOffset3;
+
+  return rowsDefault.length ? rowsDefault : rowsOffset3;
 }
 
 function getRowValue(row, candidateKeys) {
@@ -410,8 +427,8 @@ async function handler(req, res) {
       return res.status(400).json({ error: 'STR sheet not found or empty' });
     }
 
-    const avgRGI = averageMetric(strRows, ['RGI', 'RevPAR Index']);
-    const avgARI = averageMetric(strRows, ['ARI', 'ADR Index']);
+    const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index', 'RevPAR Index (RGI)']);
+    const avgARI = averageMetric(strRows, ['ARI', 'ARI (Index)', 'ADR Index', 'ADR Index (ARI)']);
 
     if (avgRGI === null || avgARI === null) {
       return res.status(400).json({ error: 'Required STR KPI columns (RGI/ARI) were not found' });
