@@ -287,14 +287,56 @@ function buildDynamicTitle({ driverCategory, segmentFocus }) {
   return `${segmentFocus} Revenue Opportunity Identified`;
 }
 
-function buildActionTexts({ driverCategory, segmentFocus = 'Retail' }) {
-  const block = library[segmentFocus]?.[driverCategory] || library.Retail?.[driverCategory];
-  if (!block) return ['Conduct a structured review of the commercial performance gap and define corrective actions.'];
-  const key = `${driverCategory}_${segmentFocus}`;
-const first = getDeterministicItem(block.actions, key);
-const second = getDeterministicItem(block.actions, key + '_2');
+function buildActionTexts({ driverCategory, segmentFocus = 'Retail', mpi, ari, rgi }) {
+  const actions = [];
 
-return [first, second].filter(Boolean);
+  // Pricing
+  if (driverCategory === 'pricing_positioning') {
+    if (ari !== null && ari > 105 && rgi !== null && rgi < 100) {
+      actions.push(
+        `Reduce BAR positioning in short booking windows (0–7 days) by approximately 5–10% on low-demand days to stimulate occupancy recovery and improve market share.`,
+        `Recalibrate pricing corridors by day type, ensuring weekday pricing aligns more closely with market levels while protecting peak demand periods.`
+      );
+    } else {
+      actions.push(
+        `Introduce more dynamic pricing adjustments by booking window and demand pattern to improve competitiveness without unnecessary ADR dilution.`,
+        `Review room category price hierarchy to strengthen upsell logic while improving base-category conversion.`
+      );
+    }
+  }
+
+  // Visibility
+  if (driverCategory === 'visibility_demand_capture') {
+    if (mpi !== null && mpi < 95) {
+      actions.push(
+        `Increase OTA and metasearch exposure in high-impact booking windows (0–14 days), focusing on visibility boosts and competitive positioning.`,
+        `Strengthen digital campaigns targeting high-intent demand segments, optimizing creatives and offers to improve qualified traffic.`
+      );
+    } else {
+      actions.push(
+        `Optimize distribution mix and channel visibility to improve demand capture efficiency across key booking periods.`,
+        `Enhance Brand.com merchandising, including packages and call-to-action clarity, to support direct demand generation.`
+      );
+    }
+  }
+
+  // Conversion
+  if (driverCategory === 'conversion_channel_performance') {
+    actions.push(
+      `Audit booking journey across key channels to identify friction points and improve conversion rates.`,
+      `Align channel mix and pricing parity to ensure optimal conversion across direct and indirect channels.`
+    );
+  }
+
+  // Mix
+  if (driverCategory === 'commercial_strategy_mix') {
+    actions.push(
+      `Rebalance segment and channel focus toward higher-contribution demand segments based on current market conditions.`,
+      `Conduct a structured performance review by segment and booking window to refine targeting and pricing strategy.`
+    );
+  }
+
+  return actions;
 }
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
