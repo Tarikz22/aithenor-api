@@ -177,13 +177,49 @@ function mapDriverToOwner(driverCategory, segmentFocus = 'Retail') {
   return library[segmentFocus]?.[driverCategory]?.department || 'Commercial';
 }
 
-function buildRootCauseText({ driverCategory, segmentFocus = 'Retail' }) {
-  const block = library[segmentFocus]?.[driverCategory] || library.Retail?.[driverCategory];
-  if (!block) {
-    return 'A commercial performance gap has been identified and requires structured review.';
+function buildRootCauseText({ driverCategory, segmentFocus = 'Retail', mpi, ari, rgi }) {
+  const demandCondition =
+    (mpi !== null && mpi < 95) ? 'soft demand' :
+    (mpi !== null && mpi > 105) ? 'strong demand' :
+    'normal demand';
+
+  // PRICING
+  if (driverCategory === 'pricing_positioning') {
+    if (ari !== null && ari > 105 && rgi !== null && rgi < 100) {
+      return `Rate positioning is maintained above market levels during ${demandCondition}, without sufficient demand support, limiting occupancy recovery and share capture.`;
+    }
+
+    if (ari !== null && ari > 100 && mpi !== null && mpi < 100) {
+      return `Pricing strategy is protecting ADR despite weak demand signals (${demandCondition}), creating resistance to occupancy recovery and reducing competitive positioning.`;
+    }
+
+    return `Pricing structure lacks dynamic adjustment to market conditions, limiting the ability to capture incremental demand and optimize share performance.`;
   }
-  const key = `${driverCategory}_${segmentFocus}`;
-return getDeterministicItem(block.root_causes, key);
+
+  // VISIBILITY
+  if (driverCategory === 'visibility_demand_capture') {
+    if (mpi !== null && mpi < 95) {
+      return `Market visibility and demand penetration are significantly below potential in ${demandCondition}, indicating insufficient exposure or weak channel performance relative to competitors.`;
+    }
+
+    return `The property is not capturing its fair share of available demand, suggesting gaps in distribution, digital visibility, or demand generation strategy.`;
+  }
+
+  // CONVERSION
+  if (driverCategory === 'conversion_channel_performance') {
+    if (rgi !== null && rgi < 100 && mpi !== null && mpi > 100) {
+      return `Available demand is present (${demandCondition}), but not efficiently converted into revenue share, indicating booking path friction or channel inefficiencies.`;
+    }
+
+    return `Conversion performance is below potential, with demand not fully translating into revenue due to channel mix or booking experience limitations.`;
+  }
+
+  // MIX
+  if (driverCategory === 'commercial_strategy_mix') {
+    return `Commercial strategy is not optimally aligned with current market conditions (${demandCondition}), limiting revenue contribution and overall performance efficiency.`;
+  }
+
+  return `A commercial performance gap has been identified requiring structured review.`;
 }
 
 function buildExpectedOutcomeText({ driverCategory, segmentFocus }) {
