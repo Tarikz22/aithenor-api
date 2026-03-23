@@ -923,7 +923,7 @@ recommendations.sort((a, b) => {
     if (recommendationError) {
       throw recommendationError;
     }
-
+console.log('DEBUG finalRecommendations sample:', JSON.stringify(finalRecommendations[0], null, 2));
 const actionsPayload = finalRecommendations.flatMap(item =>
   (item.actions || []).map(actionText => ({
     hotel_name: item.hotel_name,
@@ -938,6 +938,8 @@ const actionsPayload = finalRecommendations.flatMap(item =>
     action_text: actionText
   }))
 );
+    console.log('DEBUG actionsPayload length:', actionsPayload.length);
+console.log('DEBUG first action row:', JSON.stringify(actionsPayload[0] || null, null, 2));
     console.log('AITHENOR DEBUG - finalRecommendations count:', finalRecommendations.length);
 console.log(
   'AITHENOR DEBUG - recommendations with actions:',
@@ -949,7 +951,9 @@ console.log('AITHENOR DEBUG - first actions payload row:', actionsPayload[0] || 
     if (actionsPayload.length > 0) {
       const { error: actionsError } = await supabase
         .from('actions')
+        console.log('DEBUG inserting into actions table...');
         .insert(actionsPayload);
+      console.log('DEBUG actions insert result:', JSON.stringify({ error: actionsError, count: actionsPayload.length }, null, 2));
 
       if (actionsError) {
         throw actionsError;
