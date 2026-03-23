@@ -18,7 +18,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const anthropic = anthropicApiKey ? new Anthropic({ apiKey: anthropicApiKey }) : null;
 
 // --------------------
-// LIBRARY (v3.2 CORE)
+// LIBRARY
 // --------------------
 const library = {
   Retail: {
@@ -26,16 +26,14 @@ const library = {
       department: 'Revenue',
       priority: 'high',
       root_causes: [
-        'Price positioning above comp set without corresponding demand support or share performance',
-        'Pricing approach not fully aligned with current demand elasticity and booking pace patterns',
-        'Rate strategy prioritizing ADR stability over occupancy penetration and market share capture',
-        'Yield management not fully optimized across peak and need periods, limiting compression benefits',
-        'Pricing decisions not consistently aligned with demand cycles, reflecting gaps in demand anticipation'
+        'Rate positioning remains above market despite insufficient demand support, limiting occupancy recovery and market share capture.',
+        'Pricing strategy is maintaining ADR protection in periods where stronger occupancy penetration is required.',
+        'Rate corridors appear too rigid against market conditions, reducing share capture in softer demand periods.'
       ],
       actions: [
-        'Adjust pricing corridors dynamically across need and compression periods to improve share capture',
-        'Recalibrate rate positioning against key competitors across booking windows and demand levels',
-        'Optimize suite and room category pricing hierarchy to strengthen overall revenue contribution'
+        'Adjust BAR positioning in short booking windows (0–7 days) to align more closely with market conditions and stimulate occupancy recovery.',
+        'Recalibrate pricing corridors by day type and demand pattern to improve competitiveness without unnecessary ADR dilution.',
+        'Review room category price hierarchy to strengthen upsell logic while protecting base-category conversion.'
       ]
     },
 
@@ -43,14 +41,14 @@ const library = {
       department: 'Revenue & Marketing',
       priority: 'high',
       root_causes: [
-        'Limited visibility across key distribution channels impacting overall demand capture',
-        'Digital presence not fully optimized to generate qualified traffic and brand exposure',
-        'Brand.com content and offer presentation not sufficiently compelling to drive direct demand'
+        'Market visibility and demand penetration are below potential, indicating insufficient exposure relative to competitors.',
+        'The property is not capturing enough qualified demand despite available market opportunity.',
+        'Distribution and digital visibility appear insufficient to convert available market demand into occupancy share.'
       ],
       actions: [
-        'Strengthen OTA positioning and visibility across high-impact booking windows',
-        'Enhance digital marketing effectiveness through targeted campaigns and optimized budget allocation',
-        'Improve Brand.com content, storytelling, and offer visibility to support direct channel performance'
+        'Strengthen OTA and metasearch visibility in high-impact booking windows to improve demand capture.',
+        'Refine digital campaign targeting and offer presentation to improve qualified traffic acquisition.',
+        'Improve Brand.com merchandising, package visibility, and call-to-action clarity to support direct demand generation.'
       ]
     },
 
@@ -58,12 +56,14 @@ const library = {
       department: 'Revenue & Marketing',
       priority: 'high',
       root_causes: [
-        'Conversion performance below potential across key distribution channels despite available demand',
-        'Booking journey friction impacting user experience and limiting conversion efficiency'
+        'Available demand is not being efficiently converted into revenue share, indicating channel or booking-path inefficiencies.',
+        'Traffic and demand appear present, but booking conversion is underperforming relative to market opportunity.',
+        'The booking journey is likely creating friction that limits conversion efficiency and revenue capture.'
       ],
       actions: [
-        'Optimize booking engine and website journey to reduce drop-off and improve conversion rates',
-        'Conduct structured channel performance reviews to identify and address conversion gaps'
+        'Audit booking engine conversion performance and remove friction points across the reservation path.',
+        'Review channel contribution and conversion by source to identify leakage in high-demand periods.',
+        'Strengthen offer clarity, urgency triggers, and parity discipline to improve conversion from existing traffic.'
       ]
     },
 
@@ -71,12 +71,14 @@ const library = {
       department: 'Commercial',
       priority: 'high',
       root_causes: [
-        'Current segment mix is not aligned with revenue optimization opportunities'
+        'The current commercial mix is not fully aligned with the highest-value demand opportunities.',
+        'Segment strategy appears misaligned with market conditions, limiting optimal revenue contribution.',
+        'Commercial focus is not sufficiently concentrated on the segments and tactics with the strongest share potential.'
       ],
       actions: [
-        'Rebalance segment mix toward higher contribution segments',
-        'Refine commercial strategy to align with demand patterns and profitability drivers',
-        'Conduct structured segment performance reviews to identify optimization opportunities'
+        'Rebalance segment focus toward demand pockets with stronger contribution and conversion potential.',
+        'Review commercial strategy by segment and booking window to align effort with market opportunity.',
+        'Conduct a structured segment performance review to refine targeting, pricing, and channel priorities.'
       ]
     }
   }
@@ -94,11 +96,23 @@ function normalizeKey(value) {
     .replace(/\s+/g, ' ');
 }
 
+function getMetricFromRow(row, possibleKeys) {
+  for (const key of possibleKeys) {
+    if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
+      const value = parseFloat(row[key]);
+      if (!Number.isNaN(value)) return value;
+    }
+  }
+  return null;
+}
+
 function getRandomItem(array) {
+  if (!Array.isArray(array) || !array.length) return null;
   return array[Math.floor(Math.random() * array.length)];
 }
 
 function getMultipleRandomItems(array, count = 2) {
+  if (!Array.isArray(array) || !array.length) return [];
   const pool = [...array];
   const selected = [];
 
@@ -108,6 +122,168 @@ function getMultipleRandomItems(array, count = 2) {
   }
 
   return selected;
+}
+
+function computePriority(rgi, mpi) {
+  if ((rgi !== null && rgi < 90) || (mpi !== null && mpi < 90)) return 'High';
+  if ((rgi !== null && rgi < 100) || (mpi !== null && mpi < 100)) return 'Medium';
+  return 'Low';
+}
+
+function deriveDriverCategory(mpi, ari, rgi) {
+  if (rgi === null || ari === null) {
+    return 'pricing_positioning';
+  }
+
+  if (rgi < 100 && ari > 100) {
+    return 'pricing_positioning';
+  }
+
+  if (rgi < 100 && ari < 100) {
+    return 'visibility_demand_capture';
+  }
+
+  if (rgi >= 100 && ari < 100) {
+    return 'conversion_channel_performance';
+  }
+
+  return 'commercial_strategy_mix';
+}
+
+function mapDriverToOwner(driverCategory, segmentFocus = 'Retail') {
+  return library[segmentFocus]?.[driverCategory]?.department || 'Commercial';
+}
+
+function buildRootCauseText({ driverCategory, segmentFocus = 'Retail' }) {
+  const block = library[segmentFocus]?.[driverCategory] || library.Retail?.[driverCategory];
+  if (!block) {
+    return 'A commercial performance gap has been identified and requires structured review.';
+  }
+  return getRandomItem(block.root_causes);
+}
+
+function buildExpectedOutcomeText({ driverCategory, segmentFocus }) {
+  if (driverCategory === 'pricing_positioning') {
+    return `Improve ${segmentFocus.toLowerCase()} occupancy penetration, strengthen RevPAR index performance, and recover market share with more responsive pricing.`;
+  }
+
+  if (driverCategory === 'visibility_demand_capture') {
+    return `Increase qualified demand capture across key channels and improve ${segmentFocus.toLowerCase()} revenue contribution.`;
+  }
+
+  if (driverCategory === 'conversion_channel_performance') {
+    return 'Improve conversion efficiency, reduce demand leakage, and strengthen revenue capture from existing traffic.';
+  }
+
+  if (driverCategory === 'commercial_strategy_mix') {
+    return 'Improve revenue quality through stronger segment balance and better alignment with profitable demand opportunities.';
+  }
+
+  return `Strengthen ${segmentFocus.toLowerCase()} commercial performance.`;
+}
+
+function buildDiagnosisText({ mpi, ari, rgi, driverCategory, segmentFocus }) {
+  const mpiText = mpi !== null ? `MPI is ${mpi.toFixed(1)}` : null;
+  const ariText = ari !== null ? `ARI is ${ari.toFixed(1)}` : null;
+  const rgiText = rgi !== null ? `RGI is ${rgi.toFixed(1)}` : null;
+  const kpis = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
+
+  if (driverCategory === 'pricing_positioning') {
+    return `${segmentFocus} is holding a price premium versus the market (${ariText}), but this is not converting into sufficient share performance (${rgiText}), indicating a pricing-positioning imbalance.`;
+  }
+
+  if (driverCategory === 'visibility_demand_capture') {
+    return `${segmentFocus} is underpenetrating available demand. ${kpis}. Market visibility and share capture appear below potential relative to competitors.`;
+  }
+
+  if (driverCategory === 'conversion_channel_performance') {
+    return `${segmentFocus} shows a conversion efficiency gap. ${kpis}. Available demand is not being translated into proportional revenue share.`;
+  }
+
+  if (driverCategory === 'commercial_strategy_mix') {
+    return `${segmentFocus} shows a commercial mix optimization opportunity. ${kpis}. Current strategy is not maximizing revenue contribution or market share potential.`;
+  }
+
+  return `${segmentFocus} performance shows a commercial opportunity. ${kpis}.`;
+}
+
+function buildDynamicTitle({ driverCategory, segmentFocus }) {
+  if (driverCategory === 'pricing_positioning') {
+    return `${segmentFocus} Pricing Positioning — Occupancy Share Leakage`;
+  }
+
+  if (driverCategory === 'visibility_demand_capture') {
+    return `${segmentFocus} Demand Capture Gap — Visibility Underperformance`;
+  }
+
+  if (driverCategory === 'conversion_channel_performance') {
+    return `${segmentFocus} Conversion Efficiency Issue — Demand Not Translating into Revenue`;
+  }
+
+  if (driverCategory === 'commercial_strategy_mix') {
+    return `${segmentFocus} Commercial Mix Opportunity — Strategy Misalignment`;
+  }
+
+  return `${segmentFocus} Revenue Opportunity Identified`;
+}
+
+function buildActionTexts({ driverCategory, segmentFocus = 'Retail' }) {
+  const block = library[segmentFocus]?.[driverCategory] || library.Retail?.[driverCategory];
+  if (!block) return ['Conduct a structured review of the commercial performance gap and define corrective actions.'];
+  return getMultipleRandomItems(block.actions, Math.min(2, block.actions.length));
+}
+
+function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
+  const driverCategory = opportunity.driver;
+  const segmentFocus = opportunity.segment || 'Retail';
+  const priority = computePriority(opportunity.rgi, opportunity.mpi);
+
+  return {
+    hotel_name: hotelName,
+    period,
+    title: buildDynamicTitle({
+      driverCategory,
+      segmentFocus,
+      mpi: opportunity.mpi ?? null,
+      ari: opportunity.ari ?? null,
+      rgi: opportunity.rgi ?? null
+    }),
+    finding: buildDiagnosisText({
+      mpi: opportunity.mpi ?? null,
+      ari: opportunity.ari ?? null,
+      rgi: opportunity.rgi ?? null,
+      driverCategory,
+      segmentFocus
+    }),
+    root_cause: buildRootCauseText({
+      driverCategory,
+      segmentFocus,
+      mpi: opportunity.mpi ?? null,
+      ari: opportunity.ari ?? null,
+      rgi: opportunity.rgi ?? null
+    }),
+    expected_outcome: buildExpectedOutcomeText({
+      driverCategory,
+      segmentFocus,
+      mpi: opportunity.mpi ?? null,
+      ari: opportunity.ari ?? null,
+      rgi: opportunity.rgi ?? null
+    }),
+    owner_department: mapDriverToOwner(driverCategory, segmentFocus),
+    priority,
+    driver: driverCategory,
+    segment: segmentFocus,
+    mpi: opportunity.mpi ?? null,
+    ari: opportunity.ari ?? null,
+    rgi: opportunity.rgi ?? null,
+    actions: buildActionTexts({
+      driverCategory,
+      segmentFocus,
+      mpi: opportunity.mpi ?? null,
+      ari: opportunity.ari ?? null,
+      rgi: opportunity.rgi ?? null
+    })
+  };
 }
 
 function findSheetByAliases(workbook, aliases) {
@@ -143,10 +319,7 @@ function getSheetRows(workbook, aliases) {
   const hasKpiHeaders = (rows) => {
     if (!rows.length) return false;
     const keys = Object.keys(rows[0]).map(normalizeKey);
-    return (
-      keys.some(k => k.includes('rgi')) &&
-      keys.some(k => k.includes('ari'))
-    );
+    return keys.some(k => k.includes('rgi')) && keys.some(k => k.includes('ari'));
   };
 
   if (hasKpiHeaders(rowsDefault)) return rowsDefault;
@@ -187,12 +360,7 @@ function toNumber(value) {
     return null;
   }
 
-  const cleaned = value
-    .toString()
-    .replace(/,/g, '')
-    .replace(/%/g, '')
-    .trim();
-
+  const cleaned = value.toString().replace(/,/g, '').replace(/%/g, '').trim();
   if (!cleaned) return null;
 
   const parsed = Number(cleaned);
@@ -250,92 +418,6 @@ function extractPeriodLabel(strRows) {
   });
 
   return `${formatter.format(candidateDates[0])} → ${formatter.format(candidateDates[candidateDates.length - 1])}`;
-}
-
-function deriveDriverCategory(avgRGI, avgARI) {
-  if (avgRGI === null || avgARI === null) {
-    return 'pricing_positioning';
-  }
-
-  if (avgRGI < 100 && avgARI > 100) {
-    return 'pricing_positioning';
-  }
-
-  if (avgRGI < 100 && avgARI < 100) {
-    return 'visibility_demand_capture';
-  }
-
-  if (avgRGI >= 100 && avgARI < 100) {
-    return 'conversion_channel_performance';
-  }
-
-  return 'commercial_strategy_mix';
-}
-
-function buildDiagnosisText({ avgMPI, avgARI, avgRGI, driverCategory, segmentFocus }) {
-  const mpiText = avgMPI !== null ? `MPI is ${avgMPI.toFixed(1)}` : null;
-  const ariText = avgARI !== null ? `ARI is ${avgARI.toFixed(1)}` : null;
-  const rgiText = avgRGI !== null ? `RGI is ${avgRGI.toFixed(1)}` : null;
-
-  const kpis = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
-
-  if (driverCategory === 'pricing_positioning') {
-    return `${segmentFocus} is priced above market (${ariText}), but this premium is not translating into occupancy share, indicating a pricing-positioning imbalance.`;
-  }
-
-  if (driverCategory === 'visibility_demand_capture') {
-    return `${segmentFocus} shows weak demand capture despite available market opportunity. Visibility and share penetration are below potential relative to competitors.`;
-  }
-
-  if (driverCategory === 'conversion_channel_performance') {
-    return `${segmentFocus} shows a conversion gap. ${kpis}. Available demand is not being efficiently converted into revenue share, indicating inefficiencies in channel or booking performance.`;
-  }
-
-  if (driverCategory === 'commercial_strategy_mix') {
-    return `${segmentFocus} shows a commercial mix optimization opportunity. ${kpis}. Current segment strategy is not maximizing revenue contribution or market share potential.`;
-  }
-
-  return `${segmentFocus} performance shows a commercial opportunity. ${kpis}.`;
-}
-
-function buildDynamicTitle({ driverCategory, segmentFocus, avgMPI, avgARI, avgRGI }) {
-  if (driverCategory === 'pricing_positioning') {
-    return `${segmentFocus} Pricing Positioning — Occupancy Share Leakage in Soft Market`;
-  }
-
-  if (driverCategory === 'visibility_demand_capture') {
-    return `${segmentFocus} Demand Capture Gap — Visibility and Traffic Underperformance`;
-  }
-
-  if (driverCategory === 'conversion_channel_performance') {
-    return `${segmentFocus} Conversion Efficiency Issue — Demand Not Translating into Revenue`;
-  }
-
-  if (driverCategory === 'commercial_strategy_mix') {
-    return `${segmentFocus} Commercial Mix Opportunity — Segment Strategy Misalignment`;
-  }
-
-  return `${segmentFocus} Revenue Opportunity Identified`;
-}
-
-function buildExpectedOutcome({ driverCategory, segmentFocus }) {
-  if (driverCategory === 'pricing_positioning') {
-    return `Improve ${segmentFocus.toLowerCase()} occupancy penetration, strengthen RevPAR index performance, and recover share without unnecessary ADR dilution.`;
-  }
-
-  if (driverCategory === 'visibility_demand_capture') {
-    return `Increase qualified demand capture across key channels and improve ${segmentFocus.toLowerCase()} revenue contribution.`;
-  }
-
-  if (driverCategory === 'conversion_channel_performance') {
-    return `Improve conversion efficiency, reduce demand leakage, and strengthen revenue capture from existing traffic.`;
-  }
-
-  if (driverCategory === 'commercial_strategy_mix') {
-    return `Improve revenue quality through better segment balance and stronger alignment with profitable demand opportunities.`;
-  }
-
-  return `Strengthen ${segmentFocus.toLowerCase()} commercial performance.`;
 }
 
 function deriveMixSignal(pmsRows) {
@@ -435,8 +517,9 @@ Driver: ${input.driver}
 Segment: ${input.segment}
 Department: ${input.department}
 Priority: ${input.priority}
-Average RGI: ${input.avgRGI ?? 'n/a'}
-Average ARI: ${input.avgARI ?? 'n/a'}
+RGI: ${input.rgi ?? 'n/a'}
+ARI: ${input.ari ?? 'n/a'}
+MPI: ${input.mpi ?? 'n/a'}
 Mix Signal: ${input.mixSignal}
 Target Signal: ${input.targetSignal}
 Context: ${input.context || 'None'}
@@ -493,121 +576,171 @@ async function handler(req, res) {
       return res.status(400).json({ error: 'STR sheet not found or empty' });
     }
 
-    const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index', 'RevPAR Index (RGI)']);
-    const avgARI = averageMetric(strRows, ['ARI', 'ARI (Index)', 'ADR Index', 'ADR Index (ARI)']);
-    const avgMPI = averageMetric(strRows, ['MPI', 'MPI (Index)', 'Occupancy Index', 'Occ Index']);
+    const rowKpis = strRows.map((row, index) => {
+      const rgi = getMetricFromRow(row, ['RGI', 'RGI (Index)', 'RevPAR Index', 'RevPAR Index (RGI)']);
+      const ari = getMetricFromRow(row, ['ARI', 'ARI (Index)', 'ADR Index', 'ADR Index (ARI)']);
+      const mpi = getMetricFromRow(row, ['MPI', 'MPI (Index)', 'Occupancy Index', 'Occ Index']);
 
-    if (avgRGI === null || avgARI === null) {
+      return {
+        rowIndex: index,
+        row,
+        rgi,
+        ari,
+        mpi
+      };
+    });
+
+    const validRowKpis = rowKpis.filter(item => item.rgi !== null && item.ari !== null);
+
+    if (validRowKpis.length === 0) {
       return res.status(400).json({ error: 'Required STR KPI columns (RGI/ARI) were not found' });
     }
 
+    const opportunities = validRowKpis
+      .filter(item => item.rgi < 100 || item.mpi < 100 || item.ari > 100)
+      .map(item => {
+        const driver = deriveDriverCategory(item.mpi, item.ari, item.rgi);
+
+        return {
+          rowIndex: item.rowIndex,
+          segment: item.row?.segment || item.row?.Segment || item.row?.SEGMENT || 'Retail',
+          mpi: item.mpi,
+          ari: item.ari,
+          rgi: item.rgi,
+          driver,
+          row: item.row
+        };
+      });
+
     const period = extractPeriodLabel(strRows);
-    const driverCategory = deriveDriverCategory(avgRGI, avgARI);
-    const segmentFocus = 'Retail';
-    const block = library[segmentFocus]?.[driverCategory];
 
-    if (!block) {
-      throw new Error(`Library block not found for ${segmentFocus}/${driverCategory}`);
+    let recommendations = opportunities
+      .slice(0, 5)
+      .map(opportunity => buildRecommendationFromOpportunity(opportunity, hotelCode, period));
+
+    const priorityOrder = { High: 1, Medium: 2, Low: 3 };
+
+    recommendations.sort((a, b) => {
+      return (priorityOrder[a.priority] || 99) - (priorityOrder[b.priority] || 99);
+    });
+
+    if (recommendations.length === 0) {
+      recommendations = [
+        {
+          hotel_name: hotelCode,
+          period,
+          title: 'Performance Aligned with Market Benchmarks',
+          finding: 'Current performance is broadly aligned with market benchmarks, with no material KPI underperformance detected in the uploaded dataset.',
+          root_cause: 'No major pricing, visibility, or conversion gap was identified in the current reporting view.',
+          expected_outcome: 'Maintain current commercial discipline while monitoring for emerging shifts in market share, pricing power, and conversion performance.',
+          owner_department: 'Commercial',
+          priority: 'Low',
+          driver: 'commercial_strategy_mix',
+          segment: 'All Segments',
+          mpi: null,
+          ari: null,
+          rgi: null,
+          actions: ['Maintain current commercial discipline and continue monitoring market shifts.']
+        }
+      ];
     }
-
-    const rootCauseText =
-      driverCategory === 'commercial_strategy_mix'
-        ? block.root_causes[0]
-        : getRandomItem(block.root_causes);
-
-    const actions = getMultipleRandomItems(block.actions, Math.min(2, block.actions.length));
 
     const mixSignal = deriveMixSignal(pmsRows);
     const targetSignal = deriveTargetSignal(profileRows);
 
-    console.log('v3.2 driver:', driverCategory);
-    console.log('v3.2 root cause seed:', rootCauseText);
-    console.log('v3.2 selected actions:', actions);
+    const finalRecommendations = [];
 
-    const aiNarrative = await composeExecutiveNarrative({
-      rootCauseText,
-      actions,
-      driver: driverCategory,
-      segment: segmentFocus,
-      department: block.department,
-      priority: block.priority,
-      avgRGI: Number(avgRGI.toFixed(2)),
-      avgARI: Number(avgARI.toFixed(2)),
-      mixSignal,
-      targetSignal,
-      context
-    });
+    for (const recommendation of recommendations) {
+      const aiNarrative = await composeExecutiveNarrative({
+        rootCauseText: recommendation.root_cause,
+        actions: recommendation.actions,
+        driver: recommendation.driver,
+        segment: recommendation.segment,
+        department: recommendation.owner_department,
+        priority: recommendation.priority,
+        rgi: recommendation.rgi !== null && recommendation.rgi !== undefined
+          ? Number(recommendation.rgi.toFixed(2))
+          : null,
+        ari: recommendation.ari !== null && recommendation.ari !== undefined
+          ? Number(recommendation.ari.toFixed(2))
+          : null,
+        mpi: recommendation.mpi !== null && recommendation.mpi !== undefined
+          ? Number(recommendation.mpi.toFixed(2))
+          : null,
+        mixSignal,
+        targetSignal,
+        context
+      });
 
-const diagnosisText = buildDiagnosisText({
-  avgMPI,
-  avgARI,
-  avgRGI,
-  driverCategory,
-  segmentFocus
-});
+      finalRecommendations.push({
+        ...recommendation,
+        title: aiNarrative?.title || recommendation.title,
+        root_cause: aiNarrative?.rootCause || recommendation.root_cause,
+        expected_outcome: aiNarrative?.expectedOutcome || recommendation.expected_outcome,
+        actions:
+          Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
+            ? aiNarrative.actions.slice(0, 3)
+            : recommendation.actions
+      });
+    }
 
-const title =
-  aiNarrative?.title ||
-  buildDynamicTitle({
-    driverCategory,
-    segmentFocus,
-    avgMPI,
-    avgARI,
-    avgRGI
-  });
-
-const finalRootCause = aiNarrative?.rootCause || rootCauseText;
-
-const finalActions =
-  Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
-    ? aiNarrative.actions.slice(0, 3)
-    : actions;
-
-const expectedOutcome =
-  aiNarrative?.expectedOutcome ||
-  buildExpectedOutcome({
-    driverCategory,
-    segmentFocus
-  });
-
-const recommendationPayload = {
-  hotel_name: hotelCode,
-  period,
-  title,
-  finding: diagnosisText,
-  root_cause: finalRootCause,
-  expected_outcome: expectedOutcome,
-  owner_department: block.department
-};
+    const recommendationsPayload = finalRecommendations.map(item => ({
+      hotel_name: item.hotel_name,
+      period: item.period,
+      title: item.title,
+      finding: item.finding,
+      root_cause: item.root_cause,
+      expected_outcome: item.expected_outcome,
+      owner_department: item.owner_department
+    }));
 
     const { error: recommendationError } = await supabase
       .from('Recommendations')
-      .insert([recommendationPayload]);
+      .insert(recommendationsPayload);
 
     if (recommendationError) {
       throw recommendationError;
     }
 
-const actionsPayload = finalActions.map(actionText => ({
-  hotel_name: hotelCode,
-  period,
-  title,
-  action_text: actionText
-}));
+    const actionsPayload = finalRecommendations.flatMap(item =>
+      (item.actions || []).map(actionText => ({
+        hotel_name: item.hotel_name,
+        period: item.period,
+        title: item.title,
+        action_text: actionText
+      }))
+    );
 
-    const { error: actionsError } = await supabase
-      .from('actions')
-      .insert(actionsPayload);
+    if (actionsPayload.length > 0) {
+      const { error: actionsError } = await supabase
+        .from('actions')
+        .insert(actionsPayload);
 
-    if (actionsError) {
-      throw actionsError;
+      if (actionsError) {
+        throw actionsError;
+      }
     }
 
     return res.status(200).json({
-      message: 'v3.2 completed',
+      message: 'v3.3 completed',
       hotelCode,
       period,
-      driver: driverCategory
+      recommendations: finalRecommendations.map(item => ({
+        hotel_name: item.hotel_name,
+        period: item.period,
+        title: item.title,
+        finding: item.finding,
+        root_cause: item.root_cause,
+        expected_outcome: item.expected_outcome,
+        owner_department: item.owner_department,
+        priority: item.priority,
+        driver: item.driver,
+        segment: item.segment,
+        mpi: item.mpi,
+        ari: item.ari,
+        rgi: item.rgi,
+        actions: item.actions
+      }))
     });
   } catch (error) {
     console.error('Analyze handler error:', error);
