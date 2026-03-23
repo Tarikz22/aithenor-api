@@ -124,9 +124,19 @@ function getMultipleRandomItems(array, count = 2) {
   return selected;
 }
 
-function computePriority(rgi, mpi) {
-  if ((rgi !== null && rgi < 90) || (mpi !== null && mpi < 90)) return 'High';
-  if ((rgi !== null && rgi < 100) || (mpi !== null && mpi < 100)) return 'Medium';
+function computePriority(rgi, mpi, ari) {
+  if (
+    (rgi !== null && rgi < 90) ||
+    (mpi !== null && mpi < 90) ||
+    (ari !== null && ari > 120)
+  ) return 'High';
+
+  if (
+    (rgi !== null && rgi < 100) ||
+    (mpi !== null && mpi < 100) ||
+    (ari !== null && ari > 105)
+  ) return 'Medium';
+
   return 'Low';
 }
 
@@ -209,7 +219,7 @@ function buildDiagnosisText({ mpi, ari, rgi, driverCategory, segmentFocus }) {
 
 function buildDynamicTitle({ driverCategory, segmentFocus }) {
   if (driverCategory === 'pricing_positioning') {
-    return `${segmentFocus} Pricing Positioning — Occupancy Share Leakage`;
+    return `${segmentFocus} Pricing Inefficiency — Share Loss vs Market`;
   }
 
   if (driverCategory === 'visibility_demand_capture') {
@@ -614,15 +624,31 @@ async function handler(req, res) {
 
     const period = extractPeriodLabel(strRows);
 
-    let recommendations = opportunities
-      .slice(0, 5)
-      .map(opportunity => buildRecommendationFromOpportunity(opportunity, hotelCode, period));
+let recommendations = opportunities
+  .map(opportunity => buildRecommendationFromOpportunity(opportunity, hotelCode, period));
 
-    const priorityOrder = { High: 1, Medium: 2, Low: 3 };
+/* 🔥 REMOVE DUPLICATES HERE */
+const uniqueRecommendationsMap = new Map();
 
-    recommendations.sort((a, b) => {
-      return (priorityOrder[a.priority] || 99) - (priorityOrder[b.priority] || 99);
-    });
+recommendations.forEach(rec => {
+  const key = `${rec.driver}_${rec.segment}`;
+
+  if (!uniqueRecommendationsMap.has(key)) {
+    uniqueRecommendationsMap.set(key, rec);
+  }
+});
+
+recommendations = Array.from(uniqueRecommendationsMap.values());
+
+/* 🔥 LIMIT TO TOP 5 */
+recommendations = recommendations.slice(0, 5);
+
+/* 🔥 SORT BY PRIORITY */
+const priorityOrder = { High: 1, Medium: 2, Low: 3 };
+
+recommendations.sort((a, b) => {
+  return (priorityOrder[a.priority] || 99) - (priorityOrder[b.priority] || 99);
+});
 
     if (recommendations.length === 0) {
       recommendations = [
