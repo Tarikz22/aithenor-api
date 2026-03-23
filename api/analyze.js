@@ -536,6 +536,86 @@ function extractPeriodLabel(strRows) {
   return `${formatter.format(candidateDates[0])} → ${formatter.format(candidateDates[candidateDates.length - 1])}`;
 }
 
+function formatDateToYMD(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
+function getIsoWeekInfo(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const workingDate = new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate()
+  ));
+
+  const dayNumber = workingDate.getUTCDay() || 7;
+  workingDate.setUTCDate(workingDate.getUTCDate() + 4 - dayNumber);
+
+  const yearStart = new Date(Date.UTC(workingDate.getUTCFullYear(), 0, 1));
+  const weekNumber = Math.ceil((((workingDate - yearStart) / 86400000) + 1) / 7);
+
+  return {
+    isoYear: workingDate.getUTCFullYear(),
+    isoWeek: weekNumber
+  };
+}
+
+function extractPeriodMetadata(strRows) {
+  const candidateDates = strRows
+    .map(row => getRowValue(row, ['Date', 'Business Date', 'Stay Date', 'Day', 'Report Date']))
+    .map(parseExcelDate)
+    .filter(Boolean)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  const snapshotDate = new Date();
+  const snapshotDateYmd = formatDateToYMD(snapshotDate);
+
+  if (!candidateDates.length) {
+    return {
+      snapshot_date: snapshotDateYmd,
+      period_type: 'weekly',
+      period_start: null,
+      period_end: null,
+      period_key: null,
+      period_label: 'Unknown Period'
+    };
+  }
+
+  const periodStart = candidateDates[0];
+  const periodEnd = candidateDates[candidateDates.length - 1];
+  const isoWeekInfo = getIsoWeekInfo(periodStart);
+
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'UTC'
+  });
+
+  const periodLabel = `${formatter.format(periodStart)} → ${formatter.format(periodEnd)}`;
+  const periodKey = isoWeekInfo
+    ? `${isoWeekInfo.isoYear}-W${String(isoWeekInfo.isoWeek).padStart(2, '0')}`
+    : null;
+
+  return {
+    snapshot_date: snapshotDateYmd,
+    period_type: 'weekly',
+    period_start: formatDateToYMD(periodStart),
+    period_end: formatDateToYMD(periodEnd),
+    period_key: periodKey,
+    period_label: periodLabel
+  };
+}
+
 function deriveMixSignal(pmsRows) {
   if (!pmsRows.length) return 'PMS segment mix signal not available';
 
@@ -728,7 +808,8 @@ async function handler(req, res) {
         };
       });
 
-    const period = extractPeriodLabel(strRows);
+    const periodMeta = extractPeriodMetadata(strRows);
+const period = periodMeta.period_label;
 
 let recommendations = opportunities
   .map(opportunity => buildRecommendationFromOpportunity(opportunity, hotelCode, period));
@@ -817,17 +898,23 @@ recommendations.sort((a, b) => {
     }
 
     const recommendationsPayload = finalRecommendations.map(item => ({
-      hotel_name: item.hotel_name,
-      period: item.period,
-      title: item.title,
-      finding: item.finding,
-      root_cause: item.root_cause,
-      expected_outcome: item.expected_outcome,
-      owner_department: item.owner_department,
-      priority: item.priority,
-      driver: item.driver,
-      segment: item.segment,
-    }));
+  hotel_name: item.hotel_name,
+  period: item.period,
+  snapshot_date: periodMeta.snapshot_date,
+  period_type: periodMeta.period_type,
+  period_start: periodMeta.period_start,
+  period_end: periodMeta.period_end,
+  period_key: periodMeta.period_key,
+  period_label: periodMeta.period_label,
+  title: item.title,
+  finding: item.finding,
+  root_cause: item.root_cause,
+  expected_outcome: item.expected_outcome,
+  owner_department: item.owner_department,
+  priority: item.priority,
+  driver: item.driver,
+  segment: item.segment,
+}));
 
     const { error: recommendationError } = await supabase
       .from('Recommendations')
@@ -837,14 +924,20 @@ recommendations.sort((a, b) => {
       throw recommendationError;
     }
 
-    const actionsPayload = finalRecommendations.flatMap(item =>
-      (item.actions || []).map(actionText => ({
-        hotel_name: item.hotel_name,
-        period: item.period,
-        title: item.title,
-        action_text: actionText
-      }))
-    );
+const actionsPayload = finalRecommendations.flatMap(item =>
+  (item.actions || []).map(actionText => ({
+    hotel_name: item.hotel_name,
+    period: item.period,
+    snapshot_date: periodMeta.snapshot_date,
+    period_type: periodMeta.period_type,
+    period_start: periodMeta.period_start,
+    period_end: periodMeta.period_end,
+    period_key: periodMeta.period_key,
+    period_label: periodMeta.period_label,
+    title: item.title,
+    action_text: actionText
+  }))
+);
 
     if (actionsPayload.length > 0) {
       const { error: actionsError } = await supabase
