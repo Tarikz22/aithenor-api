@@ -964,7 +964,7 @@ if (actionsPayload.length > 0) {
   if (actionsError) {
     throw actionsError;
   }
-}}
+}
 
     return res.status(200).json({
       message: 'v3.3 completed',
