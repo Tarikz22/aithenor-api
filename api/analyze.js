@@ -938,6 +938,13 @@ const actionsPayload = finalRecommendations.flatMap(item =>
     action_text: actionText
   }))
 );
+    console.log('AITHENOR DEBUG - finalRecommendations count:', finalRecommendations.length);
+console.log(
+  'AITHENOR DEBUG - recommendations with actions:',
+  finalRecommendations.filter(item => Array.isArray(item.actions) && item.actions.length > 0).length
+);
+console.log('AITHENOR DEBUG - actionsPayload count:', actionsPayload.length);
+console.log('AITHENOR DEBUG - first actions payload row:', actionsPayload[0] || null);
 
     if (actionsPayload.length > 0) {
       const { error: actionsError } = await supabase
