@@ -717,7 +717,7 @@ recommendations.sort((a, b) => {
       finding: item.finding,
       root_cause: item.root_cause,
       expected_outcome: item.expected_outcome,
-      owner_department: item.owner_department
+      owner_department: item.owner_department,
       priority: item.priority,
       driver: item.driver,
       segment: item.segment,
