@@ -924,6 +924,7 @@ recommendations.sort((a, b) => {
       throw recommendationError;
     }
 console.log('DEBUG finalRecommendations sample:', JSON.stringify(finalRecommendations[0], null, 2));
+    console.log('DEBUG actions field:', finalRecommendations[0]?.actions);
 const actionsPayload = finalRecommendations.flatMap(item =>
   (item.actions || []).map(actionText => ({
     hotel_name: item.hotel_name,
