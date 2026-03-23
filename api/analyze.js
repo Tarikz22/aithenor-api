@@ -246,7 +246,15 @@ function buildActionTexts({ driverCategory, segmentFocus = 'Retail' }) {
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
   const driverCategory = opportunity.driver;
   const segmentFocus = opportunity.segment || 'Retail';
-  const priority = computePriority(opportunity.rgi, opportunity.mpi);
+  const libraryPriority =
+  library[segmentFocus]?.[driverCategory]?.priority ||
+  library.Retail?.[driverCategory]?.priority ||
+  null;
+
+const priority =
+  libraryPriority
+    ? libraryPriority.charAt(0).toUpperCase() + libraryPriority.slice(1)
+    : computePriority(opportunity.rgi, opportunity.mpi, opportunity.ari);
 
   return {
     hotel_name: hotelName,
