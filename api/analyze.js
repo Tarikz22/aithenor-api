@@ -948,17 +948,23 @@ console.log(
 console.log('AITHENOR DEBUG - actionsPayload count:', actionsPayload.length);
 console.log('AITHENOR DEBUG - first actions payload row:', actionsPayload[0] || null);
 
-    if (actionsPayload.length > 0) {
-      const { error: actionsError } = await supabase
-        .from('actions')
-        console.log('DEBUG inserting into actions table...');
-        .insert(actionsPayload);
-      console.log('DEBUG actions insert result:', JSON.stringify({ error: actionsError, count: actionsPayload.length }, null, 2));
+if (actionsPayload.length > 0) {
 
-      if (actionsError) {
-        throw actionsError;
-      }
-    }
+  console.log('DEBUG inserting into actions table...');
+
+  const { error: actionsError } = await supabase
+    .from('actions')
+    .insert(actionsPayload);
+
+  console.log(
+    'DEBUG actions insert result:',
+    JSON.stringify({ error: actionsError, count: actionsPayload.length }, null, 2)
+  );
+
+  if (actionsError) {
+    throw actionsError;
+  }
+}}
 
     return res.status(200).json({
       message: 'v3.3 completed',
