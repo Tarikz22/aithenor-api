@@ -106,9 +106,22 @@ function getMetricFromRow(row, possibleKeys) {
   return null;
 }
 
-function getRandomItem(array) {
+function getDeterministicIndex(key, length) {
+  let hash = 0;
+  const str = key.toString();
+
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+
+  return Math.abs(hash) % length;
+}
+
+function getDeterministicItem(array, key) {
   if (!Array.isArray(array) || !array.length) return null;
-  return array[Math.floor(Math.random() * array.length)];
+  const index = getDeterministicIndex(key, array.length);
+  return array[index];
 }
 
 function getMultipleRandomItems(array, count = 2) {
@@ -169,7 +182,8 @@ function buildRootCauseText({ driverCategory, segmentFocus = 'Retail' }) {
   if (!block) {
     return 'A commercial performance gap has been identified and requires structured review.';
   }
-  return getRandomItem(block.root_causes);
+  const key = `${driverCategory}_${segmentFocus}`;
+return getDeterministicItem(block.root_causes, key);
 }
 
 function buildExpectedOutcomeText({ driverCategory, segmentFocus }) {
@@ -240,7 +254,11 @@ function buildDynamicTitle({ driverCategory, segmentFocus }) {
 function buildActionTexts({ driverCategory, segmentFocus = 'Retail' }) {
   const block = library[segmentFocus]?.[driverCategory] || library.Retail?.[driverCategory];
   if (!block) return ['Conduct a structured review of the commercial performance gap and define corrective actions.'];
-  return getMultipleRandomItems(block.actions, Math.min(2, block.actions.length));
+  const key = `${driverCategory}_${segmentFocus}`;
+const first = getDeterministicItem(block.actions, key);
+const second = getDeterministicItem(block.actions, key + '_2');
+
+return [first, second].filter(Boolean);
 }
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
