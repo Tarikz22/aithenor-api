@@ -754,6 +754,125 @@ async function getWorkbookFromRequest(req) {
   return XLSX.read(Buffer.from(downloadResponse.data), { type: 'buffer' });
 }
 
+function detectDataContext(workbook) {
+  const sheets = workbook.SheetNames || [];
+
+  function getHeadersFromSheetAliases(aliases) {
+    const sheetName = findSheetByAliases(workbook, aliases);
+    if (!sheetName) return [];
+
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) return [];
+
+    const rowsDefault = XLSX.utils.sheet_to_json(sheet, { defval: null });
+    const rowsOffset3 = XLSX.utils.sheet_to_json(sheet, { range: 3, defval: null });
+
+    const pickRows = (rows) => {
+      if (!rows.length) return [];
+      return Object.keys(rows[0]).map(normalizeKey);
+    };
+
+    const defaultHeaders = pickRows(rowsDefault);
+    const offsetHeaders = pickRows(rowsOffset3);
+
+    const defaultHasKpis =
+      defaultHeaders.some(h => h.includes('mpi')) ||
+      defaultHeaders.some(h => h.includes('ari')) ||
+      defaultHeaders.some(h => h.includes('rgi'));
+
+    const offsetHasKpis =
+      offsetHeaders.some(h => h.includes('mpi')) ||
+      offsetHeaders.some(h => h.includes('ari')) ||
+      offsetHeaders.some(h => h.includes('rgi'));
+
+    if (offsetHasKpis) return offsetHeaders;
+    if (defaultHasKpis) return defaultHeaders;
+    if (defaultHeaders.length) return defaultHeaders;
+    return offsetHeaders;
+  }
+
+  const strHeaders = getHeadersFromSheetAliases([
+    'STR Daily Report',
+    'STR',
+    'Daily STR'
+  ]);
+
+  const pmsHeaders = getHeadersFromSheetAliases([
+    'PMS Market Segment Report',
+    'PMS',
+    'Market Segment'
+  ]);
+
+  const allHeaders = [...strHeaders, ...pmsHeaders];
+
+  const has_str = strHeaders.length > 0;
+
+  const has_mpi_ari_rgi =
+    strHeaders.some(h => h.includes('mpi')) &&
+    strHeaders.some(h => h.includes('ari')) &&
+    strHeaders.some(h => h.includes('rgi'));
+
+  const has_segmentation = pmsHeaders.length > 0;
+
+  const has_demand_data = false;
+
+  const has_ly = allHeaders.some(h =>
+    h.includes('ly') || h.includes('last year')
+  );
+
+  const has_pace = pmsHeaders.some(h =>
+    h.includes('on books') ||
+    h.includes('forecast') ||
+    h.includes('pace')
+  );
+
+  const has_kpi_trend = allHeaders.some(h =>
+    h.includes('change') ||
+    h.includes('% change') ||
+    h.includes('trend')
+  );
+
+  let data_level = 4;
+
+  if (has_str && has_segmentation) {
+    data_level = 1;
+  } else if (has_str) {
+    data_level = 2;
+  } else if (has_segmentation) {
+    data_level = 3;
+  }
+
+  let confidence = 'low';
+
+  if (data_level === 1 && has_mpi_ari_rgi && has_ly) {
+    confidence = 'high';
+  } else if (
+    (data_level === 1 || data_level === 2 || data_level === 3) &&
+    (has_mpi_ari_rgi || has_segmentation)
+  ) {
+    confidence = 'medium';
+  }
+
+  return {
+    data_level,
+    flags: {
+      has_str,
+      has_mpi_ari_rgi,
+      has_segmentation,
+      has_demand_data,
+      has_ly,
+      has_pace,
+      has_kpi_trend
+    },
+    confidence,
+    detection_details: {
+      sheets_found: sheets,
+      str_headers: strHeaders,
+      pms_headers: pmsHeaders
+    }
+  };
+}
+
 // --------------------
 // MAIN HANDLER
 // --------------------
@@ -763,6 +882,8 @@ async function handler(req, res) {
     const context = (req.body?.context || '').toString().trim();
 
     const workbook = await getWorkbookFromRequest(req);
+    const dataContext = detectDataContext(workbook);
+console.log('DATA CONTEXT:', dataContext);
 
     const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
     const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
