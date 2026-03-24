@@ -883,7 +883,9 @@ async function handler(req, res) {
 
     const workbook = await getWorkbookFromRequest(req);
     const dataContext = detectDataContext(workbook);
-console.log('DATA CONTEXT:', dataContext);
+console.log('🚨 DATA CONTEXT START 🚨');
+console.log(JSON.stringify(dataContext, null, 2));
+console.log('🚨 DATA CONTEXT END 🚨');
 
     const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
     const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
