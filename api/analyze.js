@@ -1319,7 +1319,7 @@ if (!strRows.length) {
   return res.status(400).json({ error: 'STR sheet not found or empty' });
 }
 
-const detection = detectDataLevel(workbook);
+const detection = detectDataContext(workbook);
     
 const diagnosis = buildDiagnosisFromSTR(strRows);
 
