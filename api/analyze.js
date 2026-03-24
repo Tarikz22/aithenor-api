@@ -988,9 +988,10 @@ function buildDiagnosisFromSTR(strRows) {
 function buildFocusFromPMS(pmsRows, diagnosis) {
   if (!pmsRows.length) {
     return {
-      focus_segment: 'unknown',
-      focus_reason: 'No PMS data available'
-    };
+  focus_segment,
+  focus_reason,
+  segment_analysis: segmentAnalysis
+};
   }
 
   // --- SEGMENT MAPPING ---
