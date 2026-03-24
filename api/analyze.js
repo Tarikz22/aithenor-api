@@ -1118,7 +1118,7 @@ const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
 const focus = buildFocusFromPMS(pmsRows, diagnosis);
 
 console.log('🎯 FOCUS START 🎯');
-console.log(JSON.stringify(focus, null, 2));
+console.log('🎯 FOCUS VALUE 🎯', focus);
 console.log('🎯 FOCUS END 🎯');
 
     if (!strRows.length) {
