@@ -126,7 +126,7 @@ function getDeterministicItem(array, key) {
 
 function getMultipleRandomItems(array, count = 2) {
   if (!Array.isArray(array) || !array.length) return [];
-  const pool = [...array];
+  const pool = [array];
   const selected = [];
 
   while (pool.length && selected.length < count) {
@@ -808,7 +808,7 @@ function detectDataContext(workbook) {
     'Market Segment'
   ]);
 
-  const allHeaders = [...strHeaders, ...pmsHeaders];
+  const allHeaders = [strHeaders, pmsHeaders];
 
   const has_str = strHeaders.length > 0;
 
@@ -1114,8 +1114,7 @@ console.log('🚨 DATA CONTEXT START 🚨');
 console.log(JSON.stringify(dataContext, null, 2));
 console.log('🚨 DATA CONTEXT END 🚨');
 
-const strRows = getSheetRows(...);
-
+const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
 if (!strRows.length) {
   return res.status(400).json({ error: 'STR sheet not found or empty' });
 }
@@ -1248,7 +1247,7 @@ recommendations.sort((a, b) => {
       });
 
       finalRecommendations.push({
-        ...recommendation,
+        recommendation,
         title: aiNarrative?.title || recommendation.title,
         root_cause: aiNarrative?.rootCause || recommendation.root_cause,
         expected_outcome: aiNarrative?.expectedOutcome || recommendation.expected_outcome,
@@ -1313,7 +1312,7 @@ console.log('AITHENOR DEBUG - first actions payload row:', actionsPayload[0] || 
 
 if (actionsPayload.length > 0) {
 
-  console.log('DEBUG inserting into actions table...');
+  console.log('DEBUG inserting into actions table');
 
   const { error: actionsError } = await supabase
     .from('actions')
