@@ -1117,7 +1117,9 @@ const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Mar
 const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
 const focus = buildFocusFromPMS(pmsRows, diagnosis);
 
-console.log('🎯 FOCUS:', JSON.stringify(focus, null, 2));
+console.log('🎯 FOCUS START 🎯');
+console.log(JSON.stringify(focus, null, 2));
+console.log('🎯 FOCUS END 🎯');
 
     if (!strRows.length) {
       return res.status(400).json({ error: 'STR sheet not found or empty' });
