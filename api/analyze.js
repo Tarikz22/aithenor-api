@@ -854,7 +854,6 @@ function detectDataContext(workbook) {
   }
 
   return {
-return {
   data_level,
   flags: {
     has_str,
