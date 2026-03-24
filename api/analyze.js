@@ -756,120 +756,7 @@ async function getWorkbookFromRequest(req) {
 
 function detectDataContext(workbook) {
   const sheets = workbook.SheetNames || [];
-}
-  function buildDiagnosisFromSTR(strRows) {
-  if (!strRows.length) {
-    return {
-      performance_status: 'unknown',
-      diagnosis_type: 'unknown',
-      trend_status: 'stable'
-    };
-  }
 
-  // --- AVERAGES ---
-  const avgMPI = averageMetric(strRows, ['MPI', 'MPI (Index)', 'Occupancy Index']);
-  const avgARI = averageMetric(strRows, ['ARI', 'ARI (Index)', 'ADR Index']);
-  const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index']);
-  const avgOcc = averageMetric(strRows, ['Occupancy %', 'Hotel Occupancy %']);
-
-  const mpiChange = averageMetric(strRows, ['MPI % Change', 'MPI %']);
-  const rgiChange = averageMetric(strRows, ['RGI % Change', 'RGI %']);
-
-  // --------------------
-  // PERFORMANCE STATUS
-  // --------------------
-  let performance_status = 'balanced';
-
-  if (avgMPI >= 100 && avgRGI >= 100) {
-    performance_status = 'strong';
-  } else if (avgMPI < 100 || avgRGI < 100) {
-    performance_status = 'underperforming';
-  }
-
-  // --------------------
-  // DIAGNOSIS TYPE (ORDER MATTERS)
-  // --------------------
-  let diagnosis_type = 'share_loss';
-
-  // 1. Compression
-  if (
-    avgOcc !== null &&
-    avgOcc >= 85 &&
-    avgMPI >= 100 &&
-    avgARI < 100
-  ) {
-    diagnosis_type = 'compression_mismanagement';
-  }
-
-  // 2. Pricing resistance
-  else if (
-    avgMPI < 100 &&
-    avgARI > 100
-  ) {
-    diagnosis_type = 'pricing_resistance';
-  }
-
-  // 3. Discount inefficiency
-  else if (
-    avgARI < 100 &&
-    avgMPI <= 100
-  ) {
-    diagnosis_type = 'discount_inefficiency';
-  }
-
-  // 4. Visibility gap
-  else if (
-    avgMPI < 95 &&
-    avgARI >= 95 &&
-    avgARI <= 105
-  ) {
-    diagnosis_type = 'visibility_gap';
-  }
-
-  // 5. Share loss fallback
-  else if (avgMPI < 100) {
-    diagnosis_type = 'share_loss';
-  }
-
-  // 6. Healthy
-  else if (
-    avgMPI >= 100 &&
-    avgARI > 100 &&
-    avgRGI > 100
-  ) {
-    diagnosis_type = 'healthy';
-  }
-
-  // --------------------
-  // TREND
-  // --------------------
-  let trend_status = 'stable';
-
-  if (
-    (mpiChange !== null && mpiChange > 0) ||
-    (rgiChange !== null && rgiChange > 0)
-  ) {
-    trend_status = 'improving';
-  } else if (
-    (mpiChange !== null && mpiChange < 0) ||
-    (rgiChange !== null && rgiChange < 0)
-  ) {
-    trend_status = 'worsening';
-  }
-
-  return {
-    performance_status,
-    diagnosis_type,
-    trend_status,
-    metrics: {
-      avgMPI,
-      avgARI,
-      avgRGI,
-      avgOcc
-    }
-  };
-}
-  
   function getHeadersFromSheetAliases(aliases) {
     const sheetName = findSheetByAliases(workbook, aliases);
     if (!sheetName) return [];
@@ -883,8 +770,8 @@ function detectDataContext(workbook) {
     const pickRows = (rows) => {
       if (!rows.length) return [];
       return Object.keys(rows[0])
-  .map(normalizeKey)
-  .filter(h => h && !h.includes('empty'));
+        .map(normalizeKey)
+        .filter(h => h && !h.includes('empty'));
     };
 
     const defaultHeaders = pickRows(rowsDefault);
@@ -900,17 +787,13 @@ function detectDataContext(workbook) {
       offsetHeaders.some(h => h.includes('ari')) ||
       offsetHeaders.some(h => h.includes('rgi'));
 
-// STR-specific KPI logic
-if (
-  aliases.some(a => normalizeKey(a).includes('str'))
-) {
-  if (offsetHasKpis) return offsetHeaders;
-  if (defaultHasKpis) return defaultHeaders;
-}
+    if (aliases.some(a => normalizeKey(a).includes('str'))) {
+      if (offsetHasKpis) return offsetHeaders;
+      if (defaultHasKpis) return defaultHeaders;
+    }
 
-// fallback (for PMS and others)
-if (defaultHeaders.length) return defaultHeaders;
-return offsetHeaders;
+    if (defaultHeaders.length) return defaultHeaders;
+    return offsetHeaders;
   }
 
   const strHeaders = getHeadersFromSheetAliases([
@@ -976,23 +859,130 @@ return offsetHeaders;
   }
 
   return {
-  data_level,
-  flags: {
-    has_str,
-    has_mpi_ari_rgi,
-    has_segmentation,
-    has_demand_data,
-    has_ly,
-    has_pace,
-    has_kpi_trend
-  },
-  confidence,
-  detection_details: {
-    sheets_found: sheets,
-    str_headers: strHeaders,
-    pms_headers: pmsHeaders
+    data_level,
+    flags: {
+      has_str,
+      has_mpi_ari_rgi,
+      has_segmentation,
+      has_demand_data,
+      has_ly,
+      has_pace,
+      has_kpi_trend
+    },
+    confidence,
+    detection_details: {
+      sheets_found: sheets,
+      str_headers: strHeaders,
+      pms_headers: pmsHeaders
+    }
+  };
+}
+
+function buildDiagnosisFromSTR(strRows) {
+  if (!strRows.length) {
+    return {
+      performance_status: 'unknown',
+      diagnosis_type: 'unknown',
+      trend_status: 'stable',
+      metrics: {
+        avgMPI: null,
+        avgARI: null,
+        avgRGI: null,
+        avgOcc: null
+      }
+    };
   }
-};
+
+  const avgMPI = averageMetric(strRows, ['MPI', 'MPI (Index)', 'Occupancy Index']);
+  const avgARI = averageMetric(strRows, ['ARI', 'ARI (Index)', 'ADR Index']);
+  const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index']);
+  const avgOcc = averageMetric(strRows, ['Occupancy %', 'Hotel Occupancy %']);
+
+  const mpiChange = averageMetric(strRows, ['MPI % Change', 'MPI %']);
+  const rgiChange = averageMetric(strRows, ['RGI % Change', 'RGI %']);
+
+  let performance_status = 'balanced';
+
+  if (avgMPI !== null && avgRGI !== null && avgMPI >= 100 && avgRGI >= 100) {
+    performance_status = 'strong';
+  } else if (
+    (avgMPI !== null && avgMPI < 100) ||
+    (avgRGI !== null && avgRGI < 100)
+  ) {
+    performance_status = 'underperforming';
+  }
+
+  let diagnosis_type = 'share_loss';
+
+  if (
+    avgOcc !== null &&
+    avgMPI !== null &&
+    avgARI !== null &&
+    avgOcc >= 85 &&
+    avgMPI >= 100 &&
+    avgARI < 100
+  ) {
+    diagnosis_type = 'compression_mismanagement';
+  } else if (
+    avgMPI !== null &&
+    avgARI !== null &&
+    avgMPI < 100 &&
+    avgARI > 100
+  ) {
+    diagnosis_type = 'pricing_resistance';
+  } else if (
+    avgMPI !== null &&
+    avgARI !== null &&
+    avgARI < 100 &&
+    avgMPI <= 100
+  ) {
+    diagnosis_type = 'discount_inefficiency';
+  } else if (
+    avgMPI !== null &&
+    avgARI !== null &&
+    avgMPI < 95 &&
+    avgARI >= 95 &&
+    avgARI <= 105
+  ) {
+    diagnosis_type = 'visibility_gap';
+  } else if (avgMPI !== null && avgMPI < 100) {
+    diagnosis_type = 'share_loss';
+  } else if (
+    avgMPI !== null &&
+    avgARI !== null &&
+    avgRGI !== null &&
+    avgMPI >= 100 &&
+    avgARI > 100 &&
+    avgRGI > 100
+  ) {
+    diagnosis_type = 'healthy';
+  }
+
+  let trend_status = 'stable';
+
+  if (
+    (mpiChange !== null && mpiChange > 0) ||
+    (rgiChange !== null && rgiChange > 0)
+  ) {
+    trend_status = 'improving';
+  } else if (
+    (mpiChange !== null && mpiChange < 0) ||
+    (rgiChange !== null && rgiChange < 0)
+  ) {
+    trend_status = 'worsening';
+  }
+
+  return {
+    performance_status,
+    diagnosis_type,
+    trend_status,
+    metrics: {
+      avgMPI,
+      avgARI,
+      avgRGI,
+      avgOcc
+    }
+  };
 }
 
 // --------------------
