@@ -985,6 +985,18 @@ function buildDiagnosisFromSTR(strRows) {
   };
 }
 
+// --- COMPUTE GROWTH ---
+  const segmentAnalysis = Object.entries(segmentData).map(([segment, data]) => {
+    const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
+    const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
+
+    return {
+      segment,
+      rnGrowth,
+      revGrowth
+    };
+  });
+
 function buildFocusFromPMS(pmsRows, diagnosis) {
   if (!pmsRows.length) {
     return {
@@ -1046,19 +1058,7 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     segmentData[segment].revLY += revLY;
   });
 
-  // --- COMPUTE GROWTH ---
-  const segmentAnalysis = Object.entries(segmentData).map(([segment, data]) => {
-    const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
-    const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
-
-    return {
-      segment,
-      rnGrowth,
-      revGrowth
-    };
-  });
-
-  // --- DEFAULT FOCUS FROM DIAGNOSIS ---
+    // --- DEFAULT FOCUS FROM DIAGNOSIS ---
   let focus_segment = 'retail';
 
   switch (diagnosis.diagnosis_type) {
