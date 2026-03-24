@@ -986,6 +986,7 @@ function buildDiagnosisFromSTR(strRows) {
 }
 
 function buildFocusFromPMS(pmsRows, diagnosis) {
+        console.log('ENTERING buildFocusFromPMS');
   if (!pmsRows.length) {
     return {
       focus_segment: 'unknown',
@@ -1082,7 +1083,8 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
   }
 
   const focus_reason = `Focus on ${focus_segment} segment due to alignment with ${diagnosis.diagnosis_type} and observed performance gaps`;
-
+  
+  console.log('RETURNING FOCUS');
   return {
     focus_segment,
     focus_reason,
@@ -1115,6 +1117,9 @@ console.log('🧠 DIAGNOSIS:', JSON.stringify(diagnosis, null, 2));
 
 const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
 const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
+
+console.log('PMS ROWS COUNT:', pmsRows?.length);
+
 const focus = buildFocusFromPMS(pmsRows, diagnosis);
 
 console.log('🎯 FOCUS START 🎯');
