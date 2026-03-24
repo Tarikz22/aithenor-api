@@ -757,6 +757,119 @@ async function getWorkbookFromRequest(req) {
 function detectDataContext(workbook) {
   const sheets = workbook.SheetNames || [];
 
+  function buildDiagnosisFromSTR(strRows) {
+  if (!strRows.length) {
+    return {
+      performance_status: 'unknown',
+      diagnosis_type: 'unknown',
+      trend_status: 'stable'
+    };
+  }
+
+  // --- AVERAGES ---
+  const avgMPI = averageMetric(strRows, ['MPI', 'MPI (Index)', 'Occupancy Index']);
+  const avgARI = averageMetric(strRows, ['ARI', 'ARI (Index)', 'ADR Index']);
+  const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index']);
+  const avgOcc = averageMetric(strRows, ['Occupancy %', 'Hotel Occupancy %']);
+
+  const mpiChange = averageMetric(strRows, ['MPI % Change', 'MPI %']);
+  const rgiChange = averageMetric(strRows, ['RGI % Change', 'RGI %']);
+
+  // --------------------
+  // PERFORMANCE STATUS
+  // --------------------
+  let performance_status = 'balanced';
+
+  if (avgMPI >= 100 && avgRGI >= 100) {
+    performance_status = 'strong';
+  } else if (avgMPI < 100 || avgRGI < 100) {
+    performance_status = 'underperforming';
+  }
+
+  // --------------------
+  // DIAGNOSIS TYPE (ORDER MATTERS)
+  // --------------------
+  let diagnosis_type = 'share_loss';
+
+  // 1. Compression
+  if (
+    avgOcc !== null &&
+    avgOcc >= 85 &&
+    avgMPI >= 100 &&
+    avgARI < 100
+  ) {
+    diagnosis_type = 'compression_mismanagement';
+  }
+
+  // 2. Pricing resistance
+  else if (
+    avgMPI < 100 &&
+    avgARI > 100
+  ) {
+    diagnosis_type = 'pricing_resistance';
+  }
+
+  // 3. Discount inefficiency
+  else if (
+    avgARI < 100 &&
+    avgMPI <= 100
+  ) {
+    diagnosis_type = 'discount_inefficiency';
+  }
+
+  // 4. Visibility gap
+  else if (
+    avgMPI < 95 &&
+    avgARI >= 95 &&
+    avgARI <= 105
+  ) {
+    diagnosis_type = 'visibility_gap';
+  }
+
+  // 5. Share loss fallback
+  else if (avgMPI < 100) {
+    diagnosis_type = 'share_loss';
+  }
+
+  // 6. Healthy
+  else if (
+    avgMPI >= 100 &&
+    avgARI > 100 &&
+    avgRGI > 100
+  ) {
+    diagnosis_type = 'healthy';
+  }
+
+  // --------------------
+  // TREND
+  // --------------------
+  let trend_status = 'stable';
+
+  if (
+    (mpiChange !== null && mpiChange > 0) ||
+    (rgiChange !== null && rgiChange > 0)
+  ) {
+    trend_status = 'improving';
+  } else if (
+    (mpiChange !== null && mpiChange < 0) ||
+    (rgiChange !== null && rgiChange < 0)
+  ) {
+    trend_status = 'worsening';
+  }
+
+  return {
+    performance_status,
+    diagnosis_type,
+    trend_status,
+    metrics: {
+      avgMPI,
+      avgARI,
+      avgRGI,
+      avgOcc
+    }
+  };
+}
+  
   function getHeadersFromSheetAliases(aliases) {
     const sheetName = findSheetByAliases(workbook, aliases);
     if (!sheetName) return [];
@@ -897,6 +1010,9 @@ console.log(JSON.stringify(dataContext, null, 2));
 console.log('🚨 DATA CONTEXT END 🚨');
 
     const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
+    const diagnosis = buildDiagnosisFromSTR(strRows);
+
+console.log('🧠 DIAGNOSIS:', JSON.stringify(diagnosis, null, 2));
     const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
     const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
 
