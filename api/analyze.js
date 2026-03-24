@@ -878,6 +878,214 @@ function detectDataContext(workbook) {
   };
 }
 
+function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) {
+  const avgMPI = Number(diagnosis?.metrics?.avgMPI || 0);
+  const avgARI = Number(diagnosis?.metrics?.avgARI || 0);
+  const avgRGI = Number(diagnosis?.metrics?.avgRGI || 0);
+  const avgOcc = Number(diagnosis?.metrics?.avgOcc || 0);
+  const trendStatus = diagnosis?.trend_status || "stable";
+  const focusSegment = focus?.focus_segment || "other";
+
+  function safeNum(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function normalizeSegmentName(name = "") {
+    const s = String(name).toLowerCase().trim();
+
+    if (
+      s.includes("retail") ||
+      s.includes("transient") ||
+      s.includes("ota") ||
+      s.includes("online") ||
+      s.includes("bar") ||
+      s.includes("rack") ||
+      s.includes("promo") ||
+      s.includes("discount")
+    ) return "retail";
+
+    if (
+      s.includes("negotiated") ||
+      s.includes("corporate") ||
+      s.includes("corp") ||
+      s.includes("local corporate") ||
+      s.includes("qualified")
+    ) return "negotiated";
+
+    if (
+      s.includes("group") ||
+      s.includes("wholesale") ||
+      s.includes("crew") ||
+      s.includes("mice") ||
+      s.includes("conference")
+    ) return "groups";
+
+    return "other";
+  }
+
+  function getSegmentName(row = {}) {
+    return (
+      row.segment ||
+      row.Segment ||
+      row["Market Segment"] ||
+      row["market segment"] ||
+      row["Segment Name"] ||
+      row["segment name"] ||
+      ""
+    );
+  }
+
+  function getSegmentADR(row = {}) {
+    return safeNum(
+      row.adr ||
+      row.ADR ||
+      row["Average Rate"] ||
+      row["Avg Rate"] ||
+      row["Average ADR"] ||
+      row["Revenue per Room"] ||
+      0
+    );
+  }
+
+  const segmentBuckets = {
+    retail: [],
+    negotiated: [],
+    groups: [],
+    other: []
+  };
+
+  for (const row of pmsRows) {
+    const segment = normalizeSegmentName(getSegmentName(row));
+    const adr = getSegmentADR(row);
+    if (adr > 0) segmentBuckets[segment].push(adr);
+  }
+
+  function avg(arr) {
+    if (!arr.length) return 0;
+    return arr.reduce((a, b) => a + b, 0) / arr.length;
+  }
+
+  function stddev(arr) {
+    if (arr.length < 2) return 0;
+    const mean = avg(arr);
+    const variance = arr.reduce((sum, x) => sum + Math.pow(x - mean, 2), 0) / arr.length;
+    return Math.sqrt(variance);
+  }
+
+  const segmentAvgADR = {
+    retail: avg(segmentBuckets.retail),
+    negotiated: avg(segmentBuckets.negotiated),
+    groups: avg(segmentBuckets.groups),
+    other: avg(segmentBuckets.other)
+  };
+
+  const allMajorSegmentADRs = Object.entries(segmentAvgADR)
+    .filter(([key, value]) => ["retail", "negotiated", "groups"].includes(key) && value > 0)
+    .map(([, value]) => value);
+
+  const overallAvgSegmentADR = avg(allMajorSegmentADRs);
+  const overallSegmentADRStdDev = stddev(allMajorSegmentADRs);
+  const focusSegmentADR = safeNum(segmentAvgADR[focusSegment]);
+
+  const isLowRatedMixPressure =
+    focusSegmentADR > 0 &&
+    overallAvgSegmentADR > 0 &&
+    (
+      focusSegmentADR < overallAvgSegmentADR ||
+      focusSegmentADR < (overallAvgSegmentADR - 0.5 * overallSegmentADRStdDev)
+    );
+
+  const result = {
+    primary_driver: "visibility",
+    secondary_driver: null,
+    driver_reason: "Default fallback: share underperformance without a stronger confirmed cross-driver pattern.",
+    rule_triggered: "share_loss_fallback",
+    confidence: "low",
+    driver_context: {
+      focus_segment: focusSegment,
+      focus_segment_adr: Number(focusSegmentADR.toFixed(2)),
+      overall_avg_segment_adr: Number(overallAvgSegmentADR.toFixed(2)),
+      overall_segment_adr_stddev: Number(overallSegmentADRStdDev.toFixed(2)),
+      is_low_rated_mix_pressure: isLowRatedMixPressure
+    }
+  };
+
+  // 1) Healthy premium
+  if (avgMPI >= 100 && avgARI > 100 && avgRGI > 100) {
+    return {
+      ...result,
+      primary_driver: "none",
+      secondary_driver: null,
+      driver_reason: "The hotel is holding both price premium and share above market, indicating healthy premium performance rather than an actionable driver issue.",
+      rule_triggered: "healthy_premium",
+      confidence: "high"
+    };
+  }
+
+  // 2) Mix constraint
+  if (avgMPI < 100 && avgARI > 100 && isLowRatedMixPressure) {
+    return {
+      ...result,
+      primary_driver: "mix_strategy",
+      secondary_driver: "pricing",
+      driver_reason: "The hotel is priced above market but not capturing enough share, while the focused segment ADR sits below the blended segment benchmark, indicating mix pressure rather than pure pricing alone.",
+      rule_triggered: "mix_constraint",
+      confidence: "high"
+    };
+  }
+
+  // 3) Pricing resistance
+  if (avgMPI < 100 && avgARI > 100) {
+    return {
+      ...result,
+      primary_driver: "pricing",
+      secondary_driver: null,
+      driver_reason: "High ARI with weak MPI indicates the hotel is carrying a price premium that demand is not fully accepting, pointing to pricing resistance.",
+      rule_triggered: "pricing_resistance",
+      confidence: "high"
+    };
+  }
+
+  // 4) Discount inefficiency
+  if (avgARI < 100 && avgMPI <= 100) {
+    return {
+      ...result,
+      primary_driver: "conversion",
+      secondary_driver: null,
+      driver_reason: "The hotel is trading below market rate without generating sufficient share gain, indicating discount inefficiency and weak conversion.",
+      rule_triggered: "discount_inefficiency",
+      confidence: "high"
+    };
+  }
+
+  // 5) Visibility gap
+  if ((avgMPI < 95 && trendStatus === "declining") || avgMPI < 92) {
+    return {
+      ...result,
+      primary_driver: "visibility",
+      secondary_driver: null,
+      driver_reason: "Share capture is weak and worsening versus market, which points to a visibility issue rather than a pure pricing problem.",
+      rule_triggered: "visibility_gap",
+      confidence: "medium"
+    };
+  }
+
+  // 6) Missed pricing opportunity
+  if (avgOcc >= 78 && avgARI <= 100) {
+    return {
+      ...result,
+      primary_driver: "pricing",
+      secondary_driver: null,
+      driver_reason: "Occupancy is already relatively strong, but rate premium is not being maximized, suggesting missed pricing opportunity under stronger demand conditions.",
+      rule_triggered: "missed_pricing_opportunity",
+      confidence: "medium"
+    };
+  }
+
+  return result;
+}
+
 function buildDiagnosisFromSTR(strRows) {
   if (!strRows.length) {
     return {
@@ -1130,6 +1338,16 @@ console.log('🎯 FOCUS END 🎯');
       return res.status(400).json({ error: 'STR sheet not found or empty' });
     }
 
+    const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
+console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
+    return res.status(200).json({
+  success: true,
+  detection,
+  diagnosis,
+  focus,
+  driver
+});
+    
     const rowKpis = strRows.map((row, index) => {
       const rgi = getMetricFromRow(row, ['RGI', 'RGI (Index)', 'RevPAR Index', 'RevPAR Index (RGI)']);
       const ari = getMetricFromRow(row, ['ARI', 'ARI (Index)', 'ADR Index', 'ADR Index (ARI)']);
