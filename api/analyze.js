@@ -1137,18 +1137,6 @@ console.log('🎯 FOCUS:', JSON.stringify(focus, null, 2));
       };
     });
 
-    // --- COMPUTE GROWTH ---
-  const segmentAnalysis = Object.entries(segmentData).map(([segment, data]) => {
-    const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
-    const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
-
-    return {
-      segment,
-      rnGrowth,
-      revGrowth
-    };
-  });
-    
     const validRowKpis = rowKpis.filter(item => item.rgi !== null && item.ari !== null);
 
     if (validRowKpis.length === 0) {
