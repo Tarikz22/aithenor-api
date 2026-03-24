@@ -1124,7 +1124,7 @@ const diagnosis = buildDiagnosisFromSTR(strRows);
 console.log('🧠 DIAGNOSIS:', JSON.stringify(diagnosis, null, 2));
 
 const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
-
+const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
 const focus = buildFocusFromPMS(pmsRows, diagnosis);
 
 console.log('🎯 FOCUS:', JSON.stringify(focus, null, 2));
