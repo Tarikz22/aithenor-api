@@ -879,6 +879,7 @@ function detectDataContext(workbook) {
 }
 
 function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) {
+  console.log("ENTER DRIVER FUNCTION");
   const avgMPI = Number(diagnosis?.metrics?.avgMPI || 0);
   const avgARI = Number(diagnosis?.metrics?.avgARI || 0);
   const avgRGI = Number(diagnosis?.metrics?.avgRGI || 0);
@@ -1083,7 +1084,8 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
     };
   }
 
-  return result;
+  console.log("DRIVER FALLBACK USED");
+return result;
 }
 
 function buildDiagnosisFromSTR(strRows) {
