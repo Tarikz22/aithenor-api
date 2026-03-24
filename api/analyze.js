@@ -985,6 +985,121 @@ function buildDiagnosisFromSTR(strRows) {
   };
 }
 
+function buildFocusFromPMS(pmsRows, diagnosis) {
+  if (!pmsRows.length) {
+    return {
+      focus_segment: 'unknown',
+      focus_reason: 'No PMS data available'
+    };
+  }
+
+  // --- SEGMENT MAPPING ---
+  function mapSegment(name = '') {
+    const n = name.toLowerCase();
+
+    if (
+      n.includes('transient') ||
+      n.includes('retail') ||
+      n.includes('ota') ||
+      n.includes('booking') ||
+      n.includes('expedia') ||
+      n.includes('direct')
+    ) return 'retail';
+
+    if (
+      n.includes('corporate') ||
+      n.includes('negotiated') ||
+      n.includes('lnr') ||
+      n.includes('company')
+    ) return 'negotiated';
+
+    if (
+      n.includes('group') ||
+      n.includes('mice') ||
+      n.includes('event') ||
+      n.includes('conference')
+    ) return 'groups';
+
+    return 'other';
+  }
+
+  // --- AGGREGATION ---
+  const segmentData = {};
+
+  pmsRows.forEach(row => {
+    const name = row['market segment name'] || row['Market Segment Name'] || '';
+    const segment = mapSegment(name);
+
+    const rnTY = Number(row['room nights on books ty'] || row['Room Nights On Books TY'] || 0);
+    const rnLY = Number(row['room nights on books ly'] || row['Room Nights On Books LY'] || 0);
+    const revTY = Number(row['booked revenue ty'] || row['Booked Revenue TY'] || 0);
+    const revLY = Number(row['booked revenue ly'] || row['Booked Revenue LY'] || 0);
+
+    if (!segmentData[segment]) {
+      segmentData[segment] = { rnTY: 0, rnLY: 0, revTY: 0, revLY: 0 };
+    }
+
+    segmentData[segment].rnTY += rnTY;
+    segmentData[segment].rnLY += rnLY;
+    segmentData[segment].revTY += revTY;
+    segmentData[segment].revLY += revLY;
+  });
+
+  // --- COMPUTE GROWTH ---
+  const segmentAnalysis = Object.entries(segmentData).map(([segment, data]) => {
+    const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
+    const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
+
+    return {
+      segment,
+      rnGrowth,
+      revGrowth
+    };
+  });
+
+  // --- DEFAULT FOCUS FROM DIAGNOSIS ---
+  let focus_segment = 'retail';
+
+  switch (diagnosis.diagnosis_type) {
+    case 'pricing_resistance':
+    case 'visibility_gap':
+      focus_segment = 'retail';
+      break;
+
+    case 'discount_inefficiency':
+      focus_segment = 'retail';
+      break;
+
+    case 'compression_mismanagement':
+      focus_segment = 'groups';
+      break;
+
+    case 'share_loss':
+      focus_segment = 'retail';
+      break;
+
+    case 'healthy':
+      focus_segment = 'none';
+      break;
+  }
+
+  // --- OVERRIDE WITH DATA ---
+  const worstSegment = segmentAnalysis.sort((a, b) => a.rnGrowth - b.rnGrowth)[0];
+
+  if (worstSegment && worstSegment.rnGrowth < -0.1) {
+    focus_segment = worstSegment.segment;
+  }
+
+  // --- REASON ---
+  const focus_reason = `Focus on ${focus_segment} segment due to alignment with ${diagnosis.diagnosis_type} and observed performance gaps`;
+
+  return {
+    focus_segment,
+    focus_reason,
+    segment_analysis: segmentAnalysis
+  };
+}
+
 // --------------------
 // MAIN HANDLER
 // --------------------
@@ -999,12 +1114,21 @@ console.log('🚨 DATA CONTEXT START 🚨');
 console.log(JSON.stringify(dataContext, null, 2));
 console.log('🚨 DATA CONTEXT END 🚨');
 
-    const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
-    const diagnosis = buildDiagnosisFromSTR(strRows);
+const strRows = getSheetRows(...);
+
+if (!strRows.length) {
+  return res.status(400).json({ error: 'STR sheet not found or empty' });
+}
+
+const diagnosis = buildDiagnosisFromSTR(strRows);
 
 console.log('🧠 DIAGNOSIS:', JSON.stringify(diagnosis, null, 2));
-    const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
-    const profileRows = getSheetRows(workbook, ['Hotel Profile', 'Profile']);
+
+const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
+
+const focus = buildFocusFromPMS(pmsRows, diagnosis);
+
+console.log('🎯 FOCUS:', JSON.stringify(focus, null, 2));
 
     if (!strRows.length) {
       return res.status(400).json({ error: 'STR sheet not found or empty' });
