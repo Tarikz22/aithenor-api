@@ -854,23 +854,24 @@ function detectDataContext(workbook) {
   }
 
   return {
-    data_level,
-    flags: {
-      has_str,
-      has_mpi_ari_rgi,
-      has_segmentation,
-      has_demand_data,
-      has_ly,
-      has_pace,
-      has_kpi_trend
-    },
-    confidence,
-    detection_details: {
-      sheets_found: sheets,
-      str_headers: strHeaders,
-      pms_headers: pmsHeaders
-    }
-  };
+return {
+  data_level,
+  flags: {
+    has_str,
+    has_mpi_ari_rgi,
+    has_segmentation,
+    has_demand_data,
+    has_ly,
+    has_pace,
+    has_kpi_trend
+  },
+  confidence,
+  detection_details: {
+    sheets_found: sheets,
+    str_headers: strHeaders,
+    pms_headers: pmsHeaders
+  }
+};
 }
 
 // --------------------
