@@ -756,7 +756,7 @@ async function getWorkbookFromRequest(req) {
 
 function detectDataContext(workbook) {
   const sheets = workbook.SheetNames || [];
-
+}
   function buildDiagnosisFromSTR(strRows) {
   if (!strRows.length) {
     return {
