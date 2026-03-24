@@ -769,7 +769,9 @@ function detectDataContext(workbook) {
 
     const pickRows = (rows) => {
       if (!rows.length) return [];
-      return Object.keys(rows[0]).map(normalizeKey);
+      return Object.keys(rows[0])
+  .map(normalizeKey)
+  .filter(h => h && !h.includes('empty'));
     };
 
     const defaultHeaders = pickRows(rowsDefault);
@@ -785,10 +787,17 @@ function detectDataContext(workbook) {
       offsetHeaders.some(h => h.includes('ari')) ||
       offsetHeaders.some(h => h.includes('rgi'));
 
-    if (offsetHasKpis) return offsetHeaders;
-    if (defaultHasKpis) return defaultHeaders;
-    if (defaultHeaders.length) return defaultHeaders;
-    return offsetHeaders;
+// STR-specific KPI logic
+if (
+  aliases.some(a => normalizeKey(a).includes('str'))
+) {
+  if (offsetHasKpis) return offsetHeaders;
+  if (defaultHasKpis) return defaultHeaders;
+}
+
+// fallback (for PMS and others)
+if (defaultHeaders.length) return defaultHeaders;
+return offsetHeaders;
   }
 
   const strHeaders = getHeadersFromSheetAliases([
