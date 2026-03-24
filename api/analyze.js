@@ -988,13 +988,11 @@ function buildDiagnosisFromSTR(strRows) {
 function buildFocusFromPMS(pmsRows, diagnosis) {
   if (!pmsRows.length) {
     return {
-  focus_segment,
-  focus_reason,
-  segment_analysis: segmentAnalysis
-};
+      focus_segment: 'unknown',
+      focus_reason: 'No PMS data available'
+    };
   }
 
-  // --- SEGMENT MAPPING ---
   function mapSegment(name = '') {
     const n = name.toLowerCase();
 
@@ -1024,7 +1022,6 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     return 'other';
   }
 
-  // --- AGGREGATION ---
   const segmentData = {};
 
   pmsRows.forEach(row => {
@@ -1046,7 +1043,17 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     segmentData[segment].revLY += revLY;
   });
 
-    // --- DEFAULT FOCUS FROM DIAGNOSIS ---
+  const segmentAnalysis = Object.entries(segmentData).map(([segment, data]) => {
+    const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
+    const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
+
+    return {
+      segment,
+      rnGrowth,
+      revGrowth
+    };
+  });
+
   let focus_segment = 'retail';
 
   switch (diagnosis.diagnosis_type) {
@@ -1054,32 +1061,26 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     case 'visibility_gap':
       focus_segment = 'retail';
       break;
-
     case 'discount_inefficiency':
       focus_segment = 'retail';
       break;
-
     case 'compression_mismanagement':
       focus_segment = 'groups';
       break;
-
     case 'share_loss':
       focus_segment = 'retail';
       break;
-
     case 'healthy':
       focus_segment = 'none';
       break;
   }
 
-  // --- OVERRIDE WITH DATA ---
-  const worstSegment = segmentAnalysis.sort((a, b) => a.rnGrowth - b.rnGrowth)[0];
+  const worstSegment = [...segmentAnalysis].sort((a, b) => a.rnGrowth - b.rnGrowth)[0];
 
   if (worstSegment && worstSegment.rnGrowth < -0.1) {
     focus_segment = worstSegment.segment;
   }
 
-  // --- REASON ---
   const focus_reason = `Focus on ${focus_segment} segment due to alignment with ${diagnosis.diagnosis_type} and observed performance gaps`;
 
   return {
