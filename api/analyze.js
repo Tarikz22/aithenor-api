@@ -520,15 +520,42 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, pms
   if (avgADR > 0 && totalRN > 0 && avgMPI < 95) confidence = "high";
   if (avgMPI >= 98) confidence = "low";
 
+  let marketContext = "competitive";
+
+if (avgMPI < 90) {
+  marketContext = "demand_available";
+} else if (avgMPI > 100) {
+  marketContext = "constrained";
+}
+  
+  let impactTimeline = "mid_term";
+if (driver?.driver_category === "pricing_positioning" && marketContext === "constrained") {
+  recoveryFactor *= 1.2;
+}
+
+if (driver?.driver_category === "pricing_positioning" && marketContext === "demand_available") {
+  recoveryFactor *= 0.8;
+}
+  
+if (driver?.driver_category === "pricing_positioning") {
+  impactTimeline = "short_term";
+} else if (driver?.driver_category === "conversion") {
+  impactTimeline = "short_to_mid";
+} else if (driver?.driver_category === "visibility") {
+  impactTimeline = "mid_to_long";
+}
+  
   return {
-    impact_type: "revenue_uplift",
-    impact_range: {
-      low,
-      high
-    },
-    calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, PMS ADR ${Math.round(avgADR)}, and a ${Math.round(recoveryFactor * 100)}% recovery factor.`,
-    confidence
-  };
+  impact_type: "revenue_uplift",
+  impact_range: {
+    low,
+    high
+  },
+  impact_timeline: impactTimeline,
+  market_context: marketContext,
+  calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, ${marketContext} market context, and a ${Math.round(recoveryFactor * 100)}% recovery factor.`,
+  confidence
+};
 }
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
