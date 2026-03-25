@@ -562,8 +562,24 @@ if (actionType === "pricing" && marketContext === "constrained") {
 if (actionType === "visibility") {
   confidence = "medium";
 }
-  
-  return {
+  let executiveSummary = "Moderate revenue opportunity with manageable execution risk.";
+
+if (actionType === "pricing" && marketContext === "constrained") {
+  executiveSummary = "Immediate and high-impact revenue opportunity driven by pricing optimization in a high-demand environment.";
+}
+
+else if (actionType === "pricing" && marketContext === "demand_available") {
+  executiveSummary = "Pricing adjustments can unlock incremental revenue, though impact remains dependent on underlying demand levels.";
+}
+
+else if (actionType === "conversion") {
+  executiveSummary = "Conversion improvements provide steady and reliable revenue gains through better demand capture.";
+}
+
+else if (actionType === "visibility") {
+  executiveSummary = "Visibility enhancements support long-term revenue growth but will not generate immediate uplift.";
+}
+return {
   impact_type: "revenue_uplift",
   impact_range: {
     low,
@@ -571,7 +587,9 @@ if (actionType === "visibility") {
   },
   impact_timeline: impactTimeline,
   market_context: marketContext,
-  calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, ${marketContext} market context, ${actionType} action type, and a ${Math.round(recoveryFactor * 100)}% adjusted recovery factor.`
+  executive_summary: executiveSummary,   // 👈 NEW
+  calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, ${marketContext} market context, ${actionType} action type, and a ${Math.round(recoveryFactor * 100)}% adjusted recovery factor.`,
+  confidence
 };
 }
 
