@@ -452,16 +452,16 @@ return actions.slice(0, 2).map(a => ({
 }));
 }
 
-function buildFinancialImpact({ driver, focus, diagnosis, action, detection, rows = [] }) {
-  const adrValues = rows
+function buildFinancialImpact({ driver, focus, diagnosis, action, detection, pmsRows = [], strRows = [] }) {
+  const adrValues = pmsRows
     .map(r => Number(r.adr ?? r.ADR ?? 0))
     .filter(v => !Number.isNaN(v) && v > 0);
 
-  const rnValues = rows
+  const rnValues = pmsRows
     .map(r => Number(r.room_nights ?? r.roomNights ?? r.rn ?? r.RN ?? 0))
     .filter(v => !Number.isNaN(v) && v > 0);
 
-  const mpiValues = rows
+  const mpiValues = strRows
     .map(r => Number(r.mpi ?? r.MPI ?? 0))
     .filter(v => !Number.isNaN(v) && v > 0);
 
@@ -484,7 +484,7 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, row
     return {
       impact_type: "revenue_uplift",
       impact_range: { low: null, high: null },
-      calculation_logic: "Insufficient data to estimate financial impact credibly.",
+      calculation_logic: "Insufficient PMS or STR data to estimate financial impact credibly.",
       confidence: "low"
     };
   }
@@ -518,7 +518,7 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, row
 
   let confidence = "medium";
   if (avgADR > 0 && totalRN > 0 && avgMPI < 95) confidence = "high";
-  if (avgADR <= 0 || totalRN <= 0) confidence = "low";
+  if (avgMPI >= 98) confidence = "low";
 
   return {
     impact_type: "revenue_uplift",
@@ -526,7 +526,7 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, row
       low,
       high
     },
-    calculation_logic: `Based on average MPI ${avgMPI.toFixed(1)}, total room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, and a ${Math.round(recoveryFactor * 100)}% recovery factor.`,
+    calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, PMS ADR ${Math.round(avgADR)}, and a ${Math.round(recoveryFactor * 100)}% recovery factor.`,
     confidence
   };
 }
@@ -1535,14 +1535,15 @@ const actions = buildActionsFromDriver(driver, focus);
 
 const enrichedActions = actions.map(action => ({
   ...action,
-  financial_impact: buildFinancialImpact({
-    driver,
-    focus,
-    diagnosis,
-    action,
-    detection,
-    rows: pmsRows
-  })
+financial_impact: buildFinancialImpact({
+  driver,
+  focus,
+  diagnosis,
+  action,
+  detection,
+  pmsRows,
+  strRows
+})
 }));
 
 console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
