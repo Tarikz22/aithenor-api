@@ -1424,9 +1424,6 @@ async function handler(req, res) {
     const context = (req.body?.context || '').toString().trim();
 
     const workbook = await getWorkbookFromRequest(req);
-console.log('🚨 DATA CONTEXT START 🚨');
-console.log(JSON.stringify(dataContext, null, 2));
-console.log('🚨 DATA CONTEXT END 🚨');
 
 const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
 if (!strRows.length) {
