@@ -1556,8 +1556,8 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
   };
 }
 function buildTotalOpportunity(actions = []) {
-  let totalLow = 0;
-  let totalHigh = 0;
+  let grossLow = 0;
+  let grossHigh = 0;
 
   const driverImpact = {};
 
@@ -1565,8 +1565,8 @@ function buildTotalOpportunity(actions = []) {
     const low = a.financial_impact?.impact_range?.low || 0;
     const high = a.financial_impact?.impact_range?.high || 0;
 
-    totalLow += low;
-    totalHigh += high;
+    grossLow += low;
+    grossHigh += high;
 
     const driver = a.driver || "other";
 
@@ -1577,7 +1577,16 @@ function buildTotalOpportunity(actions = []) {
     driverImpact[driver] += high;
   });
 
-  // find dominant driver
+  // overlap factor
+  let overlapFactor = 1;
+
+  if (actions.length === 2) overlapFactor = 0.85;
+  if (actions.length >= 3) overlapFactor = 0.7;
+
+  const adjustedLow = Math.round(grossLow * overlapFactor);
+  const adjustedHigh = Math.round(grossHigh * overlapFactor);
+
+  // dominant driver
   let priorityDriver = "mixed";
   let maxImpact = 0;
 
@@ -1588,21 +1597,44 @@ function buildTotalOpportunity(actions = []) {
     }
   });
 
+  // portfolio confidence
+  let confidence = "medium";
+
+  const highConfidenceActions = actions.filter(
+    a => a.financial_impact?.confidence === "high"
+  ).length;
+
+  if (highConfidenceActions >= actions.length / 2) {
+    confidence = "high";
+  }
+
+  if (actions.length === 0) {
+    confidence = "low";
+  }
+
   // executive summary
-  let summary = "Revenue opportunity is diversified across multiple commercial levers.";
+  let summary = "Revenue opportunity exists across multiple levers with moderate overlap.";
 
   if (priorityDriver === "pricing") {
-    summary = "Primary revenue recovery opportunity is driven by pricing optimization.";
+    summary = "Primary revenue recovery is driven by pricing, with some overlap across actions.";
   } else if (priorityDriver === "conversion") {
-    summary = "Revenue recovery is mainly driven by improving conversion performance.";
+    summary = "Conversion improvements represent the main revenue opportunity, with moderate overlap.";
   } else if (priorityDriver === "visibility") {
-    summary = "Revenue growth is dependent on strengthening market visibility over time.";
+    summary = "Revenue growth depends on visibility improvements, with longer realization and overlap across actions.";
   }
 
   return {
-    low: Math.round(totalLow),
-    high: Math.round(totalHigh),
+    gross_opportunity: {
+      low: Math.round(grossLow),
+      high: Math.round(grossHigh)
+    },
+    adjusted_opportunity: {
+      low: adjustedLow,
+      high: adjustedHigh
+    },
+    overlap_factor: overlapFactor,
     priority_driver: priorityDriver,
+    confidence,
     summary
   };
 }
