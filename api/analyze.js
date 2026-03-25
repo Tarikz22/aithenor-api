@@ -985,8 +985,6 @@ function detectDataContext(workbook) {
 }
 
 function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) {
-  const actions = buildActionsFromDriver(driver, focus);
-console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
   console.log("ENTER DRIVER FUNCTION");
   const avgMPI = Number(diagnosis?.metrics?.avgMPI || 0);
   const avgARI = Number(diagnosis?.metrics?.avgARI || 0);
@@ -1451,6 +1449,8 @@ console.log('🎯 FOCUS END 🎯');
     }
 
     const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
+      const actions = buildActionsFromDriver(driver, focus);
+console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
 return res.status(200).json({
   success: true,
