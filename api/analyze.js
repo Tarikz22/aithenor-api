@@ -442,8 +442,14 @@ function buildActionsFromDriver(driver, focus) {
 
   const actions = [primary, secondary].filter(Boolean);
 
-  return actions.slice(0, 2);
-}
+return actions.slice(0, 2).map(a => ({
+  action_id: a.action_id,
+  driver: a.driver,
+  segment: a.segment,
+  title: a.title,
+  description: a.description,
+  priority: a.priority
+}));
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
   const driverCategory = opportunity.driver;
