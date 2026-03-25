@@ -452,6 +452,85 @@ return actions.slice(0, 2).map(a => ({
 }));
 }
 
+function buildFinancialImpact({ driver, focus, diagnosis, action, detection, rows = [] }) {
+  const adrValues = rows
+    .map(r => Number(r.adr ?? r.ADR ?? 0))
+    .filter(v => !Number.isNaN(v) && v > 0);
+
+  const rnValues = rows
+    .map(r => Number(r.room_nights ?? r.roomNights ?? r.rn ?? r.RN ?? 0))
+    .filter(v => !Number.isNaN(v) && v > 0);
+
+  const mpiValues = rows
+    .map(r => Number(r.mpi ?? r.MPI ?? 0))
+    .filter(v => !Number.isNaN(v) && v > 0);
+
+  const avgADR =
+    adrValues.length > 0
+      ? adrValues.reduce((a, b) => a + b, 0) / adrValues.length
+      : null;
+
+  const totalRN =
+    rnValues.length > 0
+      ? rnValues.reduce((a, b) => a + b, 0)
+      : null;
+
+  const avgMPI =
+    mpiValues.length > 0
+      ? mpiValues.reduce((a, b) => a + b, 0) / mpiValues.length
+      : null;
+
+  if (!avgADR || !totalRN || !avgMPI) {
+    return {
+      impact_type: "revenue_uplift",
+      impact_range: { low: null, high: null },
+      calculation_logic: "Insufficient data to estimate financial impact credibly.",
+      confidence: "low"
+    };
+  }
+
+  let recoveryFactor = 0.15;
+
+  if (avgMPI < 90) {
+    recoveryFactor = 0.4;
+  } else if (avgMPI < 95) {
+    recoveryFactor = 0.25;
+  } else if (avgMPI < 98) {
+    recoveryFactor = 0.15;
+  } else {
+    recoveryFactor = 0.08;
+  }
+
+  const trend =
+    detection?.trend ||
+    detection?.performance_trend ||
+    diagnosis?.trend ||
+    "stable";
+
+  if (trend === "declining") recoveryFactor *= 0.8;
+  if (trend === "improving") recoveryFactor *= 1.1;
+
+  const recoverableRN = totalRN * recoveryFactor;
+  const rawImpact = recoverableRN * avgADR;
+
+  const low = Math.round(rawImpact * 0.35);
+  const high = Math.round(rawImpact * 0.65);
+
+  let confidence = "medium";
+  if (avgADR > 0 && totalRN > 0 && avgMPI < 95) confidence = "high";
+  if (avgADR <= 0 || totalRN <= 0) confidence = "low";
+
+  return {
+    impact_type: "revenue_uplift",
+    impact_range: {
+      low,
+      high
+    },
+    calculation_logic: `Based on average MPI ${avgMPI.toFixed(1)}, total room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, and a ${Math.round(recoveryFactor * 100)}% recovery factor.`,
+    confidence
+  };
+}
+
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
   const driverCategory = opportunity.driver;
   const segmentFocus = opportunity.segment || 'Retail';
@@ -1452,16 +1531,31 @@ console.log('🎯 FOCUS END 🎯');
     }
 
     const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
-      const actions = buildActionsFromDriver(driver, focus);
+const actions = buildActionsFromDriver(driver, focus);
+
+const enrichedActions = actions.map(action => ({
+  ...action,
+  financial_impact: buildFinancialImpact({
+    driver,
+    focus,
+    diagnosis,
+    action,
+    detection,
+    rows: pmsRows
+  })
+}));
+
 console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
+console.log("DEBUG enrichedActions:", JSON.stringify(enrichedActions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
+
 return res.status(200).json({
   success: true,
   detection,
   diagnosis,
   focus,
   driver,
-  actions
+  actions: enrichedActions
 });
     
     const rowKpis = strRows.map((row, index) => {
