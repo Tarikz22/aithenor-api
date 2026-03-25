@@ -484,21 +484,18 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, pms
     return {
       impact_type: "revenue_uplift",
       impact_range: { low: null, high: null },
+      impact_timeline: "unknown",
+      market_context: "unknown",
+      executive_summary: "Insufficient PMS or STR data to estimate financial impact credibly.",
       calculation_logic: "Insufficient PMS or STR data to estimate financial impact credibly.",
       confidence: "low"
     };
   }
-let actionType = "conversion";
 
-if (action?.driver === "pricing") {
-  actionType = "pricing";
-} else if (action?.driver === "visibility") {
-  actionType = "visibility";
-}
   let recoveryFactor = 0.15;
 
   if (avgMPI < 90) {
-    recoveryFactor = 0.4;
+    recoveryFactor = 0.40;
   } else if (avgMPI < 95) {
     recoveryFactor = 0.25;
   } else if (avgMPI < 98) {
@@ -506,20 +503,77 @@ if (action?.driver === "pricing") {
   } else {
     recoveryFactor = 0.08;
   }
-let actionMultiplier = 1.0;
 
-if (actionType === "pricing") actionMultiplier = 1.2;
-if (actionType === "visibility") actionMultiplier = 0.7;
-
-recoveryFactor *= actionMultiplier;
+  // IMPORTANT: use the real trend field from diagnosis
   const trend =
+    diagnosis?.trend_status ||
+    detection?.trend_status ||
     detection?.trend ||
     detection?.performance_trend ||
-    diagnosis?.trend ||
     "stable";
 
-  if (trend === "declining") recoveryFactor *= 0.8;
+  if (trend === "worsening" || trend === "declining") recoveryFactor *= 0.8;
   if (trend === "improving") recoveryFactor *= 1.1;
+
+  let marketContext = "competitive";
+
+  if (avgMPI < 90) {
+    marketContext = "demand_available";
+  } else if (avgMPI > 100) {
+    marketContext = "constrained";
+  }
+
+  // IMPORTANT: align with real driver naming
+  const driverCategory =
+    driver?.driver_category ||
+    driver?.primary_driver ||
+    driver?.category ||
+    action?.driver ||
+    "conversion";
+
+  let impactTimeline = "mid_term";
+
+  if (driverCategory === "pricing" || driverCategory === "pricing_positioning") {
+    impactTimeline = "short_term";
+  } else if (driverCategory === "conversion") {
+    impactTimeline = "short_to_mid";
+  } else if (driverCategory === "visibility") {
+    impactTimeline = "mid_to_long";
+  } else if (driverCategory === "mix_strategy") {
+    impactTimeline = "mid_term";
+  }
+
+  let actionType = "conversion";
+
+  if (action?.driver === "pricing" || driverCategory === "pricing" || driverCategory === "pricing_positioning") {
+    actionType = "pricing";
+  } else if (action?.driver === "visibility" || driverCategory === "visibility") {
+    actionType = "visibility";
+  } else if (action?.driver === "conversion" || driverCategory === "conversion") {
+    actionType = "conversion";
+  } else if (driverCategory === "mix_strategy") {
+    actionType = "mix_strategy";
+  }
+
+  let actionMultiplier = 1.0;
+
+  if (actionType === "pricing") actionMultiplier = 1.2;
+  if (actionType === "visibility") actionMultiplier = 0.7;
+  if (actionType === "mix_strategy") actionMultiplier = 0.9;
+
+  recoveryFactor *= actionMultiplier;
+
+  // IMPORTANT: context adjustment must happen BEFORE impact calculation
+  if (actionType === "pricing" && marketContext === "constrained") {
+    recoveryFactor *= 1.2;
+  }
+
+  if (actionType === "pricing" && marketContext === "demand_available") {
+    recoveryFactor *= 0.8;
+  }
+
+  // reliability cap
+  recoveryFactor = Math.max(0.03, Math.min(recoveryFactor, 0.60));
 
   const recoverableRN = totalRN * recoveryFactor;
   const rawImpact = recoverableRN * avgADR;
@@ -528,69 +582,38 @@ recoveryFactor *= actionMultiplier;
   const high = Math.round(rawImpact * 0.65);
 
   let confidence = "medium";
+
   if (avgADR > 0 && totalRN > 0 && avgMPI < 95) confidence = "high";
   if (avgMPI >= 98) confidence = "low";
+  if (actionType === "pricing" && marketContext === "constrained") confidence = "high";
+  if (actionType === "visibility") confidence = "medium";
 
-  let marketContext = "competitive";
-
-if (avgMPI < 90) {
-  marketContext = "demand_available";
-} else if (avgMPI > 100) {
-  marketContext = "constrained";
-}
-  
-  let impactTimeline = "mid_term";
-if (driver?.driver_category === "pricing_positioning" && marketContext === "constrained") {
-  recoveryFactor *= 1.2;
-}
-
-if (driver?.driver_category === "pricing_positioning" && marketContext === "demand_available") {
-  recoveryFactor *= 0.8;
-}
-  
-if (driver?.driver_category === "pricing_positioning") {
-  impactTimeline = "short_term";
-} else if (driver?.driver_category === "conversion") {
-  impactTimeline = "short_to_mid";
-} else if (driver?.driver_category === "visibility") {
-  impactTimeline = "mid_to_long";
-}
-if (actionType === "pricing" && marketContext === "constrained") {
-  confidence = "high";
-}
-
-if (actionType === "visibility") {
-  confidence = "medium";
-}
   let executiveSummary = "Moderate revenue opportunity with manageable execution risk.";
 
-if (actionType === "pricing" && marketContext === "constrained") {
-  executiveSummary = "Immediate and high-impact revenue opportunity driven by pricing optimization in a high-demand environment.";
-}
+  if (actionType === "pricing" && marketContext === "constrained") {
+    executiveSummary = "Immediate and high-impact revenue opportunity driven by pricing optimization in a high-demand environment.";
+  } else if (actionType === "pricing" && marketContext === "demand_available") {
+    executiveSummary = "Pricing adjustments can unlock incremental revenue, though impact remains dependent on underlying demand levels.";
+  } else if (actionType === "conversion") {
+    executiveSummary = "Conversion improvements provide steady and reliable revenue gains through better demand capture.";
+  } else if (actionType === "visibility") {
+    executiveSummary = "Visibility enhancements support long-term revenue growth but will not generate immediate uplift.";
+  } else if (actionType === "mix_strategy") {
+    executiveSummary = "Business mix adjustments can improve revenue quality, though impact materializes progressively over time.";
+  }
 
-else if (actionType === "pricing" && marketContext === "demand_available") {
-  executiveSummary = "Pricing adjustments can unlock incremental revenue, though impact remains dependent on underlying demand levels.";
-}
-
-else if (actionType === "conversion") {
-  executiveSummary = "Conversion improvements provide steady and reliable revenue gains through better demand capture.";
-}
-
-else if (actionType === "visibility") {
-  executiveSummary = "Visibility enhancements support long-term revenue growth but will not generate immediate uplift.";
-}
-return {
-  impact_type: "revenue_uplift",
-  impact_range: {
-    low,
-    high
-  },
-  impact_timeline: impactTimeline,
-  market_context: marketContext,
-  executive_summary: executiveSummary,   // 👈 NEW
-  calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, ${marketContext} market context, ${actionType} action type, and a ${Math.round(recoveryFactor * 100)}% adjusted recovery factor.`,
-  confidence
-};
+  return {
+    impact_type: "revenue_uplift",
+    impact_range: {
+      low,
+      high
+    },
+    impact_timeline: impactTimeline,
+    market_context: marketContext,
+    executive_summary: executiveSummary,
+    calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, PMS ADR ${Math.round(avgADR)}, ${marketContext} market context, ${actionType} action type, ${trend} trend, and a ${Math.round(recoveryFactor * 100)}% adjusted recovery factor.`,
+    confidence
+  };
 }
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
@@ -1577,16 +1600,14 @@ function buildTotalOpportunity(actions = []) {
     driverImpact[driver] += high;
   });
 
-  // overlap factor
   let overlapFactor = 1;
 
   if (actions.length === 2) overlapFactor = 0.85;
-  if (actions.length >= 3) overlapFactor = 0.7;
+  if (actions.length >= 3) overlapFactor = 0.70;
 
   const adjustedLow = Math.round(grossLow * overlapFactor);
   const adjustedHigh = Math.round(grossHigh * overlapFactor);
 
-  // dominant driver
   let priorityDriver = "mixed";
   let maxImpact = 0;
 
@@ -1597,22 +1618,18 @@ function buildTotalOpportunity(actions = []) {
     }
   });
 
-  // portfolio confidence
   let confidence = "medium";
 
   const highConfidenceActions = actions.filter(
     a => a.financial_impact?.confidence === "high"
   ).length;
 
-  if (highConfidenceActions >= actions.length / 2) {
+  if (actions.length === 0) {
+    confidence = "low";
+  } else if (highConfidenceActions >= Math.ceil(actions.length / 2)) {
     confidence = "high";
   }
 
-  if (actions.length === 0) {
-    confidence = "low";
-  }
-
-  // executive summary
   let summary = "Revenue opportunity exists across multiple levers with moderate overlap.";
 
   if (priorityDriver === "pricing") {
@@ -1621,6 +1638,8 @@ function buildTotalOpportunity(actions = []) {
     summary = "Conversion improvements represent the main revenue opportunity, with moderate overlap.";
   } else if (priorityDriver === "visibility") {
     summary = "Revenue growth depends on visibility improvements, with longer realization and overlap across actions.";
+  } else if (priorityDriver === "mix_strategy") {
+    summary = "Revenue opportunity is linked to business mix optimization, with moderate overlap across actions.";
   }
 
   return {
@@ -1690,21 +1709,44 @@ financial_impact: buildFinancialImpact({
   strRows
 })
 }));
+const actions = buildActionsFromDriver(driver, focus);
+
+const enrichedActions = actions.map(action => ({
+  ...action,
+  financial_impact: buildFinancialImpact({
+    driver,
+    focus,
+    diagnosis,
+    action,
+    detection,
+    pmsRows,
+    strRows
+  })
+}));
+
 const totalOpportunity = buildTotalOpportunity(enrichedActions);
-    
+
 console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
 console.log("DEBUG enrichedActions:", JSON.stringify(enrichedActions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
+console.log("DEBUG totalOpportunity:", JSON.stringify(totalOpportunity, null, 2));
 
+// ACTIVE PHASE 2 ENGINE RETURN
 return res.status(200).json({
   success: true,
   detection,
   diagnosis,
   focus,
   driver,
-  total_opportunity: totalOpportunity,   // 👈 NEW
+  total_opportunity: totalOpportunity,
   actions: enrichedActions
 });
+    // NOTE:
+// Any legacy recommendation / Claude / Supabase recommendation flow below this point
+// is currently unreachable because the active Phase 2 engine returns above.
+// Do not build frontend on the legacy flow.
+// Frontend must consume the active response:
+// detection, diagnosis, focus, driver, total_opportunity, actions.
     
     const rowKpis = strRows.map((row, index) => {
       const rgi = getMetricFromRow(row, ['RGI', 'RGI (Index)', 'RevPAR Index', 'RevPAR Index (RGI)']);
