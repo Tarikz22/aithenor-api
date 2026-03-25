@@ -1555,6 +1555,57 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     segment_analysis: segmentAnalysis
   };
 }
+function buildTotalOpportunity(actions = []) {
+  let totalLow = 0;
+  let totalHigh = 0;
+
+  const driverImpact = {};
+
+  actions.forEach(a => {
+    const low = a.financial_impact?.impact_range?.low || 0;
+    const high = a.financial_impact?.impact_range?.high || 0;
+
+    totalLow += low;
+    totalHigh += high;
+
+    const driver = a.driver || "other";
+
+    if (!driverImpact[driver]) {
+      driverImpact[driver] = 0;
+    }
+
+    driverImpact[driver] += high;
+  });
+
+  // find dominant driver
+  let priorityDriver = "mixed";
+  let maxImpact = 0;
+
+  Object.entries(driverImpact).forEach(([driver, value]) => {
+    if (value > maxImpact) {
+      maxImpact = value;
+      priorityDriver = driver;
+    }
+  });
+
+  // executive summary
+  let summary = "Revenue opportunity is diversified across multiple commercial levers.";
+
+  if (priorityDriver === "pricing") {
+    summary = "Primary revenue recovery opportunity is driven by pricing optimization.";
+  } else if (priorityDriver === "conversion") {
+    summary = "Revenue recovery is mainly driven by improving conversion performance.";
+  } else if (priorityDriver === "visibility") {
+    summary = "Revenue growth is dependent on strengthening market visibility over time.";
+  }
+
+  return {
+    low: Math.round(totalLow),
+    high: Math.round(totalHigh),
+    priority_driver: priorityDriver,
+    summary
+  };
+}
 
 // --------------------
 // MAIN HANDLER
@@ -1607,7 +1658,8 @@ financial_impact: buildFinancialImpact({
   strRows
 })
 }));
-
+const totalOpportunity = buildTotalOpportunity(enrichedActions);
+    
 console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
 console.log("DEBUG enrichedActions:", JSON.stringify(enrichedActions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
@@ -1618,6 +1670,7 @@ return res.status(200).json({
   diagnosis,
   focus,
   driver,
+  total_opportunity: totalOpportunity,   // 👈 NEW
   actions: enrichedActions
 });
     
