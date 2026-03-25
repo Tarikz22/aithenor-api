@@ -1460,11 +1460,6 @@ console.log('🎯 FOCUS END 🎯');
 console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
 return res.status(200).json({
-  success: true,
-  detection,
-  diagnosis,
-  focus,
-  driver,
   actions
 });
     
