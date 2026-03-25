@@ -1424,7 +1424,6 @@ async function handler(req, res) {
     const context = (req.body?.context || '').toString().trim();
 
     const workbook = await getWorkbookFromRequest(req);
-    const dataContext = detectDataContext(workbook);
 console.log('🚨 DATA CONTEXT START 🚨');
 console.log(JSON.stringify(dataContext, null, 2));
 console.log('🚨 DATA CONTEXT END 🚨');
@@ -1460,6 +1459,11 @@ console.log('🎯 FOCUS END 🎯');
 console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
 return res.status(200).json({
+  success: true,
+  detection,
+  diagnosis,
+  focus,
+  driver,
   actions
 });
     
@@ -1577,15 +1581,15 @@ recommendations.sort((a, b) => {
       });
 
       finalRecommendations.push({
-        recommendation,
-        title: aiNarrative?.title || recommendation.title,
-        root_cause: aiNarrative?.rootCause || recommendation.root_cause,
-        expected_outcome: aiNarrative?.expectedOutcome || recommendation.expected_outcome,
-        actions:
-          Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
-            ? aiNarrative.actions.slice(0, 3)
-            : recommendation.actions
-      });
+  ...recommendation,
+  title: aiNarrative?.title || recommendation.title,
+  root_cause: aiNarrative?.rootCause || recommendation.root_cause,
+  expected_outcome: aiNarrative?.expectedOutcome || recommendation.expected_outcome,
+  actions:
+    Array.isArray(aiNarrative?.actions) && aiNarrative.actions.length
+      ? aiNarrative.actions.slice(0, 3)
+      : recommendation.actions
+});
     }
 
     const recommendationsPayload = finalRecommendations.map(item => ({
