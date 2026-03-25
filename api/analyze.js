@@ -1699,20 +1699,6 @@ const actions = buildActionsFromDriver(driver, focus);
 
 const enrichedActions = actions.map(action => ({
   ...action,
-financial_impact: buildFinancialImpact({
-  driver,
-  focus,
-  diagnosis,
-  action,
-  detection,
-  pmsRows,
-  strRows
-})
-}));
-const actions = buildActionsFromDriver(driver, focus);
-
-const enrichedActions = actions.map(action => ({
-  ...action,
   financial_impact: buildFinancialImpact({
     driver,
     focus,
