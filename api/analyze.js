@@ -153,6 +153,65 @@ function computePriority(rgi, mpi, ari) {
   return 'Low';
 }
 
+const ACTION_LIBRARY = [
+  {
+    action_id: "RET_PRICING_01",
+    driver: "pricing",
+    segment: "retail",
+    title: "Adjust BAR premium vs comp set",
+    description: "Reduce transient BAR premium on shoulder days where ARI > 105 and MPI < 95 to restore share without damaging overall rate positioning.",
+    priority: "high"
+  },
+  {
+    action_id: "RET_PRICING_02",
+    driver: "pricing",
+    segment: "retail",
+    title: "Deploy fenced tactical offers",
+    description: "Introduce targeted, fenced discounts (mobile, geo, LOS) on low-demand dates to stimulate demand without public rate dilution.",
+    priority: "high"
+  },
+  {
+    action_id: "RET_VIS_01",
+    driver: "visibility",
+    segment: "retail",
+    title: "Boost OTA visibility",
+    description: "Increase OTA ranking and exposure during low MPI periods through visibility boosters and preferred placements.",
+    priority: "medium"
+  },
+  {
+    action_id: "RET_VIS_02",
+    driver: "visibility",
+    segment: "retail",
+    title: "Activate digital demand",
+    description: "Increase brand.com and paid channel campaigns during declining MPI periods to rebuild demand flow.",
+    priority: "medium"
+  },
+  {
+    action_id: "RET_CONV_01",
+    driver: "conversion",
+    segment: "retail",
+    title: "Optimize website conversion",
+    description: "Improve booking conversion through offer clarity, UX improvements, and simplified booking paths.",
+    priority: "medium"
+  },
+  {
+    action_id: "RET_CONV_02",
+    driver: "conversion",
+    segment: "retail",
+    title: "Fix OTA content & parity",
+    description: "Enhance OTA conversion by improving content quality and ensuring strict rate parity across channels.",
+    priority: "medium"
+  },
+  {
+    action_id: "MIX_01",
+    driver: "mix_strategy",
+    segment: "retail",
+    title: "Shift toward higher-rated demand",
+    description: "Reduce reliance on low-rated demand and reallocate inventory toward higher ADR segments.",
+    priority: "high"
+  }
+];
+
 function deriveDriverCategory(mpi, ari, rgi) {
   if (rgi === null || ari === null) {
     return 'pricing_positioning';
@@ -338,6 +397,56 @@ function buildActionTexts({ driverCategory, segmentFocus = 'Retail', mpi, ari, r
 
   return actions;
 }
+
+function buildActionsFromDriver(driver, focus) {
+  const primaryDriver = driver?.primary_driver;
+  const secondaryDriver = driver?.secondary_driver;
+  const segment = focus?.focus_segment;
+
+  if (segment !== "retail") {
+    return [];
+  }
+
+  // Primary action
+  const primaryActions = ACTION_LIBRARY.filter(
+    a => a.driver === primaryDriver && a.segment === "retail"
+  );
+
+  const primary = primaryActions[0] || null;
+
+  // Secondary action (if exists)
+  let secondary = null;
+
+  if (secondaryDriver) {
+    const secondaryActions = ACTION_LIBRARY.filter(
+      a => a.driver === secondaryDriver && a.segment === "retail"
+    );
+    secondary = secondaryActions[0] || null;
+  } else {
+    // fallback logic
+    const fallbackMap = {
+      pricing: "conversion",
+      visibility: "conversion",
+      conversion: "visibility",
+      mix_strategy: "pricing"
+    };
+
+    const fallbackDriver = fallbackMap[primaryDriver];
+
+    const fallbackActions = ACTION_LIBRARY.filter(
+      a => a.driver === fallbackDriver && a.segment === "retail"
+    );
+
+    secondary = fallbackActions[0] || null;
+  }
+
+  const actions = [primary, secondary].filter(Boolean);
+
+  return actions.slice(0, 2);
+}
+
+const actions = buildActionsFromDriver(driver, focus);
+console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
   const driverCategory = opportunity.driver;
@@ -1344,12 +1453,13 @@ console.log('🎯 FOCUS END 🎯');
 
     const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
-    return res.status(200).json({
+return res.status(200).json({
   success: true,
   detection,
   diagnosis,
   focus,
-  driver
+  driver,
+  actions
 });
     
     const rowKpis = strRows.map((row, index) => {
