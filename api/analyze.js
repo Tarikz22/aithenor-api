@@ -450,6 +450,7 @@ return actions.slice(0, 2).map(a => ({
   description: a.description,
   priority: a.priority
 }));
+}
 
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
   const driverCategory = opportunity.driver;
