@@ -488,7 +488,13 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, pms
       confidence: "low"
     };
   }
+let actionType = "conversion";
 
+if (action?.driver === "pricing") {
+  actionType = "pricing";
+} else if (action?.driver === "visibility") {
+  actionType = "visibility";
+}
   let recoveryFactor = 0.15;
 
   if (avgMPI < 90) {
@@ -500,7 +506,12 @@ function buildFinancialImpact({ driver, focus, diagnosis, action, detection, pms
   } else {
     recoveryFactor = 0.08;
   }
+let actionMultiplier = 1.0;
 
+if (actionType === "pricing") actionMultiplier = 1.2;
+if (actionType === "visibility") actionMultiplier = 0.7;
+
+recoveryFactor *= actionMultiplier;
   const trend =
     detection?.trend ||
     detection?.performance_trend ||
@@ -544,6 +555,13 @@ if (driver?.driver_category === "pricing_positioning") {
 } else if (driver?.driver_category === "visibility") {
   impactTimeline = "mid_to_long";
 }
+if (actionType === "pricing" && marketContext === "constrained") {
+  confidence = "high";
+}
+
+if (actionType === "visibility") {
+  confidence = "medium";
+}
   
   return {
   impact_type: "revenue_uplift",
@@ -553,8 +571,7 @@ if (driver?.driver_category === "pricing_positioning") {
   },
   impact_timeline: impactTimeline,
   market_context: marketContext,
-  calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, ${marketContext} market context, and a ${Math.round(recoveryFactor * 100)}% recovery factor.`,
-  confidence
+  calculation_logic: `Based on STR MPI ${avgMPI.toFixed(1)}, PMS room nights ${Math.round(totalRN)}, ADR ${Math.round(avgADR)}, ${marketContext} market context, ${actionType} action type, and a ${Math.round(recoveryFactor * 100)}% adjusted recovery factor.`
 };
 }
 
