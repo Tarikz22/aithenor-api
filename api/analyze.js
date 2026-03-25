@@ -445,9 +445,6 @@ function buildActionsFromDriver(driver, focus) {
   return actions.slice(0, 2);
 }
 
-const actions = buildActionsFromDriver(driver, focus);
-console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
-
 function buildRecommendationFromOpportunity(opportunity, hotelName, period) {
   const driverCategory = opportunity.driver;
   const segmentFocus = opportunity.segment || 'Retail';
@@ -988,6 +985,8 @@ function detectDataContext(workbook) {
 }
 
 function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) {
+  const actions = buildActionsFromDriver(driver, focus);
+console.log("DEBUG actions:", JSON.stringify(actions, null, 2));
   console.log("ENTER DRIVER FUNCTION");
   const avgMPI = Number(diagnosis?.metrics?.avgMPI || 0);
   const avgARI = Number(diagnosis?.metrics?.avgARI || 0);
