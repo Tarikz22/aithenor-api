@@ -1925,25 +1925,6 @@ recommendations.sort((a, b) => {
     }
 console.log('DEBUG finalRecommendations sample:', JSON.stringify(finalRecommendations[0], null, 2));
     console.log('DEBUG actions field:', finalRecommendations[0]?.actions);
-const actionsPayload = finalRecommendations.flatMap(item =>
-(item.actions || []).map(action => ({
-  hotel_name: item.hotel_name,
-  period: item.period,
-  snapshot_date: periodMeta.snapshot_date,
-  period_type: periodMeta.period_type,
-  period_start: periodMeta.period_start,
-  period_end: periodMeta.period_end,
-  period_key: periodMeta.period_key,
-  period_label: periodMeta.period_label,
-  driver: action.driver || null,
-  segment: action.segment || null,
-  priority: action.priority || null
-
-  // NEW STRUCTURE
-  title: action.title,
-  action_text: action.description,
-}))
-);
 
 const legacyActionsPayload = finalRecommendations.flatMap(item =>
   (item.actions || []).map(action => ({
@@ -1996,7 +1977,7 @@ if (legacyActionsPayload.length > 0) {
         finding: item.finding,
         root_cause: item.root_cause,
         expected_outcome: item.expected_outcome,
-        owner_department: item.owner_department,.
+        owner_department: item.owner_department,
         mpi: item.mpi,
         ari: item.ari,
         rgi: item.rgi,
