@@ -1786,21 +1786,6 @@ if (recommendationsError) {
   throw recommendationsError;
 }
 
-const actionsPayload = enrichedActions.map(action => ({
-  hotel_name: hotelCode,
-  title: action.title,
-  action_text: action.description,
-  expected_impact_value: action.financial_impact?.impact_range?.high || null,
-  status: 'open',
-  period: periodMeta.period_label,
-  snapshot_date: periodMeta.snapshot_date,
-  period_type: periodMeta.period_type,
-  period_start: periodMeta.period_start,
-  period_end: periodMeta.period_end,
-  period_key: periodMeta.period_key,
-  period_label: periodMeta.period_label
-}));
-
 const { error: actionsError } = await supabase
   .from('actions')
   .insert(actionsPayload);
