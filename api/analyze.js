@@ -1746,8 +1746,7 @@ if (engineSaveError) {
 
 // ACTIVE PHASE 2 ENGINE RETURN
 return res.status(200).json(enginePayload);
-
-});
+    
     // NOTE:
 // Any legacy recommendation / Claude / Supabase recommendation flow below this point
 // is currently unreachable because the active Phase 2 engine returns above.
