@@ -1951,18 +1951,23 @@ recommendations.sort((a, b) => {
 console.log('DEBUG finalRecommendations sample:', JSON.stringify(finalRecommendations[0], null, 2));
     console.log('DEBUG actions field:', finalRecommendations[0]?.actions);
 const actionsPayload = finalRecommendations.flatMap(item =>
-  (item.actions || []).map(actionText => ({
-    hotel_name: item.hotel_name,
-    period: item.period,
-    snapshot_date: periodMeta.snapshot_date,
-    period_type: periodMeta.period_type,
-    period_start: periodMeta.period_start,
-    period_end: periodMeta.period_end,
-    period_key: periodMeta.period_key,
-    period_label: periodMeta.period_label,
-    title: item.title,
-    action_text: actionText
-  }))
+(item.actions || []).map(action => ({
+  hotel_name: item.hotel_name,
+  period: item.period,
+  snapshot_date: periodMeta.snapshot_date,
+  period_type: periodMeta.period_type,
+  period_start: periodMeta.period_start,
+  period_end: periodMeta.period_end,
+  period_key: periodMeta.period_key,
+  period_label: periodMeta.period_label,
+
+  // NEW STRUCTURE
+  title: action.title,
+  action_text: action.description,
+  priority: action.priority || null,
+  driver: item.driver || null,
+  segment: item.segment || null
+}))
 );
     console.log('DEBUG actionsPayload length:', actionsPayload.length);
 console.log('DEBUG first action row:', JSON.stringify(actionsPayload[0] || null, null, 2));
