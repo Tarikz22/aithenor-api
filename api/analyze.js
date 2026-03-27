@@ -1746,6 +1746,68 @@ if (engineSaveError) {
 
 // ACTIVE PHASE 2 ENGINE RETURN
 return res.status(200).json(enginePayload);
+
+const ownerDepartmentByDriver = {
+  pricing: 'Revenue',
+  visibility: 'Revenue & Marketing',
+  conversion: 'Revenue & Marketing',
+  mix_strategy: 'Commercial'
+};
+
+const recommendationsPayload = enrichedActions.map(action => ({
+  hotel_name: hotelCode,
+  title: action.title,
+  department: ownerDepartmentByDriver[action.driver] || 'Commercial',
+  finding: action.description,
+  impact_value: action.financial_impact?.impact_range?.high || null,
+  impact_type: action.financial_impact?.impact_type || 'revenue_uplift',
+  expected_impact_value: action.financial_impact?.impact_range?.high || null,
+  status: 'open',
+  period: periodMeta.period_label,
+  root_cause: driver.driver_reason || diagnosis.diagnosis_type || 'Strategic commercial opportunity identified.',
+  expected_outcome: action.financial_impact?.executive_summary || 'Improve commercial performance through targeted action.',
+  owner_department: ownerDepartmentByDriver[action.driver] || 'Commercial',
+  priority: action.priority ? action.priority.charAt(0).toUpperCase() + action.priority.slice(1) : 'Medium',
+  driver: action.driver || null,
+  segment: focus.focus_segment || null,
+  snapshot_date: periodMeta.snapshot_date,
+  period_type: periodMeta.period_type,
+  period_start: periodMeta.period_start,
+  period_end: periodMeta.period_end,
+  period_key: periodMeta.period_key,
+  period_label: periodMeta.period_label
+}));
+
+const { error: recommendationsError } = await supabase
+  .from('Recommendations')
+  .insert(recommendationsPayload);
+
+if (recommendationsError) {
+  throw recommendationsError;
+}
+
+const actionsPayload = enrichedActions.map(action => ({
+  hotel_name: hotelCode,
+  title: action.title,
+  action_text: action.description,
+  expected_impact_value: action.financial_impact?.impact_range?.high || null,
+  status: 'open',
+  period: periodMeta.period_label,
+  snapshot_date: periodMeta.snapshot_date,
+  period_type: periodMeta.period_type,
+  period_start: periodMeta.period_start,
+  period_end: periodMeta.period_end,
+  period_key: periodMeta.period_key,
+  period_label: periodMeta.period_label
+}));
+
+const { error: actionsError } = await supabase
+  .from('actions')
+  .insert(actionsPayload);
+
+if (actionsError) {
+  throw actionsError;
+}
     
     // NOTE:
 // Any legacy recommendation / Claude / Supabase recommendation flow below this point
