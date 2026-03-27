@@ -1744,9 +1744,6 @@ if (engineSaveError) {
   throw engineSaveError;
 }
 
-// ACTIVE PHASE 2 ENGINE RETURN
-return res.status(200).json(enginePayload);
-
 const ownerDepartmentByDriver = {
   pricing: 'Revenue',
   visibility: 'Revenue & Marketing',
