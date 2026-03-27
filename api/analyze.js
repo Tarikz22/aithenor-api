@@ -1939,9 +1939,6 @@ const actionsPayload = finalRecommendations.flatMap(item =>
   // NEW STRUCTURE
   title: action.title,
   action_text: action.description,
-  priority: action.priority || null,
-  driver: item.driver || null,
-  segment: item.segment || null
 }))
 );
 
