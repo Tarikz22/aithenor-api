@@ -1175,18 +1175,28 @@ async function handler(req, res) {
       actions: enrichedActions
     };
 
-    const { error: engineSaveError } = await supabase.from('engine_outputs').insert({
-      hotel_code: hotelCode,
-      snapshot_date: periodMeta.snapshot_date,
-      generated_at: new Date().toISOString(),
-      source_file_name: req.body?.originalFileName || null,
-      period_label: periodMeta.period_label,
-      engine_json: enginePayload
-    });
+console.log('DEBUG about to insert engine_outputs');
+console.log('DEBUG engine_payload hotel_code:', hotelCode);
+console.log('DEBUG engine_payload period_label:', periodMeta.period_label);
 
-    if (engineSaveError) {
-      throw engineSaveError;
-    }
+const { data: engineInsertData, error: engineSaveError } = await supabase
+  .from('engine_outputs')
+  .insert({
+    hotel_code: hotelCode,
+    snapshot_date: periodMeta.snapshot_date,
+    generated_at: new Date().toISOString(),
+    source_file_name: req.body?.originalFileName || null,
+    period_label: periodMeta.period_label,
+    engine_json: enginePayload
+  })
+  .select();
+
+console.log('DEBUG engine_outputs insert data:', engineInsertData);
+console.log('DEBUG engine_outputs insert error:', engineSaveError);
+
+if (engineSaveError) {
+  throw engineSaveError;
+}
 
     const recommendationsPayload = buildRecommendationsPayload({
       hotelCode,
