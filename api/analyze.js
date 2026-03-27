@@ -1941,25 +1941,6 @@ recommendations.sort((a, b) => {
 });
     }
 
-    const recommendationsPayload = finalRecommendations.map(item => ({
-  hotel_name: item.hotel_name,
-  period: item.period,
-  snapshot_date: periodMeta.snapshot_date,
-  period_type: periodMeta.period_type,
-  period_start: periodMeta.period_start,
-  period_end: periodMeta.period_end,
-  period_key: periodMeta.period_key,
-  period_label: periodMeta.period_label,
-  title: item.title,
-  finding: item.finding,
-  root_cause: item.root_cause,
-  expected_outcome: item.expected_outcome,
-  owner_department: item.owner_department,
-  priority: item.priority,
-  driver: item.driver,
-  segment: item.segment,
-}));
-
     const { error: recommendationError } = await supabase
       .from('Recommendations')
       .insert(recommendationsPayload);
