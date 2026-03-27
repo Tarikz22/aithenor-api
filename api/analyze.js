@@ -1717,8 +1717,35 @@ console.log("DEBUG enrichedActions:", JSON.stringify(enrichedActions, null, 2));
 console.log("DEBUG driver:", JSON.stringify(driver, null, 2));
 console.log("DEBUG totalOpportunity:", JSON.stringify(totalOpportunity, null, 2));
 
+const enginePayload = {
+  success: true,
+  detection,
+  diagnosis,
+  focus,
+  driver,
+  total_opportunity: totalOpportunity,
+  actions: enrichedActions
+};
+
+    const periodMeta = extractPeriodMetadata(strRows);
+
+const { error: engineSaveError } = await supabase
+  .from('engine_outputs')
+  .insert({
+    hotel_code: hotelCode,
+    snapshot_date: periodMeta.snapshot_date,
+    generated_at: new Date().toISOString(),
+    source_file_name: req.body?.originalFileName || null,
+    period_label: periodMeta.period_label,
+    engine_json: enginePayload
+  });
+
+if (engineSaveError) {
+  throw engineSaveError;
+}
+
 // ACTIVE PHASE 2 ENGINE RETURN
-return res.status(200).json({
+return res.status(200).json(enginePayload);
   success: true,
   detection,
   diagnosis,
