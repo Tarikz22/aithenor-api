@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
+const getEngineOutputHandler = require('./api/engine-output');
 const analyzeHandler = require('./api/analyze');
 
 const app = express();
 
+app.get('/api/engine-output', (req, res) => getEngineOutputHandler(req, res));
 app.use(cors({
   origin: [
     'https://app.aithenor.com',
