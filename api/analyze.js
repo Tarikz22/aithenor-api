@@ -1746,13 +1746,7 @@ if (engineSaveError) {
 
 // ACTIVE PHASE 2 ENGINE RETURN
 return res.status(200).json(enginePayload);
-  success: true,
-  detection,
-  diagnosis,
-  focus,
-  driver,
-  total_opportunity: totalOpportunity,
-  actions: enrichedActions
+
 });
     // NOTE:
 // Any legacy recommendation / Claude / Supabase recommendation flow below this point
@@ -1797,8 +1791,8 @@ return res.status(200).json(enginePayload);
         };
       });
 
-    const periodMeta = extractPeriodMetadata(strRows);
-const period = periodMeta.period_label;
+    const legacyPeriodMeta = extractPeriodMetadata(strRows);
+const period = legacyPeriodMeta.period_label;
 
 let recommendations = opportunities
   .map(opportunity => buildRecommendationFromOpportunity(opportunity, hotelCode, period));
