@@ -5,7 +5,6 @@ const analyzeHandler = require('./api/analyze');
 
 const app = express();
 
-app.get('/api/engine-output', (req, res) => getEngineOutputHandler(req, res));
 app.use(cors({
   origin: [
     'https://app.aithenor.com',
@@ -20,6 +19,7 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 app.post('/api/analyze', (req, res) => analyzeHandler(req, res));
+app.get('/api/engine-output', (req, res) => getEngineOutputHandler(req, res));
 
 app.get('/', (req, res) => {
   res.send('Aithenor API is running');
