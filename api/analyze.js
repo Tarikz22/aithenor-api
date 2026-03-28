@@ -91,8 +91,14 @@ const OWNER_DEPARTMENT_BY_DRIVER = {
   none: 'Commercial'
 };
 
-/** Max retail findings per analyze run (Phase 4 multi-finding; keeps payloads and UI bounded). */
-const MAX_RETAIL_FINDINGS_PER_RUN = 5;
+/** Max distinct retail issues per run (issue-led Phase 4). */
+const MAX_RETAIL_ISSUES_PER_RUN = 5;
+
+/** Legacy fallback: max flattened actions when wrapping old driver-only path. */
+const MAX_LEGACY_RETAIL_ACTIONS = 5;
+
+/** Max library actions attached to a single issue (executive readability). */
+const MAX_ACTIONS_PER_RETAIL_ISSUE = 3;
 
 const PRIORITY_SORT_RANK = { high: 0, medium: 1, low: 2 };
 
@@ -905,7 +911,7 @@ function buildActionsFromDriver(driver, focus) {
     return a.libIdx - b.libIdx;
   });
 
-  const capped = staged.slice(0, MAX_RETAIL_FINDINGS_PER_RUN);
+  const capped = staged.slice(0, MAX_LEGACY_RETAIL_ACTIONS);
 
   return capped.map(({ action }) => ({
     action_id: action.action_id,
@@ -916,6 +922,346 @@ function buildActionsFromDriver(driver, focus) {
     description: action.description,
     priority: action.priority
   }));
+}
+
+// --- Retail issue layer (Phase 4: issue-led, recommendations primary, actions per issue) ---
+
+function retailIssueFindingKey(issueFamily) {
+  const safe = String(issueFamily || 'unknown').replace(/[^a-z0-9_]/gi, '_');
+  return `RET_ISSUE_${safe}`;
+}
+
+function actionsFromLibraryByIds(ids) {
+  return ids.map((id) => ACTION_LIBRARY.find((a) => a.action_id === id)).filter(Boolean);
+}
+
+function pickRetailLibraryActionsForFamily(family) {
+  switch (family) {
+    case 'mix_constraint':
+      return actionsFromLibraryByIds(['MIX_01', 'RET_PRICING_01', 'RET_PRICING_02']);
+    case 'pricing_resistance':
+      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'pricing');
+    case 'discount_inefficiency':
+      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'conversion');
+    case 'visibility_gap':
+      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'visibility');
+    case 'missed_pricing_opportunity':
+      return actionsFromLibraryByIds(['RET_PRICING_01', 'RET_PRICING_02']);
+    case 'share_loss_fallback':
+      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'visibility').slice(0, 2);
+    default:
+      return [];
+  }
+}
+
+const RETAIL_ISSUE_TITLES = {
+  mix_constraint: 'Retail mix quality and rate positioning are jointly constraining share',
+  pricing_resistance: 'Retail pricing is ahead of demand acceptance versus the competitive set',
+  discount_inefficiency: 'Retail discounting is not converting into adequate occupancy share',
+  visibility_gap: 'Retail demand capture is weak relative to market visibility',
+  missed_pricing_opportunity: 'Strong retail occupancy is not translating into optimal rate capture',
+  share_loss_fallback: 'Retail share is under pressure versus the competitive baseline'
+};
+
+const RETAIL_ISSUE_ROOT_CAUSES = {
+  mix_constraint:
+    'The hotel is priced above market but not capturing enough share, while retail ADR sits below the blended segment benchmark, indicating mix pressure rather than pure pricing alone.',
+  pricing_resistance:
+    'High retail ADR index with weak occupancy share indicates demand is not fully accepting current rate positioning versus the comp set.',
+  discount_inefficiency:
+    'The hotel is trading below market rate without generating sufficient share gain, indicating discount inefficiency and weak conversion of price into occupancy.',
+  visibility_gap:
+    'Share capture is weak and worsening versus market, which points to a visibility and demand-penetration gap rather than a pure pricing problem alone.',
+  missed_pricing_opportunity:
+    'Occupancy is already relatively strong, but rate premium is not being maximized, suggesting missed retail pricing opportunity under current demand conditions.',
+  share_loss_fallback:
+    'Retail share underperformance is present without a sharper single-driver signal; validate pricing, visibility, and conversion jointly.'
+};
+
+const RETAIL_ISSUE_EXPECTED_OUTCOMES = {
+  mix_constraint:
+    'Rebalance retail mix toward higher-quality demand while recalibrating rate corridors so share and ADR move together.',
+  pricing_resistance:
+    'Align retail price positioning with demand acceptance to recover occupancy share without unnecessary ADR dilution.',
+  discount_inefficiency:
+    'Improve retail conversion efficiency so rate and channel tactics translate into measurable share gains.',
+  visibility_gap:
+    'Rebuild retail visibility and qualified demand flow so the property competes fairly for available market bookings.',
+  missed_pricing_opportunity:
+    'Capture additional retail ADR and RevPAR upside while occupancy remains supportive.',
+  share_loss_fallback:
+    'Stabilize retail share through the highest-confidence commercial lever once validated with segment data.'
+};
+
+function retailIssueFindingText(family, diagnosis, focus) {
+  const seg = focus?.focus_segment || 'retail';
+  const m = diagnosis?.metrics || {};
+  const base = `${seg} KPI context: MPI ${safeFixed(m.avgMPI)}, ARI ${safeFixed(m.avgARI)}, RGI ${safeFixed(m.avgRGI)}.`;
+  const tails = {
+    mix_constraint: 'Signals point to combined mix-quality and pricing-structure pressure in retail.',
+    pricing_resistance: 'Retail rate index strength is not matched by occupancy index performance.',
+    discount_inefficiency: 'Retail is priced at or below market yet share remains constrained.',
+    visibility_gap: 'Retail MPI weakness suggests demand is not being captured at parity with competitors.',
+    missed_pricing_opportunity: 'Retail occupancy is solid but ADR index suggests rate upside is still available.',
+    share_loss_fallback: 'Retail requires structured validation across pricing, visibility, and conversion.'
+  };
+  return `${base} ${tails[family] || tails.share_loss_fallback}`.trim();
+}
+
+/**
+ * Deterministic multi-issue detection (retail only). Returns ordered specs before enrichment.
+ */
+function detectRetailIssueSpecs(diagnosis, focus, driver) {
+  if ((focus?.focus_segment || '') !== 'retail') return [];
+
+  const avgMPI = Number(diagnosis?.metrics?.avgMPI ?? NaN);
+  const avgARI = Number(diagnosis?.metrics?.avgARI ?? NaN);
+  const avgRGI = Number(diagnosis?.metrics?.avgRGI ?? NaN);
+  const avgOcc = Number(diagnosis?.metrics?.avgOcc ?? NaN);
+  const trend = diagnosis?.trend_status || 'stable';
+  const isMix = !!driver?.driver_context?.is_low_rated_mix_pressure;
+
+  if (
+    Number.isFinite(avgMPI) &&
+    Number.isFinite(avgARI) &&
+    Number.isFinite(avgRGI) &&
+    avgMPI >= 100 &&
+    avgARI > 100 &&
+    avgRGI > 100
+  ) {
+    return [];
+  }
+
+  const raw = [];
+
+  if (Number.isFinite(avgMPI) && Number.isFinite(avgARI) && avgMPI < 100 && avgARI > 100 && isMix) {
+    raw.push({ family: 'mix_constraint', rank: 10, primary_driver: 'mix_strategy' });
+  } else if (Number.isFinite(avgMPI) && Number.isFinite(avgARI) && avgMPI < 100 && avgARI > 100) {
+    raw.push({ family: 'pricing_resistance', rank: 20, primary_driver: 'pricing' });
+  }
+
+  if (Number.isFinite(avgARI) && Number.isFinite(avgMPI) && avgARI < 100 && avgMPI <= 100) {
+    raw.push({ family: 'discount_inefficiency', rank: 30, primary_driver: 'conversion' });
+  }
+
+  if (Number.isFinite(avgMPI) && ((avgMPI < 95 && trend === 'worsening') || avgMPI < 92)) {
+    raw.push({ family: 'visibility_gap', rank: 40, primary_driver: 'visibility' });
+  }
+
+  if (
+    Number.isFinite(avgOcc) &&
+    Number.isFinite(avgARI) &&
+    Number.isFinite(avgMPI) &&
+    avgOcc >= 78 &&
+    avgARI <= 100 &&
+    avgMPI < 100 &&
+    !(avgARI < 100 && avgMPI <= 100)
+  ) {
+    raw.push({ family: 'missed_pricing_opportunity', rank: 25, primary_driver: 'pricing' });
+  }
+
+  raw.sort((a, b) => a.rank - b.rank);
+
+  let filtered = raw.filter((row) => row && row.family);
+  if (filtered.some((r) => r.family === 'mix_constraint')) {
+    filtered = filtered.filter((r) => r.family !== 'pricing_resistance');
+  }
+  if (filtered.some((r) => r.family === 'pricing_resistance' || r.family === 'mix_constraint')) {
+    filtered = filtered.filter((r) => r.family !== 'missed_pricing_opportunity');
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const row of filtered) {
+    if (seen.has(row.family)) continue;
+    seen.add(row.family);
+    deduped.push(row);
+  }
+
+  return deduped.slice(0, MAX_RETAIL_ISSUES_PER_RUN);
+}
+
+function materializeRetailIssue(spec, diagnosis, focus) {
+  const { family, primary_driver } = spec;
+  const lib = pickRetailLibraryActionsForFamily(family);
+  const cappedLib = lib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
+  const pri = cappedLib.some((a) => a.priority === 'high') ? 'high' : 'medium';
+
+  return {
+    finding_key: retailIssueFindingKey(family),
+    issue_family: family,
+    driver: primary_driver,
+    segment: 'retail',
+    priority: pri,
+    title: RETAIL_ISSUE_TITLES[family] || RETAIL_ISSUE_TITLES.share_loss_fallback,
+    finding: retailIssueFindingText(family, diagnosis, focus),
+    root_cause: RETAIL_ISSUE_ROOT_CAUSES[family] || RETAIL_ISSUE_ROOT_CAUSES.share_loss_fallback,
+    expected_outcome:
+      RETAIL_ISSUE_EXPECTED_OUTCOMES[family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
+    rule_triggered: family,
+    _library_actions: cappedLib
+  };
+}
+
+/** Single-issue fallback when retail is active but no multi-signal row fired (uses legacy driver + action picker). */
+function buildRetailIssuesFromLegacyDriver(diagnosis, focus, driver) {
+  const fd = driver?.primary_driver;
+  if (!fd || fd === 'none') return [];
+
+  const legacyActions = buildActionsFromDriver(driver, focus);
+  if (!legacyActions.length) return [];
+
+  const family = driver.rule_triggered || 'share_loss_fallback';
+  const finding_key = retailIssueFindingKey(family);
+
+  return [
+    {
+      finding_key,
+      issue_family: family,
+      driver: fd,
+      segment: 'retail',
+      priority: driver.confidence === 'high' ? 'high' : 'medium',
+      title: RETAIL_ISSUE_TITLES[family] || driver.driver_reason?.slice(0, 80) || RETAIL_ISSUE_TITLES.share_loss_fallback,
+      finding: summarizeDiagnosis(diagnosis, focus, driver),
+      root_cause: driver.driver_reason || RETAIL_ISSUE_ROOT_CAUSES.share_loss_fallback,
+      expected_outcome:
+        RETAIL_ISSUE_EXPECTED_OUTCOMES[family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
+      rule_triggered: family,
+      _library_actions: legacyActions.map((a) => ({
+        action_id: a.action_id,
+        driver: a.driver,
+        segment: a.segment,
+        title: a.title,
+        description: a.description,
+        priority: a.priority
+      }))
+    }
+  ];
+}
+
+function issueProxyDriver(issue) {
+  return {
+    primary_driver: issue.driver,
+    secondary_driver: null,
+    driver_reason: issue.root_cause,
+    rule_triggered: issue.rule_triggered,
+    confidence: issue.priority === 'high' ? 'high' : 'medium',
+    driver_context: {}
+  };
+}
+
+function mapLibraryRowToActionShape(row) {
+  return {
+    action_id: row.action_id,
+    finding_key: row.action_id,
+    driver: row.driver,
+    segment: row.segment,
+    title: row.title,
+    description: row.description,
+    priority: row.priority
+  };
+}
+
+function enrichRetailIssue(issue, ctx) {
+  const { diagnosis, focus, detection, pmsRows, strRows } = ctx;
+  const proxy = issueProxyDriver(issue);
+  const actions = (issue._library_actions || []).map((row) => {
+    const base = row.action_id ? mapLibraryRowToActionShape(row) : { ...row };
+    return {
+      ...base,
+      financial_impact: buildFinancialImpact({
+        driver: proxy,
+        diagnosis,
+        action: base,
+        detection,
+        pmsRows,
+        strRows
+      })
+    };
+  });
+
+  const { _library_actions, ...rest } = issue;
+  return { ...rest, actions };
+}
+
+function issueMaxImpactHigh(issue) {
+  let max = 0;
+  for (const a of issue.actions || []) {
+    const h = a.financial_impact?.impact_range?.high;
+    if (typeof h === 'number' && h > max) max = h;
+  }
+  return max || null;
+}
+
+/**
+ * Flatten issues -> legacy actions[] shape: one entry per underlying action, all scoped to issue finding_key for joins.
+ */
+function flattenIssuesToLegacyActions(enrichedIssues) {
+  const out = [];
+  for (const issue of enrichedIssues) {
+    for (const act of issue.actions || []) {
+      out.push({
+        ...act,
+        finding_key: issue.finding_key,
+        issue_finding_key: issue.finding_key,
+        issue_family: issue.issue_family,
+        issue_title: issue.title
+      });
+    }
+  }
+  return out;
+}
+
+function buildRecommendationsFromIssues({ hotelCode, periodMeta, focus, issues }) {
+  return issues.map((issue) => ({
+    hotel_name: hotelCode,
+    title: issue.title,
+    finding_key: issue.finding_key,
+    department: OWNER_DEPARTMENT_BY_DRIVER[issue.driver] || 'Commercial',
+    finding: issue.finding,
+    impact_value: issueMaxImpactHigh(issue),
+    impact_type: 'revenue_uplift',
+    expected_impact_value: issueMaxImpactHigh(issue),
+    status: 'open',
+    period: periodMeta.period_label,
+    root_cause: issue.root_cause,
+    expected_outcome: issue.expected_outcome,
+    owner_department: OWNER_DEPARTMENT_BY_DRIVER[issue.driver] || 'Commercial',
+    priority: capitalizePriority(issue.priority),
+    driver: issue.driver || null,
+    segment: focus.focus_segment || null,
+    snapshot_date: periodMeta.snapshot_date,
+    period_type: periodMeta.period_type,
+    period_start: periodMeta.period_start,
+    period_end: periodMeta.period_end,
+    period_key: periodMeta.period_key,
+    period_label: periodMeta.period_label
+  }));
+}
+
+function buildActionsFromIssues({ hotelCode, periodMeta, focus, issues }) {
+  const rows = [];
+  for (const issue of issues) {
+    for (const act of issue.actions || []) {
+      rows.push({
+        hotel_name: hotelCode,
+        period: periodMeta.period_label,
+        snapshot_date: periodMeta.snapshot_date,
+        period_type: periodMeta.period_type,
+        period_start: periodMeta.period_start,
+        period_end: periodMeta.period_end,
+        period_key: periodMeta.period_key,
+        period_label: periodMeta.period_label,
+        title: issue.title,
+        finding_key: issue.finding_key,
+        action_text: act.description,
+        priority: act.priority || null,
+        driver: act.driver || null,
+        segment: focus.focus_segment || null
+      });
+    }
+  }
+  return rows;
 }
 
 function buildFinancialImpact({ driver, diagnosis, action, detection, pmsRows = [], strRows = [] }) {
@@ -1200,18 +1546,32 @@ async function handler(req, res) {
     const focus = buildFocusFromPMS(pmsRows, diagnosis);
     const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
 
-    const baseActions = buildActionsFromDriver(driver, focus);
-    const enrichedActions = baseActions.map((action) => ({
-      ...action,
-      financial_impact: buildFinancialImpact({
-        driver,
-        diagnosis,
-        action,
-        detection,
-        pmsRows,
-        strRows
-      })
-    }));
+    let enrichedIssues = [];
+    let enrichedActions;
+
+    if ((focus?.focus_segment || '') === 'retail') {
+      const specs = detectRetailIssueSpecs(diagnosis, focus, driver);
+      let rawIssues = specs.map((spec) => materializeRetailIssue(spec, diagnosis, focus));
+      if (!rawIssues.length) {
+        rawIssues = buildRetailIssuesFromLegacyDriver(diagnosis, focus, driver);
+      }
+      const enrichCtx = { diagnosis, focus, detection, pmsRows, strRows };
+      enrichedIssues = rawIssues.map((issue) => enrichRetailIssue(issue, enrichCtx));
+      enrichedActions = flattenIssuesToLegacyActions(enrichedIssues);
+    } else {
+      const baseActions = buildActionsFromDriver(driver, focus);
+      enrichedActions = baseActions.map((action) => ({
+        ...action,
+        financial_impact: buildFinancialImpact({
+          driver,
+          diagnosis,
+          action,
+          detection,
+          pmsRows,
+          strRows
+        })
+      }));
+    }
 
     const totalOpportunity = buildTotalOpportunity(enrichedActions);
     const periodMeta = extractPeriodMetadata(strRows);
@@ -1222,7 +1582,9 @@ async function handler(req, res) {
       diagnosis,
       focus,
       driver,
+      issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
       total_opportunity: totalOpportunity,
+      // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
 
@@ -1249,14 +1611,17 @@ if (engineSaveError) {
   throw engineSaveError;
 }
 
-    const recommendationsPayload = buildRecommendationsPayload({
-      hotelCode,
-      periodMeta,
-      diagnosis,
-      focus,
-      driver,
-      actions: enrichedActions
-    });
+    const recommendationsPayload =
+      (focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0
+        ? buildRecommendationsFromIssues({ hotelCode, periodMeta, focus, issues: enrichedIssues })
+        : buildRecommendationsPayload({
+            hotelCode,
+            periodMeta,
+            diagnosis,
+            focus,
+            driver,
+            actions: enrichedActions
+          });
 
     if (recommendationsPayload.length > 0) {
       const { error: recommendationsError } = await supabase
@@ -1268,12 +1633,15 @@ if (engineSaveError) {
       }
     }
 
-    const actionsPayload = buildActionsPayload({
-      hotelCode,
-      periodMeta,
-      focus,
-      actions: enrichedActions
-    });
+    const actionsPayload =
+      (focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0
+        ? buildActionsFromIssues({ hotelCode, periodMeta, focus, issues: enrichedIssues })
+        : buildActionsPayload({
+            hotelCode,
+            periodMeta,
+            focus,
+            actions: enrichedActions
+          });
 
     if (actionsPayload.length > 0) {
       const { error: actionsError } = await supabase.from('actions').insert(actionsPayload);
