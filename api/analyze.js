@@ -861,6 +861,8 @@ function buildActionsFromDriver(driver, focus) {
     .slice(0, 2)
     .map((action) => ({
       action_id: action.action_id,
+      // Stable join key for DB + frontend (Phase 4 foundation); mirrors action_id until taxonomy expands.
+      finding_key: action.action_id,
       driver: action.driver,
       segment: action.segment,
       title: action.title,
@@ -1087,6 +1089,7 @@ function buildRecommendationsPayload({ hotelCode, periodMeta, diagnosis, focus, 
   return actions.map((action) => ({
     hotel_name: hotelCode,
     title: action.title,
+    finding_key: action.action_id || action.finding_key || null,
     department: OWNER_DEPARTMENT_BY_DRIVER[action.driver] || 'Commercial',
     finding: summarizeDiagnosis(diagnosis, focus, driver),
     impact_value: getExpectedImpactValue(action),
@@ -1123,6 +1126,7 @@ function buildActionsPayload({ hotelCode, periodMeta, focus, actions }) {
     period_key: periodMeta.period_key,
     period_label: periodMeta.period_label,
     title: action.title,
+    finding_key: action.action_id || action.finding_key || null,
     action_text: action.description,
     priority: action.priority || null,
     driver: action.driver || null,
