@@ -91,8 +91,8 @@ const OWNER_DEPARTMENT_BY_DRIVER = {
   none: 'Commercial'
 };
 
-/** Max distinct retail issues per run (issue-led Phase 4). */
-const MAX_RETAIL_ISSUES_PER_RUN = 5;
+/** Max distinct retail issues per run — favor sharp, non-overlapping cards over volume. */
+const MAX_RETAIL_ISSUES_PER_RUN = 3;
 
 /** Legacy fallback: max flattened actions when wrapping old driver-only path. */
 const MAX_LEGACY_RETAIL_ACTIONS = 5;
@@ -935,20 +935,29 @@ function actionsFromLibraryByIds(ids) {
   return ids.map((id) => ACTION_LIBRARY.find((a) => a.action_id === id)).filter(Boolean);
 }
 
+/**
+ * Disjoint action sets per issue family so co-existing cards do not repeat the same library rows.
+ * (Within a single issue, 2 actions max where it helps execution clarity.)
+ */
 function pickRetailLibraryActionsForFamily(family) {
   switch (family) {
     case 'mix_constraint':
-      return actionsFromLibraryByIds(['MIX_01', 'RET_PRICING_01', 'RET_PRICING_02']);
+      // Mix-only lever on this card — pricing levers stay on pricing_resistance (no shared library rows).
+      return actionsFromLibraryByIds(['MIX_01']);
     case 'pricing_resistance':
-      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'pricing');
-    case 'discount_inefficiency':
-      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'conversion');
-    case 'visibility_gap':
-      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'visibility');
-    case 'missed_pricing_opportunity':
+      // Full retail pricing pair — does not repeat MIX_01 or visibility/conversion rows.
       return actionsFromLibraryByIds(['RET_PRICING_01', 'RET_PRICING_02']);
+    case 'discount_inefficiency':
+      // Conversion path only — keep OTA/visibility levers for visibility_gap when it survives suppression.
+      return actionsFromLibraryByIds(['RET_CONV_01', 'RET_CONV_02']);
+    case 'visibility_gap':
+      // Channel exposure only — digital/brand campaigns separated from OTA row used here.
+      return actionsFromLibraryByIds(['RET_VIS_02']);
+    case 'missed_pricing_opportunity':
+      // Uplift capture without cloning full pricing_resistance pair.
+      return actionsFromLibraryByIds(['RET_PRICING_01']);
     case 'share_loss_fallback':
-      return ACTION_LIBRARY.filter((a) => a.segment === 'retail' && a.driver === 'visibility').slice(0, 2);
+      return actionsFromLibraryByIds(['RET_VIS_01', 'RET_CONV_01']);
     default:
       return [];
   }
@@ -965,47 +974,50 @@ const RETAIL_ISSUE_TITLES = {
 
 const RETAIL_ISSUE_ROOT_CAUSES = {
   mix_constraint:
-    'The hotel is priced above market but not capturing enough share, while retail ADR sits below the blended segment benchmark, indicating mix pressure rather than pure pricing alone.',
+    'Retail revenue quality is misaligned: segment-level ADR is soft versus blended benchmarks while headline indexes still show a rate premium, so the constraint is mix composition—not a single BAR tweak.',
   pricing_resistance:
-    'High retail ADR index with weak occupancy share indicates demand is not fully accepting current rate positioning versus the comp set.',
+    'Retail is carrying a rate premium versus the comp set without matching occupancy penetration, so the bottleneck is price acceptance at the index level, not channel plumbing.',
   discount_inefficiency:
-    'The hotel is trading below market rate without generating sufficient share gain, indicating discount inefficiency and weak conversion of price into occupancy.',
+    'Retail is already at or below market rate on the index yet share is weak, so deeper discounting is unlikely to fix the problem—the leak is conversion of existing demand into booked nights.',
   visibility_gap:
-    'Share capture is weak and worsening versus market, which points to a visibility and demand-penetration gap rather than a pure pricing problem alone.',
+    'Retail MPI weakness persists without a high-ARI premium story, so the property is likely losing qualified demand upstream (reach and consideration) before rate can even be tested.',
   missed_pricing_opportunity:
-    'Occupancy is already relatively strong, but rate premium is not being maximized, suggesting missed retail pricing opportunity under current demand conditions.',
+    'Retail occupancy is holding but ADR index is not maximized relative to demand conditions, so the gap is rate capture on in-market guests—not filling empty rooms.',
   share_loss_fallback:
-    'Retail share underperformance is present without a sharper single-driver signal; validate pricing, visibility, and conversion jointly.'
+    'Retail MPI is soft without a clean single-index story; the next step is to isolate whether loss is upstream demand, booking friction, or rate architecture before stacking levers.'
 };
 
 const RETAIL_ISSUE_EXPECTED_OUTCOMES = {
   mix_constraint:
-    'Rebalance retail mix toward higher-quality demand while recalibrating rate corridors so share and ADR move together.',
+    'Shift retail contribution toward higher-rated segments and use fenced tactics so mix improvement does not rely on public BAR cuts alone.',
   pricing_resistance:
-    'Align retail price positioning with demand acceptance to recover occupancy share without unnecessary ADR dilution.',
+    'Recover retail occupancy index versus the comp set by realigning BAR and corridor logic with observed demand acceptance.',
   discount_inefficiency:
-    'Improve retail conversion efficiency so rate and channel tactics translate into measurable share gains.',
+    'Turn existing retail discounting into booked nights by fixing booking-path friction and parity-driven leakage, not by deeper headline cuts.',
   visibility_gap:
-    'Rebuild retail visibility and qualified demand flow so the property competes fairly for available market bookings.',
+    'Increase qualified retail demand before the booking window by lifting brand and paid demand generation where MPI erosion is structural.',
   missed_pricing_opportunity:
-    'Capture additional retail ADR and RevPAR upside while occupancy remains supportive.',
+    'Lift retail ADR and RevPAR index while occupancy is already supportive—prioritize rate architecture, not share-recovery discounts.',
   share_loss_fallback:
-    'Stabilize retail share through the highest-confidence commercial lever once validated with segment data.'
+    'Choose one validated retail lever (exposure, conversion, or rate) using segment proof points, then sequence the second wave after the first moves MPI.'
 };
 
 function retailIssueFindingText(family, diagnosis, focus) {
   const seg = focus?.focus_segment || 'retail';
   const m = diagnosis?.metrics || {};
-  const base = `${seg} KPI context: MPI ${safeFixed(m.avgMPI)}, ARI ${safeFixed(m.avgARI)}, RGI ${safeFixed(m.avgRGI)}.`;
-  const tails = {
-    mix_constraint: 'Signals point to combined mix-quality and pricing-structure pressure in retail.',
-    pricing_resistance: 'Retail rate index strength is not matched by occupancy index performance.',
-    discount_inefficiency: 'Retail is priced at or below market yet share remains constrained.',
-    visibility_gap: 'Retail MPI weakness suggests demand is not being captured at parity with competitors.',
-    missed_pricing_opportunity: 'Retail occupancy is solid but ADR index suggests rate upside is still available.',
-    share_loss_fallback: 'Retail requires structured validation across pricing, visibility, and conversion.'
+  const mpi = safeFixed(m.avgMPI);
+  const ari = safeFixed(m.avgARI);
+  const rgi = safeFixed(m.avgRGI);
+  const occ = safeFixed(m.avgOcc);
+  const lines = {
+    mix_constraint: `${seg}: mix-and-index conflict — MPI ${mpi}, ARI ${ari}, RGI ${rgi}. Segment economics suggest mix quality is dragging outcomes while indexes still imply rate tension.`,
+    pricing_resistance: `${seg}: premium-without-share — MPI ${mpi} lags while ARI ${ari} stays above parity (RGI ${rgi}). The pattern is demand rejecting the current rate ladder versus competitors.`,
+    discount_inefficiency: `${seg}: discount-without-share — MPI ${mpi} with ARI ${ari} at/below market (RGI ${rgi}). Rate is not the primary ceiling; execution is failing to convert available demand.`,
+    visibility_gap: `${seg}: penetration gap — MPI ${mpi} weak without a sustained ARI premium narrative (ARI ${ari}, RGI ${rgi}). Losses likely occur before the booking funnel, not only at conversion.`,
+    missed_pricing_opportunity: `${seg}: occupancy-supported rate gap — Occ ${occ}% with MPI ${mpi} and ARI ${ari}. Rooms are moving but indexes imply ADR headroom versus optimal retail capture.`,
+    share_loss_fallback: `${seg}: undifferentiated underperformance — MPI ${mpi}, ARI ${ari}, RGI ${rgi}. No single index pattern dominates; isolate demand vs conversion vs rate with segment reads.`
   };
-  return `${base} ${tails[family] || tails.share_loss_fallback}`.trim();
+  return lines[family] || lines.share_loss_fallback;
 }
 
 /**
@@ -1068,6 +1080,19 @@ function detectRetailIssueSpecs(diagnosis, focus, driver) {
   }
   if (filtered.some((r) => r.family === 'pricing_resistance' || r.family === 'mix_constraint')) {
     filtered = filtered.filter((r) => r.family !== 'missed_pricing_opportunity');
+  }
+
+  // Suppress visibility when rate-premium/share story already explains weak MPI (avoid two "share" cards).
+  const hasPremiumShareStory = filtered.some(
+    (r) => r.family === 'pricing_resistance' || r.family === 'mix_constraint'
+  );
+  if (hasPremiumShareStory) {
+    filtered = filtered.filter((r) => r.family !== 'visibility_gap');
+  }
+
+  // Suppress visibility when conversion/discount narrative is active — both read as generic "weak MPI".
+  if (filtered.some((r) => r.family === 'discount_inefficiency')) {
+    filtered = filtered.filter((r) => r.family !== 'visibility_gap');
   }
 
   const seen = new Set();
