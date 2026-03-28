@@ -91,6 +91,11 @@ const OWNER_DEPARTMENT_BY_DRIVER = {
   none: 'Commercial'
 };
 
+/** Max retail findings per analyze run (Phase 4 multi-finding; keeps payloads and UI bounded). */
+const MAX_RETAIL_FINDINGS_PER_RUN = 5;
+
+const PRIORITY_SORT_RANK = { high: 0, medium: 1, low: 2 };
+
 // --------------------
 // HELPERS
 // --------------------
@@ -820,6 +825,15 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
   return result;
 }
 
+function libraryIndexByActionId(actionId) {
+  const idx = ACTION_LIBRARY.findIndex((a) => a.action_id === actionId);
+  return idx === -1 ? 999 : idx;
+}
+
+/**
+ * Retail-only multi-finding: all library actions for primary (and secondary / fallback) drivers,
+ * deduped by action_id, ordered by issue tier then priority then stable library order.
+ */
 function buildActionsFromDriver(driver, focus) {
   const primaryDriver = driver?.primary_driver;
   const secondaryDriver = driver?.secondary_driver;
@@ -829,46 +843,79 @@ function buildActionsFromDriver(driver, focus) {
     return [];
   }
 
-  const primaryActions = ACTION_LIBRARY.filter(
-    (action) => action.driver === primaryDriver && action.segment === 'retail'
-  );
-  const primary = primaryActions[0] || null;
-
-  let secondary = null;
-
-  if (secondaryDriver) {
-    const secondaryActions = ACTION_LIBRARY.filter(
-      (action) => action.driver === secondaryDriver && action.segment === 'retail'
-    );
-    secondary = secondaryActions[0] || null;
-  } else {
-    const fallbackMap = {
-      pricing: 'conversion',
-      visibility: 'conversion',
-      conversion: 'visibility',
-      mix_strategy: 'pricing'
-    };
-
-    const fallbackDriver = fallbackMap[primaryDriver];
-    const fallbackActions = ACTION_LIBRARY.filter(
-      (action) => action.driver === fallbackDriver && action.segment === 'retail'
-    );
-    secondary = fallbackActions[0] || null;
+  if (!primaryDriver || primaryDriver === 'none') {
+    return [];
   }
 
-  return [primary, secondary]
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((action) => ({
-      action_id: action.action_id,
-      // Stable join key for DB + frontend (Phase 4 foundation); mirrors action_id until taxonomy expands.
-      finding_key: action.action_id,
-      driver: action.driver,
-      segment: action.segment,
-      title: action.title,
-      description: action.description,
-      priority: action.priority
-    }));
+  const fallbackMap = {
+    pricing: 'conversion',
+    visibility: 'conversion',
+    conversion: 'visibility',
+    mix_strategy: 'pricing'
+  };
+
+  const fallbackDriver = fallbackMap[primaryDriver];
+
+  function retailActionsForDriver(drv) {
+    if (!drv || drv === 'none') return [];
+    return ACTION_LIBRARY.filter((a) => a.driver === drv && a.segment === 'retail');
+  }
+
+  const seenIds = new Set();
+  const seenTitleNorm = new Set();
+  const staged = [];
+
+  function normalizeTitle(t) {
+    return (t || '')
+      .toString()
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  function stageActions(actions, sourceTier) {
+    for (const action of actions) {
+      if (seenIds.has(action.action_id)) continue;
+      const tnorm = normalizeTitle(action.title);
+      if (tnorm && seenTitleNorm.has(tnorm)) continue;
+      seenIds.add(action.action_id);
+      if (tnorm) seenTitleNorm.add(tnorm);
+      staged.push({
+        action,
+        sourceTier,
+        priorityRank: PRIORITY_SORT_RANK[action.priority] ?? 1,
+        libIdx: libraryIndexByActionId(action.action_id)
+      });
+    }
+  }
+
+  // Primary diagnosis driver: include every distinct retail library action for that driver.
+  stageActions(retailActionsForDriver(primaryDriver), 0);
+
+  if (secondaryDriver) {
+    stageActions(retailActionsForDriver(secondaryDriver), 1);
+  } else if (fallbackDriver && fallbackDriver !== primaryDriver) {
+    // Complementary driver (e.g. pricing + conversion): up to two actions, same as prior breadth cap per leg.
+    stageActions(retailActionsForDriver(fallbackDriver).slice(0, 2), 2);
+  }
+
+  staged.sort((a, b) => {
+    if (a.sourceTier !== b.sourceTier) return a.sourceTier - b.sourceTier;
+    if (a.priorityRank !== b.priorityRank) return a.priorityRank - b.priorityRank;
+    return a.libIdx - b.libIdx;
+  });
+
+  const capped = staged.slice(0, MAX_RETAIL_FINDINGS_PER_RUN);
+
+  return capped.map(({ action }) => ({
+    action_id: action.action_id,
+    finding_key: action.action_id,
+    driver: action.driver,
+    segment: action.segment,
+    title: action.title,
+    description: action.description,
+    priority: action.priority
+  }));
 }
 
 function buildFinancialImpact({ driver, diagnosis, action, detection, pmsRows = [], strRows = [] }) {
