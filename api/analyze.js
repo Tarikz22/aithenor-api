@@ -100,6 +100,12 @@ const MAX_LEGACY_RETAIL_ACTIONS = 5;
 /** Max library actions attached to a single issue (executive readability). */
 const MAX_ACTIONS_PER_RETAIL_ISSUE = 3;
 
+/** Minimum STR daily rows required to score a calendar week (thin weeks skipped). */
+const MIN_STR_DAYS_PER_WEEK = 4;
+
+/** Adjacent ISO weeks merge if MPI and ARI are within these index points (episode same regime). */
+const EPISODE_MERGE_MPI_ARI_MAX_DELTA = 4;
+
 const PRIORITY_SORT_RANK = { high: 0, medium: 1, low: 2 };
 
 // --------------------
@@ -1020,6 +1026,284 @@ function retailIssueFindingText(family, diagnosis, focus) {
   return lines[family] || lines.share_loss_fallback;
 }
 
+function weekBucketKeyFromDate(date) {
+  const info = getIsoWeekInfo(date);
+  if (!info) return null;
+  return `${info.isoYear}-W${String(info.isoWeek).padStart(2, '0')}`;
+}
+
+function getStrRowDate(row) {
+  const raw = getRowValue(row, ['Date', 'Business Date', 'Stay Date', 'Day', 'Report Date']);
+  return parseExcelDate(raw);
+}
+
+function minMaxYmdFromDates(dates) {
+  const valid = dates.filter((d) => d instanceof Date && !Number.isNaN(d.getTime()));
+  if (!valid.length) return { minYmd: null, maxYmd: null };
+  const sorted = [...valid].sort((a, b) => a.getTime() - b.getTime());
+  return {
+    minYmd: formatDateToYMD(sorted[0]),
+    maxYmd: formatDateToYMD(sorted[sorted.length - 1])
+  };
+}
+
+/**
+ * Group STR daily rows by calendar week (ISO-style bucket via getIsoWeekInfo).
+ * @returns {Map<string, object[]>} weekKey -> rows
+ */
+function groupStrRowsByCalendarWeek(strRows) {
+  const map = new Map();
+  for (const row of strRows) {
+    const d = getStrRowDate(row);
+    if (!d) continue;
+    const key = weekBucketKeyFromDate(d);
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  }
+  return map;
+}
+
+function buildWindowMetricsFromRows(rows) {
+  return {
+    avgMPI: averageMetric(rows, ['MPI', 'MPI (Index)', 'Occupancy Index']),
+    avgARI: averageMetric(rows, ['ARI', 'ARI (Index)', 'ADR Index']),
+    avgRGI: averageMetric(rows, ['RGI', 'RGI (Index)', 'RevPAR Index']),
+    avgOcc: averageMetric(rows, ['Occupancy %', 'Hotel Occupancy %'])
+  };
+}
+
+function buildTrendFromWindowRows(rows) {
+  const mpiChange = averageMetric(rows, ['MPI % Change', 'MPI %']);
+  const rgiChange = averageMetric(rows, ['RGI % Change', 'RGI %']);
+  if ((mpiChange !== null && mpiChange < 0) || (rgiChange !== null && rgiChange < 0)) {
+    return 'worsening';
+  }
+  if ((mpiChange !== null && mpiChange > 0) || (rgiChange !== null && rgiChange > 0)) {
+    return 'improving';
+  }
+  return 'stable';
+}
+
+function metricsSimilarForEpisodeMerge(a, b) {
+  if (!a || !b) return false;
+  const mpiA = Number(a.avgMPI);
+  const mpiB = Number(b.avgMPI);
+  const ariA = Number(a.avgARI);
+  const ariB = Number(b.avgARI);
+  if (!Number.isFinite(mpiA) || !Number.isFinite(mpiB)) return false;
+  if (!Number.isFinite(ariA) || !Number.isFinite(ariB)) return false;
+  return (
+    Math.abs(mpiA - mpiB) <= EPISODE_MERGE_MPI_ARI_MAX_DELTA &&
+    Math.abs(ariA - ariB) <= EPISODE_MERGE_MPI_ARI_MAX_DELTA
+  );
+}
+
+function aggregateEpisodeMetrics(weekPayloads) {
+  const list = weekPayloads.map((w) => w.metrics).filter(Boolean);
+  if (!list.length) {
+    return { avgMPI: null, avgARI: null, avgRGI: null, avgOcc: null };
+  }
+  const pick = (k) => {
+    const vals = list.map((m) => m[k]).filter((v) => typeof v === 'number' && Number.isFinite(v));
+    if (!vals.length) return null;
+    return vals.reduce((s, v) => s + v, 0) / vals.length;
+  };
+  return {
+    avgMPI: pick('avgMPI'),
+    avgARI: pick('avgARI'),
+    avgRGI: pick('avgRGI'),
+    avgOcc: pick('avgOcc')
+  };
+}
+
+function mergeWeeklyCandidatesIntoEpisodes(sortedCandidates) {
+  const episodes = [];
+  let cur = null;
+
+  for (const c of sortedCandidates) {
+    const canExtend =
+      cur &&
+      cur.family === c.family &&
+      c.weekOrdinal === cur.lastWeekOrdinal + 1 &&
+      metricsSimilarForEpisodeMerge(cur.lastMetrics, c.metrics);
+
+    if (!canExtend) {
+      if (cur) episodes.push(cur);
+      cur = {
+        family: c.family,
+        primary_driver: c.primary_driver,
+        weekKeys: [c.weekKey],
+        weekOrdinals: [c.weekOrdinal],
+        weekPayloads: [c],
+        lastWeekOrdinal: c.weekOrdinal,
+        lastMetrics: c.metrics,
+        startYmd: c.startYmd,
+        endYmd: c.endYmd
+      };
+    } else {
+      cur.weekKeys.push(c.weekKey);
+      cur.weekOrdinals.push(c.weekOrdinal);
+      cur.weekPayloads.push(c);
+      cur.lastWeekOrdinal = c.weekOrdinal;
+      cur.lastMetrics = c.metrics;
+      cur.endYmd = c.endYmd;
+    }
+  }
+  if (cur) episodes.push(cur);
+  return episodes;
+}
+
+function episodeSeverityScore(ep) {
+  const agg = aggregateEpisodeMetrics(ep.weekPayloads);
+  const mpi = Number(agg.avgMPI);
+  if (Number.isFinite(mpi)) return 100 - mpi;
+  return 0;
+}
+
+function rankAndCapEpisodes(episodes, maxCount) {
+  return [...episodes]
+    .sort((a, b) => {
+      const sb = episodeSeverityScore(b);
+      const sa = episodeSeverityScore(a);
+      if (sb !== sa) return sb - sa;
+      return (b.weekKeys?.length || 0) - (a.weekKeys?.length || 0);
+    })
+    .slice(0, maxCount);
+}
+
+function episodeFindingKey(family, startYmd, endYmd) {
+  const fam = String(family || 'unknown').replace(/[^a-z0-9_]/gi, '_');
+  const s = (startYmd || 'na').replace(/-/g, '');
+  const e = (endYmd || 'na').replace(/-/g, '');
+  return `RET_EP_${fam}_${s}_${e}`;
+}
+
+function materializeRetailEpisode(ep, focus) {
+  const aggMetrics = aggregateEpisodeMetrics(ep.weekPayloads);
+  const lastTrend =
+    ep.weekPayloads[ep.weekPayloads.length - 1]?.trend || 'stable';
+  const windowDiagnosis = { metrics: aggMetrics, trend_status: lastTrend };
+
+  const finding_key = episodeFindingKey(ep.family, ep.startYmd, ep.endYmd);
+  const lib = pickRetailLibraryActionsForFamily(ep.family);
+  const cappedLib = lib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
+  const pri = cappedLib.some((a) => a.priority === 'high') ? 'high' : 'medium';
+
+  return {
+    finding_key,
+    issue_family: ep.family,
+    driver: ep.primary_driver,
+    segment: 'retail',
+    priority: pri,
+    title: RETAIL_ISSUE_TITLES[ep.family] || RETAIL_ISSUE_TITLES.share_loss_fallback,
+    finding: retailIssueFindingText(ep.family, windowDiagnosis, focus),
+    root_cause: RETAIL_ISSUE_ROOT_CAUSES[ep.family] || RETAIL_ISSUE_ROOT_CAUSES.share_loss_fallback,
+    expected_outcome:
+      RETAIL_ISSUE_EXPECTED_OUTCOMES[ep.family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
+    rule_triggered: ep.family,
+    _library_actions: cappedLib,
+    episode_week_start: ep.startYmd,
+    episode_week_end: ep.endYmd,
+    episode_week_keys: ep.weekKeys,
+    episode_week_count: ep.weekKeys.length,
+    window_label: `${ep.startYmd} → ${ep.endYmd}`,
+    temporal_layer: 'weekly_episode'
+  };
+}
+
+/**
+ * Internal weekly temporal pipeline: windows -> weekly specs -> episodes -> raw issue objects.
+ * Returns { rawIssues, temporal_meta } or { rawIssues: [], temporal_meta } if unusable.
+ */
+function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver) {
+  const byWeek = groupStrRowsByCalendarWeek(strRows);
+  const sortedWeekKeys = [...byWeek.keys()].sort();
+
+  const temporal_meta = {
+    min_days_per_week: MIN_STR_DAYS_PER_WEEK,
+    weekly_windows: [],
+    fallback_reason: null
+  };
+
+  if (sortedWeekKeys.length < 1) {
+    temporal_meta.fallback_reason = 'no_dated_str_rows';
+    return { rawIssues: [], temporal_meta };
+  }
+
+  const weekOrdinalMap = new Map(sortedWeekKeys.map((k, i) => [k, i]));
+
+  const candidates = [];
+
+  for (const weekKey of sortedWeekKeys) {
+    const rows = byWeek.get(weekKey) || [];
+    if (rows.length < MIN_STR_DAYS_PER_WEEK) continue;
+
+    const dates = rows.map((r) => getStrRowDate(r)).filter(Boolean);
+    const { minYmd, maxYmd } = minMaxYmdFromDates(dates);
+    const metrics = buildWindowMetricsFromRows(rows);
+    const trend = buildTrendFromWindowRows(rows);
+    const windowDiagnosis = { metrics, trend_status: trend };
+
+    temporal_meta.weekly_windows.push({
+      week_key: weekKey,
+      day_count: rows.length,
+      start_ymd: minYmd,
+      end_ymd: maxYmd,
+      avgMPI: metrics.avgMPI,
+      avgARI: metrics.avgARI,
+      avgRGI: metrics.avgRGI,
+      avgOcc: metrics.avgOcc,
+      trend_status: trend
+    });
+
+    const specs = detectRetailIssueSpecs(windowDiagnosis, focus, driver);
+    for (const spec of specs) {
+      candidates.push({
+        family: spec.family,
+        primary_driver: spec.primary_driver,
+        weekKey,
+        weekOrdinal: weekOrdinalMap.get(weekKey),
+        metrics,
+        trend,
+        startYmd: minYmd,
+        endYmd: maxYmd
+      });
+    }
+  }
+
+  if (!candidates.length) {
+    temporal_meta.fallback_reason =
+      temporal_meta.weekly_windows.length === 0 ? 'all_weeks_below_min_days' : 'no_weekly_specs';
+    return { rawIssues: [], temporal_meta };
+  }
+
+  candidates.sort((a, b) => {
+    if (a.weekOrdinal !== b.weekOrdinal) return a.weekOrdinal - b.weekOrdinal;
+    const ra = a.family || '';
+    const rb = b.family || '';
+    return ra.localeCompare(rb);
+  });
+
+  const byFamily = new Map();
+  for (const c of candidates) {
+    if (!byFamily.has(c.family)) byFamily.set(c.family, []);
+    byFamily.get(c.family).push(c);
+  }
+
+  let episodes = [];
+  for (const famList of byFamily.values()) {
+    famList.sort((a, b) => a.weekOrdinal - b.weekOrdinal);
+    episodes = episodes.concat(mergeWeeklyCandidatesIntoEpisodes(famList));
+  }
+
+  episodes = rankAndCapEpisodes(episodes, MAX_RETAIL_ISSUES_PER_RUN);
+  temporal_meta.episode_count = episodes.length;
+
+  const rawIssues = episodes.map((ep) => materializeRetailEpisode(ep, focus));
+  return { rawIssues, temporal_meta };
+}
+
 /**
  * Deterministic multi-issue detection (retail only). Returns ordered specs before enrichment.
  */
@@ -1574,12 +1858,28 @@ async function handler(req, res) {
     let enrichedIssues = [];
     let enrichedActions;
 
+    let retailTemporalMeta = null;
+
     if ((focus?.focus_segment || '') === 'retail') {
-      const specs = detectRetailIssueSpecs(diagnosis, focus, driver);
-      let rawIssues = specs.map((spec) => materializeRetailIssue(spec, diagnosis, focus));
+      const weekly = buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver);
+      retailTemporalMeta = weekly.temporal_meta;
+
+      let rawIssues = weekly.rawIssues;
       if (!rawIssues.length) {
-        rawIssues = buildRetailIssuesFromLegacyDriver(diagnosis, focus, driver);
+        const specs = detectRetailIssueSpecs(diagnosis, focus, driver);
+        rawIssues = specs.map((spec) => materializeRetailIssue(spec, diagnosis, focus));
+        if (!rawIssues.length) {
+          rawIssues = buildRetailIssuesFromLegacyDriver(diagnosis, focus, driver);
+        }
+        if (retailTemporalMeta) {
+          retailTemporalMeta.fallback_used = true;
+          retailTemporalMeta.fallback_reason =
+            retailTemporalMeta.fallback_reason || 'weekly_pipeline_empty';
+        }
+      } else if (retailTemporalMeta) {
+        retailTemporalMeta.fallback_used = false;
       }
+
       const enrichCtx = { diagnosis, focus, detection, pmsRows, strRows };
       enrichedIssues = rawIssues.map((issue) => enrichRetailIssue(issue, enrichCtx));
       enrichedActions = flattenIssuesToLegacyActions(enrichedIssues);
@@ -1608,6 +1908,8 @@ async function handler(req, res) {
       focus,
       driver,
       issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
+      retail_temporal:
+        (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
       total_opportunity: totalOpportunity,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
