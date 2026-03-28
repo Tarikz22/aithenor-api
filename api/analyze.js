@@ -1154,19 +1154,50 @@ function mergeWeeklyCandidatesIntoEpisodes(sortedCandidates) {
   return episodes;
 }
 
-function episodeSeverityScore(ep) {
+/**
+ * Family-aware rank score (higher = more severe / more important for cap ordering).
+ * Not MPI-only: blends signals that match how each issue family is detected.
+ */
+function episodeFamilyRankScore(ep) {
   const agg = aggregateEpisodeMetrics(ep.weekPayloads);
   const mpi = Number(agg.avgMPI);
-  if (Number.isFinite(mpi)) return 100 - mpi;
-  return 0;
+  const ari = Number(agg.avgARI);
+  const occ = Number(agg.avgOcc);
+  const mpiGap = Number.isFinite(mpi) ? Math.max(0, 100 - mpi) : 0;
+  const family = ep.family;
+
+  if (family === 'pricing_resistance' || family === 'mix_constraint') {
+    const ariPremiumGap = Number.isFinite(ari) ? Math.max(0, ari - 100) : 0;
+    return mpiGap + ariPremiumGap * 0.65;
+  }
+
+  if (family === 'discount_inefficiency') {
+    const ariUnder = Number.isFinite(ari) ? Math.max(0, 100 - ari) : 0;
+    return mpiGap + ariUnder * 0.65;
+  }
+
+  if (family === 'missed_pricing_opportunity') {
+    const occStrength = Number.isFinite(occ) ? Math.max(0, occ - 78) : 0;
+    const ariUnder = Number.isFinite(ari) ? Math.max(0, 100 - ari) : 0;
+    return occStrength * 0.85 + ariUnder * 1.1;
+  }
+
+  if (family === 'visibility_gap') {
+    const worsening = ep.weekPayloads?.some((w) => w.trend === 'worsening') ? 1 : 0;
+    return mpiGap + worsening * 14;
+  }
+
+  return mpiGap;
 }
 
 function rankAndCapEpisodes(episodes, maxCount) {
   return [...episodes]
     .sort((a, b) => {
-      const sb = episodeSeverityScore(b);
-      const sa = episodeSeverityScore(a);
+      const sb = episodeFamilyRankScore(b);
+      const sa = episodeFamilyRankScore(a);
       if (sb !== sa) return sb - sa;
+      const rec = (b.endYmd || '').localeCompare(a.endYmd || '');
+      if (rec !== 0) return rec;
       return (b.weekKeys?.length || 0) - (a.weekKeys?.length || 0);
     })
     .slice(0, maxCount);
