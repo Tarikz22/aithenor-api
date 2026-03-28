@@ -1008,6 +1008,27 @@ const RETAIL_ISSUE_EXPECTED_OUTCOMES = {
     'Choose one validated retail lever (exposure, conversion, or rate) using segment proof points, then sequence the second wave after the first moves MPI.'
 };
 
+/** Same metric bundle as narrative/finding text; used by dashboard KPI trigger (per issue). */
+function snapshotCardMetricsFromDiagnosisLike(diagnosisLike) {
+  if (!diagnosisLike || typeof diagnosisLike !== 'object') {
+    return {
+      avgMPI: null,
+      avgARI: null,
+      avgRGI: null,
+      avgOcc: null,
+      trend_status: null
+    };
+  }
+  const m = diagnosisLike.metrics || {};
+  return {
+    avgMPI: m.avgMPI ?? null,
+    avgARI: m.avgARI ?? null,
+    avgRGI: m.avgRGI ?? null,
+    avgOcc: m.avgOcc ?? null,
+    trend_status: diagnosisLike.trend_status ?? null
+  };
+}
+
 function retailIssueFindingText(family, diagnosis, focus) {
   const seg = focus?.focus_segment || 'retail';
   const m = diagnosis?.metrics || {};
@@ -1226,7 +1247,8 @@ function materializeRetailEpisode(ep, focus) {
     episode_week_keys: ep.weekKeys,
     episode_week_count: ep.weekKeys.length,
     window_label: `${ep.startYmd} → ${ep.endYmd}`,
-    temporal_layer: 'weekly_episode'
+    temporal_layer: 'weekly_episode',
+    card_metrics: snapshotCardMetricsFromDiagnosisLike(windowDiagnosis)
   };
 }
 
@@ -1525,7 +1547,8 @@ function materializeRetailIssue(spec, diagnosis, focus) {
     expected_outcome:
       RETAIL_ISSUE_EXPECTED_OUTCOMES[family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
     rule_triggered: family,
-    _library_actions: cappedLib
+    _library_actions: cappedLib,
+    card_metrics: snapshotCardMetricsFromDiagnosisLike(diagnosis)
   };
 }
 
@@ -1560,7 +1583,8 @@ function buildRetailIssuesFromLegacyDriver(diagnosis, focus, driver) {
         title: a.title,
         description: a.description,
         priority: a.priority
-      }))
+      })),
+      card_metrics: snapshotCardMetricsFromDiagnosisLike(diagnosis)
     }
   ];
 }
