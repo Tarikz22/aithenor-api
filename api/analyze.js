@@ -667,6 +667,8 @@ function detectDataContext(workbook) {
     'Market Segment'
   ]);
 
+  const allHeaders = [strHeaders, pmsHeaders];
+
   const corporateHeaders = getHeadersFromSheetAliases(SHEET_ALIASES_CORPORATE);
   const delphiHeaders = getHeadersFromSheetAliases(SHEET_ALIASES_DELPHI);
 
