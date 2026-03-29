@@ -187,6 +187,77 @@ function parseExcelDate(value) {
     if (parsed) {
       return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
     }
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const t = value.trim();
+    if (!t) return null;
+
+    // String that is an Excel serial (exports/CSV often stringify the number). Skip small
+    // integers so values like "2026" are not treated as serials.
+    if (/^-?\d+(\.\d+)?$/.test(t)) {
+      const n = Number(t);
+      if (Number.isFinite(n) && n >= 20000 && n < 2000000) {
+        const parsed = XLSX.SSF.parse_date_code(n);
+        if (parsed) {
+          const d = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
+          if (!Number.isNaN(d.getTime())) return d;
+        }
+      }
+    }
+
+    const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) {
+      const y = parseInt(iso[1], 10);
+      const mo = parseInt(iso[2], 10);
+      const day = parseInt(iso[3], 10);
+      const dt = new Date(Date.UTC(y, mo - 1, day));
+      if (!Number.isNaN(dt.getTime())) return dt;
+    }
+
+    const dm4 = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+    if (dm4) {
+      const a = parseInt(dm4[1], 10);
+      const b = parseInt(dm4[2], 10);
+      const y = parseInt(dm4[3], 10);
+      let day;
+      let month;
+      if (a > 12) {
+        day = a;
+        month = b;
+      } else if (b > 12) {
+        day = b;
+        month = a;
+      } else {
+        day = a;
+        month = b;
+      }
+      const dt = new Date(Date.UTC(y, month - 1, day));
+      if (!Number.isNaN(dt.getTime())) return dt;
+    }
+
+    const dm2 = t.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/);
+    if (dm2) {
+      let y = parseInt(dm2[3], 10);
+      y += y >= 70 ? 1900 : 2000;
+      const a = parseInt(dm2[1], 10);
+      const b = parseInt(dm2[2], 10);
+      let day;
+      let month;
+      if (a > 12) {
+        day = a;
+        month = b;
+      } else if (b > 12) {
+        day = b;
+        month = a;
+      } else {
+        day = a;
+        month = b;
+      }
+      const dt = new Date(Date.UTC(y, month - 1, day));
+      if (!Number.isNaN(dt.getTime())) return dt;
+    }
   }
 
   const parsedDate = new Date(value);
@@ -275,6 +346,31 @@ function getSheetRowsTabular(workbook, aliases) {
   return rowsOffset3.length ? rowsOffset3 : rowsDefault;
 }
 
+/** Same resolution order as getRowValue(…, INGESTION_DATE_KEYS); exposes matched column for diagnostics. */
+function findIngestionDateMatch(row) {
+  if (!row || typeof row !== 'object') return { raw: undefined, matchedHeaderKey: null };
+
+  const entries = Object.entries(row);
+
+  for (const candidate of INGESTION_DATE_KEYS) {
+    const normalizedCandidate = normalizeKey(candidate);
+    const match = entries.find(([key]) => normalizeKey(key) === normalizedCandidate);
+    if (match && match[1] !== null && match[1] !== undefined && `${match[1]}`.trim() !== '') {
+      return { raw: match[1], matchedHeaderKey: match[0] };
+    }
+  }
+
+  for (const candidate of INGESTION_DATE_KEYS) {
+    const normalizedCandidate = normalizeKey(candidate);
+    const partial = entries.find(([key]) => normalizeKey(key).includes(normalizedCandidate));
+    if (partial && partial[1] !== null && partial[1] !== undefined && `${partial[1]}`.trim() !== '') {
+      return { raw: partial[1], matchedHeaderKey: partial[0] };
+    }
+  }
+
+  return { raw: undefined, matchedHeaderKey: null };
+}
+
 function getRowStayDateYmd(row) {
   const raw = getRowValue(row, INGESTION_DATE_KEYS);
   const d = parseExcelDate(raw);
@@ -348,6 +444,21 @@ function attachIngestion(row, meta) {
  */
 function normalizePmsRowsForIngestion(pmsRowsRaw, snapshotYmd) {
   const list = Array.isArray(pmsRowsRaw) ? pmsRowsRaw : [];
+
+  const pmsDateDebugN = 3;
+  for (let di = 0; di < Math.min(pmsDateDebugN, list.length); di += 1) {
+    const row = list[di];
+    const { raw, matchedHeaderKey } = findIngestionDateMatch(row);
+    const parsedJs = parseExcelDate(raw);
+    console.log('DEBUG PMS row date extraction', {
+      rowIndex: di,
+      matchedHeaderKey,
+      rawDateCellValue: raw,
+      parsedJsDate: parsedJs && !Number.isNaN(parsedJs.getTime()) ? parsedJs.toISOString() : null,
+      stay_date_ymd: parsedJs && !Number.isNaN(parsedJs.getTime()) ? formatDateToYMD(parsedJs) : null
+    });
+  }
+
   const stlySupported = list.length ? sheetHasStlyStyleColumns(list[0]) : false;
 
   const counts = {
