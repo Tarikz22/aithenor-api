@@ -346,6 +346,43 @@ function getSheetRowsTabular(workbook, aliases) {
   return rowsOffset3.length ? rowsOffset3 : rowsDefault;
 }
 
+/**
+ * True if sheet_to_json row object keys include a column matching INGESTION_DATE_KEYS (header match only).
+ */
+function rowObjectHasIngestionDateHeaderKey(row) {
+  if (!row || typeof row !== 'object') return false;
+  const keyList = Object.keys(row);
+  for (const candidate of INGESTION_DATE_KEYS) {
+    const normalizedCandidate = normalizeKey(candidate);
+    if (keyList.some((key) => normalizeKey(key) === normalizedCandidate)) return true;
+    if (keyList.some((key) => normalizeKey(key).includes(normalizedCandidate))) return true;
+  }
+  return false;
+}
+
+/**
+ * PMS tabs often have title rows before the real header. getSheetRows prefers row 1 as headers when
+ * no STR KPI pattern matches, which yields wrong keys (no "Date"). Prefer default or range-3 slice
+ * by which one actually exposes an ingestion date column on the first data row.
+ */
+function getPmsSheetRows(workbook) {
+  const sheetName = findSheetByAliases(workbook, SHEET_ALIASES_PMS);
+  if (!sheetName) return [];
+
+  const sheet = workbook.Sheets[sheetName];
+  const rowsDefault = XLSX.utils.sheet_to_json(sheet, { defval: null });
+  const rowsOffset3 = XLSX.utils.sheet_to_json(sheet, { range: 3, defval: null });
+
+  if (rowsDefault.length && rowObjectHasIngestionDateHeaderKey(rowsDefault[0])) {
+    return rowsDefault;
+  }
+  if (rowsOffset3.length && rowObjectHasIngestionDateHeaderKey(rowsOffset3[0])) {
+    return rowsOffset3;
+  }
+
+  return rowsDefault.length ? rowsDefault : rowsOffset3;
+}
+
 /** Same resolution order as getRowValue(…, INGESTION_DATE_KEYS); exposes matched column for diagnostics. */
 function findIngestionDateMatch(row) {
   if (!row || typeof row !== 'object') return { raw: undefined, matchedHeaderKey: null };
@@ -2879,7 +2916,28 @@ async function handler(req, res) {
       });
     }
 
-    const pmsRowsRaw = getSheetRows(workbook, SHEET_ALIASES_PMS);
+    const pmsRowsRaw = getPmsSheetRows(workbook);
+
+    const DEBUG_PMS_RAW_KEYS_N = 3;
+    for (let pri = 0; pri < Math.min(DEBUG_PMS_RAW_KEYS_N, pmsRowsRaw.length); pri += 1) {
+      const row = pmsRowsRaw[pri];
+      const keys = Object.keys(row);
+      const maxKeysInSample = pri === 0 ? 50 : 25;
+      const sampleRowTruncated = {};
+      for (const k of keys) {
+        if (Object.keys(sampleRowTruncated).length >= maxKeysInSample) break;
+        const v = row[k];
+        if (v === null || v === undefined) sampleRowTruncated[k] = v;
+        else if (typeof v === 'string' && v.length > 120) sampleRowTruncated[k] = `${v.slice(0, 120)}…`;
+        else sampleRowTruncated[k] = v;
+      }
+      console.log('DEBUG PMS raw row after sheet load', {
+        rowIndex: pri,
+        keys,
+        sampleRowTruncated
+      });
+    }
+
     const pmsNormalized = normalizePmsRowsForIngestion(pmsRowsRaw, snapshotYmd);
     const pmsRows = pmsNormalized.rowsForEngine;
 
