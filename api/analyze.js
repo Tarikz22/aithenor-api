@@ -1785,6 +1785,8 @@ function buildPmsPaceComparatorLayer(pmsClassifiedRows, snapshotYmd, stlyTabFlag
 const PMS_PACE_SNAPSHOTS_TABLE = 'pms_pace_snapshots';
 /** Smaller than default 500 to reduce single-request statement time (PostgREST upsert). */
 const PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE = 100;
+/** Default row cap per run; override with env PMS_PACE_SNAPSHOT_UPSERT_MAX_ROWS. */
+const PMS_PACE_SNAPSHOT_DEFAULT_UPSERT_MAX_ROWS = 200;
 
 /**
  * Slim rows for pms_pace_snapshots — only stay-dated PMS comparator rows (skips undated).
@@ -1855,19 +1857,16 @@ async function persistPmsPaceSnapshots(supabaseClient, rows) {
   if (!rows.length) return { ok: true, written: 0 };
 
   const maxRowsRaw = process.env.PMS_PACE_SNAPSHOT_UPSERT_MAX_ROWS;
-  const maxRowsParsed =
+  const maxRowsCap =
     maxRowsRaw !== undefined && maxRowsRaw !== '' && Number.isFinite(Number(maxRowsRaw))
       ? Math.max(0, Math.floor(Number(maxRowsRaw)))
-      : null;
-  const toWrite =
-    maxRowsParsed !== null ? rows.slice(0, maxRowsParsed) : rows;
-  if (maxRowsParsed !== null) {
-    console.log('DEBUG pms_pace_snapshots upsert row cap:', {
-      cap: maxRowsParsed,
-      inputRowCount: rows.length,
-      writingRowCount: toWrite.length
-    });
-  }
+      : PMS_PACE_SNAPSHOT_DEFAULT_UPSERT_MAX_ROWS;
+  const toWrite = rows.slice(0, maxRowsCap);
+  console.log('DEBUG pms_pace_snapshots upsert row cap:', {
+    cap: maxRowsCap,
+    inputRowCount: rows.length,
+    writingRowCount: toWrite.length
+  });
 
   const chunkSize = PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE;
   let written = 0;
@@ -3108,10 +3107,7 @@ if (engineSaveError) {
 
     console.log('DEBUG calling persistPmsPaceSnapshots');
 
-    // TEMP: isolate statement timeout — re-enable after diagnosis
-    console.log('DEBUG persistPmsPaceSnapshots SKIPPED (temporary)');
-    const paceSnapResult = { ok: true, written: 0 };
-    // const paceSnapResult = await persistPmsPaceSnapshots(supabase, pmsPaceSnapshotRows);
+    const paceSnapResult = await persistPmsPaceSnapshots(supabase, pmsPaceSnapshotRows);
     if (!paceSnapResult.ok) {
       console.error(
         'pms_pace_snapshots upsert failed (analyze continues):',
