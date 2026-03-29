@@ -3075,7 +3075,10 @@ if (engineSaveError) {
 
     console.log('DEBUG calling persistPmsPaceSnapshots');
 
-    const paceSnapResult = await persistPmsPaceSnapshots(supabase, pmsPaceSnapshotRows);
+    // TEMP: isolate statement timeout — re-enable after diagnosis
+    console.log('DEBUG persistPmsPaceSnapshots SKIPPED (temporary)');
+    const paceSnapResult = { ok: true, written: 0 };
+    // const paceSnapResult = await persistPmsPaceSnapshots(supabase, pmsPaceSnapshotRows);
     if (!paceSnapResult.ok) {
       console.error(
         'pms_pace_snapshots upsert failed (analyze continues):',
