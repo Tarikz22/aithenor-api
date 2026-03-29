@@ -108,6 +108,29 @@ const EPISODE_MERGE_MPI_ARI_MAX_DELTA = 4;
 
 const PRIORITY_SORT_RANK = { high: 0, medium: 1, low: 2 };
 
+/** Locked hotel workbook tabs (aliases for sheet resolution). Hotel Profile is intentionally omitted — never ingested. */
+const SHEET_ALIASES_STR = ['STR Daily Report', 'STR', 'Daily STR'];
+const SHEET_ALIASES_PMS = ['PMS Market Segment Report', 'PMS', 'Market Segment'];
+const SHEET_ALIASES_CORPORATE = [
+  'Corporate Account Production',
+  'Corporate Account',
+  'Account Production'
+];
+const SHEET_ALIASES_DELPHI = ['Delphi Groups Pipeline', 'Delphi Groups', 'Groups Pipeline'];
+
+/** Stay / business date column candidates (template-aligned). */
+const INGESTION_DATE_KEYS = [
+  'Date',
+  'Business Date',
+  'Stay Date',
+  'Day',
+  'Report Date',
+  'Arrival Date',
+  'Arrival',
+  'Stay Night',
+  'Night of Stay'
+];
+
 // --------------------
 // HELPERS
 // --------------------
@@ -235,6 +258,230 @@ function getSheetRows(workbook, aliases) {
   return rowsDefault.length ? rowsDefault : rowsOffset3;
 }
 
+/**
+ * Tabular sheets without STR KPI header heuristic (PMS / corporate / Delphi).
+ */
+function getSheetRowsTabular(workbook, aliases) {
+  const sheetName = findSheetByAliases(workbook, aliases);
+  if (!sheetName) return [];
+
+  const sheet = workbook.Sheets[sheetName];
+  const rowsDefault = XLSX.utils.sheet_to_json(sheet, { defval: null });
+  const rowsOffset3 = XLSX.utils.sheet_to_json(sheet, { range: 3, defval: null });
+
+  if (rowsDefault.length >= rowsOffset3.length) {
+    return rowsDefault.length ? rowsDefault : rowsOffset3;
+  }
+  return rowsOffset3.length ? rowsOffset3 : rowsDefault;
+}
+
+function getRowStayDateYmd(row) {
+  const raw = getRowValue(row, INGESTION_DATE_KEYS);
+  const d = parseExcelDate(raw);
+  return d ? formatDateToYMD(d) : null;
+}
+
+/** snapshotYmd: UTC calendar date of analysis run (upload / server time). */
+function classifyRowAgainstSnapshot(stayYmd, snapshotYmd) {
+  if (!snapshotYmd) return 'undated';
+  if (!stayYmd) return 'undated';
+  if (stayYmd <= snapshotYmd) return 'actualized';
+  return 'future';
+}
+
+function filterStrRowsActualizedThroughSnapshot(strRows, snapshotYmd) {
+  return (strRows || []).filter((row) => {
+    const ymd = getRowStayDateYmd(row);
+    if (!ymd) return false;
+    return ymd <= snapshotYmd;
+  });
+}
+
+function rowKeysIncludeForecastTy(row) {
+  if (!row || typeof row !== 'object') return false;
+  return Object.keys(row).some((k) => {
+    const nk = normalizeKey(k);
+    if (!nk.includes('forecast')) return false;
+    if (nk.includes('ly') || nk.includes('last year') || nk.includes('stly')) return false;
+    const v = row[k];
+    if (v === null || v === undefined || `${v}`.trim() === '') return false;
+    const n = toNumber(v);
+    return n !== null;
+  });
+}
+
+function rowKeysIncludeOnBooksTy(row) {
+  if (!row || typeof row !== 'object') return false;
+  return Object.keys(row).some((k) => {
+    const nk = normalizeKey(k);
+    if (nk.includes('ly') || nk.includes('last year') || nk.includes('stly')) return false;
+    const looksOtb =
+      nk.includes('on book') || nk.includes('on books') || (nk.includes('otb') && !nk.includes('ly'));
+    if (!looksOtb) return false;
+    const v = row[k];
+    if (v === null || v === undefined || `${v}`.trim() === '') return false;
+    return toNumber(v) !== null;
+  });
+}
+
+function pmsFutureRowPhase(row) {
+  if (rowKeysIncludeForecastTy(row)) return 'future_forecast';
+  if (rowKeysIncludeOnBooksTy(row)) return 'future_otb';
+  return 'future_otb';
+}
+
+function sheetHasStlyStyleColumns(sampleRow) {
+  if (!sampleRow || typeof sampleRow !== 'object') return false;
+  return Object.keys(sampleRow).some((k) => {
+    const nk = normalizeKey(k);
+    return nk.includes('ly') || nk.includes('last year') || nk.includes('stly');
+  });
+}
+
+function attachIngestion(row, meta) {
+  return { ...row, _ingestion: meta };
+}
+
+/**
+ * PMS: classify rows; STLY exists only on this tab (flag at sheet level).
+ * Engine path uses actualized + undated rows only (backward compatible if template has no dates).
+ */
+function normalizePmsRowsForIngestion(pmsRowsRaw, snapshotYmd) {
+  const list = Array.isArray(pmsRowsRaw) ? pmsRowsRaw : [];
+  const stlySupported = list.length ? sheetHasStlyStyleColumns(list[0]) : false;
+
+  const counts = {
+    actualized: 0,
+    undated: 0,
+    future_otb: 0,
+    future_forecast: 0
+  };
+
+  const all = list.map((row) => {
+    const stayYmd = getRowStayDateYmd(row);
+    const coarse = classifyRowAgainstSnapshot(stayYmd, snapshotYmd);
+    let rowPhase;
+    if (coarse === 'undated') {
+      rowPhase = 'undated';
+      counts.undated += 1;
+    } else if (coarse === 'actualized') {
+      rowPhase = 'actualized';
+      counts.actualized += 1;
+    } else {
+      rowPhase = pmsFutureRowPhase(row);
+      if (rowPhase === 'future_forecast') counts.future_forecast += 1;
+      else counts.future_otb += 1;
+    }
+
+    return attachIngestion(row, {
+      tab: 'pms',
+      stay_date_ymd: stayYmd,
+      row_phase: rowPhase,
+      stly_supported_tab: stlySupported,
+      forward_kind: rowPhase.startsWith('future') ? 'otb_or_forecast' : null
+    });
+  });
+
+  const rowsForEngine = all.filter(
+    (r) => r._ingestion.row_phase === 'actualized' || r._ingestion.row_phase === 'undated'
+  );
+
+  return { all, rowsForEngine, counts, stly_supported_tab: stlySupported };
+}
+
+function normalizeCorporateRowsForIngestion(rowsRaw, snapshotYmd) {
+  const list = Array.isArray(rowsRaw) ? rowsRaw : [];
+  const counts = { actualized: 0, future_otb: 0, undated: 0 };
+
+  const all = list.map((row) => {
+    const stayYmd = getRowStayDateYmd(row);
+    const base = classifyRowAgainstSnapshot(stayYmd, snapshotYmd);
+    let rowPhase = base === 'future' ? 'future_otb' : base;
+    if (rowPhase === 'actualized') counts.actualized += 1;
+    else if (rowPhase === 'future_otb') counts.future_otb += 1;
+    else counts.undated += 1;
+
+    return attachIngestion(row, {
+      tab: 'corporate_account_production',
+      stay_date_ymd: stayYmd,
+      row_phase: rowPhase,
+      stly_supported_tab: false,
+      forward_kind: rowPhase === 'future_otb' ? 'corporate_production_otb' : null
+    });
+  });
+
+  return { all, counts };
+}
+
+function normalizeDelphiRowsForIngestion(rowsRaw, snapshotYmd) {
+  const list = Array.isArray(rowsRaw) ? rowsRaw : [];
+  const counts = { actualized: 0, future_otb: 0, undated: 0 };
+
+  const all = list.map((row) => {
+    const stayYmd = getRowStayDateYmd(row);
+    const base = classifyRowAgainstSnapshot(stayYmd, snapshotYmd);
+    let rowPhase = base === 'future' ? 'future_otb' : base;
+    if (rowPhase === 'actualized') counts.actualized += 1;
+    else if (rowPhase === 'future_otb') counts.future_otb += 1;
+    else counts.undated += 1;
+
+    return attachIngestion(row, {
+      tab: 'delphi_groups_pipeline',
+      stay_date_ymd: stayYmd,
+      row_phase: rowPhase,
+      stly_supported_tab: false,
+      forward_kind: rowPhase === 'future_otb' ? 'group_pipeline' : null
+    });
+  });
+
+  return { all, counts };
+}
+
+function buildWorkbookIngestionModel({
+  snapshotYmd,
+  strSheetName,
+  strRowsRaw,
+  strRowsActualized,
+  pmsNormalized,
+  corporateNormalized,
+  delphiNormalized
+}) {
+  return {
+    snapshot_date: snapshotYmd,
+    snapshot_source: 'server_upload_time_utc',
+    cutoff_rule: 'stay_date_on_or_before_snapshot_is_actualized; after_snapshot_is_forward',
+    hotel_profile: { ingested: false, note: 'Hotel Profile tab is not read — unchanged by design.' },
+    str: {
+      sheet_resolved: strSheetName,
+      str_actual_only_no_stly: true,
+      row_counts: {
+        raw: strRowsRaw.length,
+        actualized_through_snapshot: strRowsActualized.length,
+        excluded_future_or_undated: strRowsRaw.length - strRowsActualized.length
+      }
+    },
+    pms: {
+      stly_only_tab: true,
+      stly_supported: pmsNormalized.stly_supported_tab,
+      row_counts: pmsNormalized.counts,
+      rows_classified_total: pmsNormalized.all.length
+    },
+    corporate_account_production: {
+      row_counts: corporateNormalized.counts,
+      rows_classified_total: corporateNormalized.all.length
+    },
+    delphi_groups_pipeline: {
+      row_counts: delphiNormalized.counts,
+      rows_classified_total: delphiNormalized.all.length
+    },
+    rows: {
+      pms: pmsNormalized.all,
+      corporate: corporateNormalized.all,
+      delphi: delphiNormalized.all
+    }
+  };
+}
+
 function getRowValue(row, candidateKeys) {
   if (!row || typeof row !== 'object') return undefined;
 
@@ -308,19 +555,19 @@ function getExpectedImpactValue(action) {
   return action?.financial_impact?.impact_range?.high || null;
 }
 
-function extractPeriodMetadata(strRows) {
+function extractPeriodMetadata(strRows, snapshotDateYmd) {
+  const snapshotYmd =
+    snapshotDateYmd || formatDateToYMD(new Date());
+
   const candidateDates = strRows
-    .map((row) => getRowValue(row, ['Date', 'Business Date', 'Stay Date', 'Day', 'Report Date']))
+    .map((row) => getRowValue(row, INGESTION_DATE_KEYS))
     .map(parseExcelDate)
     .filter(Boolean)
     .sort((a, b) => a.getTime() - b.getTime());
 
-  const snapshotDate = new Date();
-  const snapshotDateYmd = formatDateToYMD(snapshotDate);
-
   if (!candidateDates.length) {
     return {
-      snapshot_date: snapshotDateYmd,
+      snapshot_date: snapshotYmd,
       period_type: 'weekly',
       period_start: null,
       period_end: null,
@@ -341,7 +588,7 @@ function extractPeriodMetadata(strRows) {
   });
 
   return {
-    snapshot_date: snapshotDateYmd,
+    snapshot_date: snapshotYmd,
     period_type: 'weekly',
     period_start: formatDateToYMD(periodStart),
     period_end: formatDateToYMD(periodEnd),
@@ -417,7 +664,8 @@ function detectDataContext(workbook) {
     'Market Segment'
   ]);
 
-  const allHeaders = [strHeaders, pmsHeaders];
+  const corporateHeaders = getHeadersFromSheetAliases(SHEET_ALIASES_CORPORATE);
+  const delphiHeaders = getHeadersFromSheetAliases(SHEET_ALIASES_DELPHI);
 
   const has_str = strHeaders.length > 0;
   const has_mpi_ari_rgi =
@@ -426,9 +674,8 @@ function detectDataContext(workbook) {
     strHeaders.some((h) => h.includes('rgi'));
   const has_segmentation = pmsHeaders.length > 0;
   const has_demand_data = false;
-  const has_ly = allHeaders.some((headers) =>
-    headers.some((h) => h.includes('ly') || h.includes('last year'))
-  );
+  /** STLY / LY comparators exist only on PMS in the locked template — not STR, corporate, or Delphi. */
+  const has_ly = pmsHeaders.some((h) => h.includes('ly') || h.includes('last year') || h.includes('stly'));
   const has_pace = pmsHeaders.some(
     (h) => h.includes('on books') || h.includes('forecast') || h.includes('pace')
   );
@@ -456,13 +703,17 @@ function detectDataContext(workbook) {
       has_demand_data,
       has_ly,
       has_pace,
-      has_kpi_trend
+      has_kpi_trend,
+      has_corporate_production: corporateHeaders.length > 0,
+      has_delphi_groups_pipeline: delphiHeaders.length > 0
     },
     confidence,
     detection_details: {
       sheets_found: sheets,
       str_headers: strHeaders,
-      pms_headers: pmsHeaders
+      pms_headers: pmsHeaders,
+      corporate_headers: corporateHeaders,
+      delphi_headers: delphiHeaders
     }
   };
 }
@@ -1054,7 +1305,7 @@ function weekBucketKeyFromDate(date) {
 }
 
 function getStrRowDate(row) {
-  const raw = getRowValue(row, ['Date', 'Business Date', 'Stay Date', 'Day', 'Report Date']);
+  const raw = getRowValue(row, INGESTION_DATE_KEYS);
   return parseExcelDate(raw);
 }
 
@@ -2107,12 +2358,42 @@ async function handler(req, res) {
     const hotelCode = (req.body?.hotelCode || 'Unknown Hotel').toString().trim();
     const workbook = await getWorkbookFromRequest(req);
 
-    const strRows = getSheetRows(workbook, ['STR Daily Report', 'STR', 'Daily STR']);
-    if (!strRows.length) {
+    const snapshotInstant = new Date();
+    const snapshotYmd = formatDateToYMD(snapshotInstant);
+
+    const strSheetName = findSheetByAliases(workbook, SHEET_ALIASES_STR);
+    const strRowsRaw = getSheetRows(workbook, SHEET_ALIASES_STR);
+    if (!strRowsRaw.length) {
       return res.status(400).json({ error: 'STR sheet not found or empty' });
     }
 
-    const pmsRows = getSheetRows(workbook, ['PMS Market Segment Report', 'PMS', 'Market Segment']);
+    const strRows = filterStrRowsActualizedThroughSnapshot(strRowsRaw, snapshotYmd);
+    if (!strRows.length) {
+      return res.status(400).json({
+        error:
+          'No STR rows on or before snapshot date — STR tab must contain actualized history only through the upload snapshot (future market rows are excluded).'
+      });
+    }
+
+    const pmsRowsRaw = getSheetRows(workbook, SHEET_ALIASES_PMS);
+    const pmsNormalized = normalizePmsRowsForIngestion(pmsRowsRaw, snapshotYmd);
+    const pmsRows = pmsNormalized.rowsForEngine;
+
+    const corporateRaw = getSheetRowsTabular(workbook, SHEET_ALIASES_CORPORATE);
+    const delphiRaw = getSheetRowsTabular(workbook, SHEET_ALIASES_DELPHI);
+    const corporateNormalized = normalizeCorporateRowsForIngestion(corporateRaw, snapshotYmd);
+    const delphiNormalized = normalizeDelphiRowsForIngestion(delphiRaw, snapshotYmd);
+
+    const workbookIngestion = buildWorkbookIngestionModel({
+      snapshotYmd,
+      strSheetName,
+      strRowsRaw,
+      strRowsActualized: strRows,
+      pmsNormalized,
+      corporateNormalized,
+      delphiNormalized
+    });
+
     const detection = detectDataContext(workbook);
     const diagnosis = buildDiagnosisFromSTR(strRows);
     const focus = buildFocusFromPMS(pmsRows, diagnosis);
@@ -2162,7 +2443,7 @@ async function handler(req, res) {
     }
 
     const totalOpportunity = buildTotalOpportunity(enrichedActions);
-    const periodMeta = extractPeriodMetadata(strRows);
+    const periodMeta = extractPeriodMetadata(strRows, snapshotYmd);
 
     const enginePayload = {
       success: true,
@@ -2174,6 +2455,8 @@ async function handler(req, res) {
       retail_temporal:
         (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
       total_opportunity: totalOpportunity,
+      /** Normalized workbook views + row classification (pace engine consumes later). */
+      workbook_ingestion: workbookIngestion,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
