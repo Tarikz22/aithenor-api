@@ -1631,6 +1631,95 @@ function buildPmsPaceComparatorLayer(pmsClassifiedRows, snapshotYmd, stlyTabFlag
   };
 }
 
+/** Supabase table name for slim PMS pace history (see sql/pms_pace_snapshots.sql). */
+const PMS_PACE_SNAPSHOTS_TABLE = 'pms_pace_snapshots';
+
+/**
+ * Slim rows for pms_pace_snapshots — only stay-dated PMS comparator rows (skips undated).
+ */
+function buildPmsPaceSnapshotRowsForPersistence({ hotelCode, snapshotDateYmd, pmsPaceComparator }) {
+  const paceRows = pmsPaceComparator?.pace_rows;
+  if (!Array.isArray(paceRows) || !paceRows.length || !hotelCode || !snapshotDateYmd) return [];
+
+  const out = [];
+  const nowIso = new Date().toISOString();
+
+  for (const pr of paceRows) {
+    const stay = pr.date_identity?.stay_date_ymd;
+    if (!stay) continue;
+
+    const c = pr.comparators || {};
+    const adrTy =
+      c.adr_ty?.value != null && Number.isFinite(Number(c.adr_ty.value))
+        ? Number(c.adr_ty.value)
+        : c.adr_derived_ty_from_rev_rn;
+    const adrLy =
+      c.adr_ly?.value != null && Number.isFinite(Number(c.adr_ly.value))
+        ? Number(c.adr_ly.value)
+        : c.adr_derived_ly_from_rev_rn;
+    const adrStly =
+      c.adr_stly?.value != null && Number.isFinite(Number(c.adr_stly.value))
+        ? Number(c.adr_stly.value)
+        : c.adr_derived_stly_from_rev_rn;
+
+    out.push({
+      hotel_code: hotelCode,
+      snapshot_date: snapshotDateYmd,
+      stay_date_ymd: stay,
+      stay_week_key: pr.date_identity?.stay_week_key || null,
+      stay_week_start_ymd: pr.date_identity?.stay_week_start_ymd || null,
+      stay_week_end_ymd: pr.date_identity?.stay_week_end_ymd || null,
+      market_segment_label: (pr.segment?.market_segment_label || '').trim(),
+      source_row_index: Number.isFinite(Number(pr.row_index)) ? Number(pr.row_index) : 0,
+      row_phase: pr.row_phase || null,
+      future_window_class: pr.future_window_class || null,
+      lead_days_snapshot_to_stay:
+        pr.snapshot?.lead_days_snapshot_to_stay != null &&
+        Number.isFinite(Number(pr.snapshot.lead_days_snapshot_to_stay))
+          ? Number(pr.snapshot.lead_days_snapshot_to_stay)
+          : null,
+      rn_on_books_ty: c.room_nights_ty_on_books?.value ?? null,
+      rn_ly_actual: c.room_nights_ly_reference?.value ?? null,
+      rn_stly: c.room_nights_stly_on_books?.value ?? null,
+      booked_revenue_ty: c.revenue_ty_booked?.value ?? null,
+      booked_revenue_ly_actual: c.revenue_ly_booked?.value ?? null,
+      booked_revenue_stly: c.revenue_stly_booked?.value ?? null,
+      forecast_room_nights_ty: c.forecast_room_nights_ty?.value ?? null,
+      forecast_revenue_ty: c.forecast_revenue_ty?.value ?? null,
+      adr_ty: adrTy != null && Number.isFinite(adrTy) ? adrTy : null,
+      adr_ly_actual: adrLy != null && Number.isFinite(adrLy) ? adrLy : null,
+      adr_stly: adrStly != null && Number.isFinite(adrStly) ? adrStly : null,
+      ready_ty_stly_rn: Boolean(pr.readiness?.same_lead_ty_vs_stly_rn_ready),
+      ready_ty_stly_rev: Boolean(pr.readiness?.same_lead_ty_vs_stly_rev_ready),
+      weekly_rollup_ready: Boolean(pr.readiness?.weekly_rollup_ready),
+      updated_at: nowIso
+    });
+  }
+
+  return out;
+}
+
+async function persistPmsPaceSnapshots(supabaseClient, rows) {
+  if (!rows.length) return { ok: true, written: 0 };
+
+  const chunkSize = 500;
+  let written = 0;
+
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const { error } = await supabaseClient.from(PMS_PACE_SNAPSHOTS_TABLE).upsert(chunk, {
+      onConflict: 'hotel_code,snapshot_date,stay_date_ymd,market_segment_label,source_row_index'
+    });
+
+    if (error) {
+      return { ok: false, written, error };
+    }
+    written += chunk.length;
+  }
+
+  return { ok: true, written };
+}
+
 function spanDaysInclusive(startYmd, endYmd) {
   const s = parseYmdToUtcDate(startYmd);
   const e = parseYmdToUtcDate(endYmd);
@@ -2791,6 +2880,21 @@ console.log('DEBUG engine_outputs insert error:', engineSaveError);
 if (engineSaveError) {
   throw engineSaveError;
 }
+
+    const pmsPaceSnapshotRows = buildPmsPaceSnapshotRowsForPersistence({
+      hotelCode,
+      snapshotDateYmd: periodMeta.snapshot_date,
+      pmsPaceComparator
+    });
+    const paceSnapResult = await persistPmsPaceSnapshots(supabase, pmsPaceSnapshotRows);
+    if (!paceSnapResult.ok) {
+      console.error(
+        'pms_pace_snapshots upsert failed (analyze continues):',
+        paceSnapResult.error?.message || paceSnapResult.error
+      );
+    } else if (paceSnapResult.written > 0) {
+      console.log('DEBUG pms_pace_snapshots rows upserted:', paceSnapResult.written);
+    }
 
     const recommendationsPayload =
       (focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0
