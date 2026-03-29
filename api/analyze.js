@@ -1068,6 +1068,24 @@ function minMaxYmdFromDates(dates) {
   };
 }
 
+function parseYmdToUtcDate(ymd) {
+  if (!ymd || typeof ymd !== 'string') return null;
+  const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function spanDaysInclusive(startYmd, endYmd) {
+  const s = parseYmdToUtcDate(startYmd);
+  const e = parseYmdToUtcDate(endYmd);
+  if (!s || !e) return null;
+  return Math.floor((e.getTime() - s.getTime()) / 86400000) + 1;
+}
+
 /**
  * Group STR daily rows by calendar week (ISO-style bucket via getIsoWeekInfo).
  * @returns {Map<string, object[]>} weekKey -> rows
@@ -1252,12 +1270,80 @@ function materializeRetailEpisode(ep, focus) {
   };
 }
 
+function classifyEpisodeTypeForFamily(ep) {
+  const agg = aggregateEpisodeMetrics(ep?.weekPayloads || []);
+  const mpi = Number(agg?.avgMPI);
+  const ari = Number(agg?.avgARI);
+  const occ = Number(agg?.avgOcc);
+  const trend = ep?.weekPayloads?.[ep.weekPayloads.length - 1]?.trend || 'stable';
+  const family = ep?.family || 'unknown';
+
+  if (family === 'pricing_resistance' || family === 'mix_constraint') {
+    if (Number.isFinite(ari) && ari >= 108) return 'high_premium_rejection';
+    if (Number.isFinite(ari) && ari >= 103) return 'moderate_premium_rejection';
+    return 'marginal_premium_rejection';
+  }
+
+  if (family === 'discount_inefficiency') {
+    if (Number.isFinite(ari) && ari <= 95 && Number.isFinite(mpi) && mpi <= 95) return 'deep_discount_low_share';
+    if (Number.isFinite(ari) && ari <= 98) return 'discount_inefficiency_core';
+    return 'conversion_led_inefficiency';
+  }
+
+  if (family === 'visibility_gap') {
+    if (trend === 'worsening') return 'visibility_erosion';
+    return 'visibility_plateau';
+  }
+
+  if (family === 'missed_pricing_opportunity') {
+    if (Number.isFinite(occ) && occ >= 84) return 'high_occ_rate_gap';
+    return 'occupancy_supported_rate_gap';
+  }
+
+  return 'generic_pattern';
+}
+
+function classifyConsolidatedTemporalPattern({ episodes = [], weekCount = 0, spanDays = null, isOngoingMost = false }) {
+  const episodeCount = episodes.length;
+  if (episodeCount <= 0) return 'isolated';
+
+  const typeSet = new Set(
+    episodes.map((ep) => classifyEpisodeTypeForFamily(ep)).filter(Boolean)
+  );
+
+  // Regime shift precedence: same family, materially different episode signatures over time.
+  if (episodeCount >= 2 && typeSet.size >= 2) return 'regime_shift';
+
+  // Persistent: one long continuous run, or dominates most of observed period.
+  if ((episodeCount === 1 && weekCount >= 3) || isOngoingMost || (spanDays !== null && spanDays >= 21)) {
+    return 'persistent';
+  }
+
+  if (episodeCount >= 2 || weekCount >= 3) return 'recurring';
+
+  return 'isolated';
+}
+
+function temporalRankBonusByRecurrenceType(recurrenceType) {
+  switch (recurrenceType) {
+    case 'persistent':
+      return 2;
+    case 'regime_shift':
+      return 1.5;
+    case 'recurring':
+      return 1;
+    case 'isolated':
+    default:
+      return 0;
+  }
+}
+
 /**
  * One executive top-level issue per retail issue family: same stable finding_key as non-weekly retail (RET_ISSUE_*).
  * Representative copy (title/finding/root/outcome/actions) comes from the highest-severity episode in the family.
  * Per-episode boundaries stay in executive_synthesis for drilldown.
  */
-function consolidateRetailEpisodesToExecutiveIssues(episodes, focus) {
+function consolidateRetailEpisodesToExecutiveIssues(episodes, focus, temporalContext = {}) {
   if (!episodes.length) return [];
 
   const byFam = new Map();
@@ -1303,6 +1389,18 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus) {
     }
     episodeSummaries.sort((a, b) => (a.start_ymd || '').localeCompare(b.start_ymd || ''));
     const weekKeysSorted = [...weekKeySet].sort();
+    const spanDays = spanDaysInclusive(minStart, maxEnd);
+    const observedWeekCount = Number(temporalContext?.observed_week_count || 0);
+    const issueCoverageRatio = observedWeekCount > 0 ? (weekKeysSorted.length / observedWeekCount) : 0;
+    const isOngoingMost = issueCoverageRatio >= 0.6;
+    const recurrenceType = classifyConsolidatedTemporalPattern({
+      episodes: eps,
+      weekCount: weekKeysSorted.length,
+      spanDays,
+      isOngoingMost
+    });
+    const representativeEpisodeType = classifyEpisodeTypeForFamily(rep);
+    const rankBonus = temporalRankBonusByRecurrenceType(recurrenceType);
 
     const materialized = materializeRetailEpisode(rep, focus);
     out.push({
@@ -1314,12 +1412,32 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus) {
       episode_week_keys: weekKeysSorted,
       episode_week_count: weekKeysSorted.length,
       temporal_layer: 'weekly_episode_executive',
+      recurrence_type: recurrenceType,
+      contributing_episode_count: eps.length,
+      contributing_week_count: weekKeysSorted.length,
+      first_seen_date: minStart,
+      last_seen_date: maxEnd,
+      span_days: spanDays,
+      representative_episode_type: representativeEpisodeType,
+      ongoing_across_most_uploaded_period: isOngoingMost,
       executive_synthesis: {
         contributing_episode_count: eps.length,
         contributing_week_keys: weekKeysSorted,
         date_range: { earliest_start: minStart, latest_end: maxEnd },
         representative_episode_finding_key: episodeFindingKey(rep.family, rep.startYmd, rep.endYmd),
         max_episode_rank_score: maxRank,
+        temporal_pattern: {
+          recurrence_type: recurrenceType,
+          contributing_episode_count: eps.length,
+          contributing_week_count: weekKeysSorted.length,
+          first_seen_date: minStart,
+          last_seen_date: maxEnd,
+          span_days: spanDays,
+          representative_episode_type: representativeEpisodeType,
+          ongoing_across_most_uploaded_period: isOngoingMost,
+          issue_week_coverage_ratio: Number(issueCoverageRatio.toFixed(3)),
+          rank_bonus: rankBonus
+        },
         episodes: episodeSummaries
       }
     });
@@ -1330,8 +1448,10 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus) {
 function rankAndCapExecutiveRetailIssues(consolidatedIssues, maxCount) {
   return [...consolidatedIssues]
     .sort((a, b) => {
-      const sb = Number(b.executive_synthesis?.max_episode_rank_score ?? 0);
-      const sa = Number(a.executive_synthesis?.max_episode_rank_score ?? 0);
+      const sbBase = Number(b.executive_synthesis?.max_episode_rank_score ?? 0);
+      const saBase = Number(a.executive_synthesis?.max_episode_rank_score ?? 0);
+      const sb = sbBase + Number(b.executive_synthesis?.temporal_pattern?.rank_bonus ?? 0);
+      const sa = saBase + Number(a.executive_synthesis?.temporal_pattern?.rank_bonus ?? 0);
       if (sb !== sa) return sb - sa;
       const rec = (b.episode_week_end || '').localeCompare(a.episode_week_end || '');
       if (rec !== 0) return rec;
@@ -1434,7 +1554,9 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver) {
     episode_finding_key: episodeFindingKey(ep.family, ep.startYmd, ep.endYmd)
   }));
 
-  const consolidated = consolidateRetailEpisodesToExecutiveIssues(episodes, focus);
+  const consolidated = consolidateRetailEpisodesToExecutiveIssues(episodes, focus, {
+    observed_week_count: temporal_meta.weekly_windows.length
+  });
   temporal_meta.executive_family_count = consolidated.length;
 
   const rawIssues = rankAndCapExecutiveRetailIssues(consolidated, MAX_RETAIL_ISSUES_PER_RUN);
