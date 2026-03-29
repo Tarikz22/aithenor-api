@@ -1709,6 +1709,7 @@ async function persistPmsPaceSnapshots(supabaseClient, rows) {
 
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
+    console.log('DEBUG pms_pace_snapshots upsert payload count:', chunk.length);
     const { error } = await supabaseClient.from(PMS_PACE_SNAPSHOTS_TABLE).upsert(chunk, {
       onConflict: 'hotel_code,snapshot_date,stay_date_ymd,market_segment_label,source_row_index'
     });
@@ -2883,18 +2884,35 @@ if (engineSaveError) {
   throw engineSaveError;
 }
 
+    console.log('DEBUG reached post-engine_outputs stage');
+
+    console.log('DEBUG building pms pace snapshot rows', {
+      hotelCode,
+      snapshotDateYmd: periodMeta.snapshot_date,
+      hasPaceComparator: !!pmsPaceComparator,
+      paceRowCount: Array.isArray(pmsPaceComparator?.pace_rows) ? pmsPaceComparator.pace_rows.length : 0
+    });
+
     const pmsPaceSnapshotRows = buildPmsPaceSnapshotRowsForPersistence({
       hotelCode,
       snapshotDateYmd: periodMeta.snapshot_date,
       pmsPaceComparator
     });
+
+    console.log('DEBUG built pms pace snapshot rows:', {
+      builtRowCount: pmsPaceSnapshotRows.length,
+      first3RowsSample: pmsPaceSnapshotRows.slice(0, 3)
+    });
+
+    console.log('DEBUG calling persistPmsPaceSnapshots');
+
     const paceSnapResult = await persistPmsPaceSnapshots(supabase, pmsPaceSnapshotRows);
     if (!paceSnapResult.ok) {
       console.error(
         'pms_pace_snapshots upsert failed (analyze continues):',
         paceSnapResult.error?.message || paceSnapResult.error
       );
-    } else if (paceSnapResult.written > 0) {
+    } else {
       console.log('DEBUG pms_pace_snapshots rows upserted:', paceSnapResult.written);
     }
 
