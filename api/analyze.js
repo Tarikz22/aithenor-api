@@ -444,7 +444,8 @@ function buildWorkbookIngestionModel({
   strRowsActualized,
   pmsNormalized,
   corporateNormalized,
-  delphiNormalized
+  delphiNormalized,
+  pmsPaceComparator
 }) {
   return {
     snapshot_date: snapshotYmd,
@@ -466,6 +467,8 @@ function buildWorkbookIngestionModel({
       row_counts: pmsNormalized.counts,
       rows_classified_total: pmsNormalized.all.length
     },
+    /** Normalized PMS comparator rows + readiness for future same-lead / weekly pace logic. */
+    pms_pace_comparator: pmsPaceComparator || null,
     corporate_account_production: {
       row_counts: corporateNormalized.counts,
       rows_classified_total: corporateNormalized.all.length
@@ -1328,6 +1331,304 @@ function parseYmdToUtcDate(ymd) {
   const d = Number(m[3]);
   const dt = new Date(Date.UTC(y, mo - 1, d));
   return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+// --- PMS pace comparator (internal; no issue engine / UI dependency) ---
+
+function pmsNormHeaderLyNotStly(nk) {
+  if (nk.includes('stly') || nk.includes('same time')) return false;
+  return nk.includes('last year') || /\bly\b/.test(nk);
+}
+
+function pmsNormHeaderIsStly(nk) {
+  return nk.includes('stly') || nk.includes('same time last year') || nk.includes('same time ly');
+}
+
+function pickPmsNumericByHeader(row, testFn) {
+  if (!row || typeof row !== 'object') return { value: null, source_key: null };
+  for (const [k, v] of Object.entries(row)) {
+    if (k === '_ingestion') continue;
+    const nk = normalizeKey(k);
+    if (!testFn(nk)) continue;
+    const n = toNumber(v);
+    if (n !== null) return { value: n, source_key: k };
+  }
+  return { value: null, source_key: null };
+}
+
+function matchPmsRnTyOnBooks(nk) {
+  if (!nk.includes('room') || !nk.includes('night')) return false;
+  if (nk.includes('forecast')) return false;
+  if (pmsNormHeaderIsStly(nk)) return false;
+  if (pmsNormHeaderLyNotStly(nk)) return false;
+  if (!(nk.includes('on book') || nk.includes('otb'))) return false;
+  return nk.includes('ty') || nk.includes('this year');
+}
+
+function matchPmsRnLyReference(nk) {
+  if (!nk.includes('room') || !nk.includes('night')) return false;
+  if (nk.includes('forecast')) return false;
+  if (pmsNormHeaderIsStly(nk)) return false;
+  return pmsNormHeaderLyNotStly(nk);
+}
+
+function matchPmsRnStly(nk) {
+  if (!nk.includes('room') || !nk.includes('night')) return false;
+  return pmsNormHeaderIsStly(nk);
+}
+
+function matchPmsRevTy(nk) {
+  if (nk.includes('forecast')) return false;
+  if (pmsNormHeaderIsStly(nk)) return false;
+  if (pmsNormHeaderLyNotStly(nk)) return false;
+  const revish =
+    nk.includes('revenue') || nk.includes('booked rev') || (nk.includes('booked') && nk.includes('rev'));
+  if (!revish) return false;
+  return nk.includes('ty') || nk.includes('this year');
+}
+
+function matchPmsRevLy(nk) {
+  if (nk.includes('forecast')) return false;
+  if (pmsNormHeaderIsStly(nk)) return false;
+  const revish =
+    nk.includes('revenue') || nk.includes('booked rev') || (nk.includes('booked') && nk.includes('rev'));
+  if (!revish) return false;
+  return pmsNormHeaderLyNotStly(nk);
+}
+
+function matchPmsRevStly(nk) {
+  if (nk.includes('forecast')) return false;
+  const revish =
+    nk.includes('revenue') || nk.includes('booked rev') || (nk.includes('booked') && nk.includes('rev'));
+  if (!revish) return false;
+  return pmsNormHeaderIsStly(nk);
+}
+
+function matchPmsForecastRnTy(nk) {
+  if (!nk.includes('forecast')) return false;
+  if (!nk.includes('room') || !nk.includes('night')) return false;
+  return !pmsNormHeaderLyNotStly(nk) && !pmsNormHeaderIsStly(nk);
+}
+
+function matchPmsForecastRevTy(nk) {
+  if (!nk.includes('forecast')) return false;
+  if (!(nk.includes('revenue') || nk.includes('rev'))) return false;
+  return !pmsNormHeaderLyNotStly(nk) && !pmsNormHeaderIsStly(nk);
+}
+
+function matchPmsForecastLy(nk) {
+  if (!nk.includes('forecast')) return false;
+  return pmsNormHeaderLyNotStly(nk);
+}
+
+function matchPmsAdrTy(nk) {
+  if (nk.includes('forecast')) return false;
+  if (pmsNormHeaderIsStly(nk) || pmsNormHeaderLyNotStly(nk)) return false;
+  const adrish = nk.includes('adr') || nk.includes('average rate') || nk.includes('avg rate');
+  if (!adrish) return false;
+  return nk.includes('ty') || nk.includes('this year');
+}
+
+function matchPmsAdrLy(nk) {
+  if (nk.includes('forecast')) return false;
+  if (pmsNormHeaderIsStly(nk)) return false;
+  const adrish = nk.includes('adr') || nk.includes('average rate') || nk.includes('avg rate');
+  if (!adrish) return false;
+  return pmsNormHeaderLyNotStly(nk);
+}
+
+function matchPmsAdrStly(nk) {
+  if (nk.includes('forecast')) return false;
+  const adrish = nk.includes('adr') || nk.includes('average rate') || nk.includes('avg rate');
+  if (!adrish) return false;
+  return pmsNormHeaderIsStly(nk);
+}
+
+function getIsoWeekStayBoundsFromYmd(stayYmd) {
+  const date = parseYmdToUtcDate(stayYmd);
+  if (!date) {
+    return {
+      stay_week_key: null,
+      stay_week_start_ymd: null,
+      stay_week_end_ymd: null
+    };
+  }
+  const stay_week_key = weekBucketKeyFromDate(date);
+  const dow = date.getUTCDay();
+  const mondayOffset = dow === 0 ? -6 : 1 - dow;
+  const mon = new Date(date.getTime());
+  mon.setUTCDate(date.getUTCDate() + mondayOffset);
+  const sun = new Date(mon.getTime());
+  sun.setUTCDate(mon.getUTCDate() + 6);
+  return {
+    stay_week_key,
+    stay_week_start_ymd: formatDateToYMD(mon),
+    stay_week_end_ymd: formatDateToYMD(sun)
+  };
+}
+
+function extractPmsMarketSegmentLabel(row) {
+  const raw =
+    getRowValue(row, [
+      'Market Segment Name',
+      'market segment name',
+      'Segment',
+      'segment',
+      'Segment Name',
+      'segment name'
+    ]) || '';
+  return raw.toString().trim();
+}
+
+function safeDivideRevByRn(rev, rn) {
+  if (rev === null || rn === null) return null;
+  if (!Number.isFinite(rev) || !Number.isFinite(rn) || rn === 0) return null;
+  return rev / rn;
+}
+
+/**
+ * One normalized PMS comparator row: TY/LY/STLY metrics + weekly + readiness for future pace engine.
+ */
+function buildPmsPaceComparatorRow(row, snapshotYmd, rowIndex) {
+  const ing = row._ingestion || {};
+  const stayYmd = ing.stay_date_ymd || getRowStayDateYmd(row);
+  const week = getIsoWeekStayBoundsFromYmd(stayYmd);
+
+  let lead_days_to_stay = null;
+  if (stayYmd && snapshotYmd) {
+    const sStay = parseYmdToUtcDate(stayYmd);
+    const sSnap = parseYmdToUtcDate(snapshotYmd);
+    if (sStay && sSnap) {
+      lead_days_to_stay = Math.round((sStay.getTime() - sSnap.getTime()) / 86400000);
+    }
+  }
+
+  const rnTy = pickPmsNumericByHeader(row, matchPmsRnTyOnBooks);
+  const rnLy = pickPmsNumericByHeader(row, matchPmsRnLyReference);
+  const rnStly = pickPmsNumericByHeader(row, matchPmsRnStly);
+  const revTy = pickPmsNumericByHeader(row, matchPmsRevTy);
+  const revLy = pickPmsNumericByHeader(row, matchPmsRevLy);
+  const revStly = pickPmsNumericByHeader(row, matchPmsRevStly);
+  const fcRnTy = pickPmsNumericByHeader(row, matchPmsForecastRnTy);
+  const fcRevTy = pickPmsNumericByHeader(row, matchPmsForecastRevTy);
+  const fcLy = pickPmsNumericByHeader(row, matchPmsForecastLy);
+  const adrTy = pickPmsNumericByHeader(row, matchPmsAdrTy);
+  const adrLy = pickPmsNumericByHeader(row, matchPmsAdrLy);
+  const adrStly = pickPmsNumericByHeader(row, matchPmsAdrStly);
+
+  const derivedAdrTy = safeDivideRevByRn(revTy.value, rnTy.value);
+  const derivedAdrLy = safeDivideRevByRn(revLy.value, rnLy.value);
+  const derivedAdrStly = safeDivideRevByRn(revStly.value, rnStly.value);
+
+  const rowPhase = ing.row_phase || 'undated';
+  const futureWindow =
+    rowPhase === 'future_otb' || rowPhase === 'future_forecast'
+      ? 'future_forward'
+      : rowPhase === 'actualized'
+        ? 'past_actualized'
+        : 'undated_or_unknown';
+
+  const hasStay = Boolean(stayYmd);
+  const hasTyRn = rnTy.value !== null;
+  const hasLyRn = rnLy.value !== null;
+  const hasStlyRn = rnStly.value !== null;
+  const hasTyRev = revTy.value !== null;
+  const hasLyRev = revLy.value !== null;
+  const hasStlyRev = revStly.value !== null;
+
+  return {
+    row_index: rowIndex,
+    date_identity: {
+      stay_date_ymd: stayYmd,
+      stay_week_key: week.stay_week_key,
+      stay_week_start_ymd: week.stay_week_start_ymd,
+      stay_week_end_ymd: week.stay_week_end_ymd
+    },
+    snapshot: {
+      snapshot_date_ymd: snapshotYmd,
+      lead_days_snapshot_to_stay: lead_days_to_stay
+    },
+    segment: {
+      market_segment_label: extractPmsMarketSegmentLabel(row)
+    },
+    row_phase: rowPhase,
+    future_window_class: futureWindow,
+    comparators: {
+      room_nights_ty_on_books: { value: rnTy.value, source_key: rnTy.source_key },
+      room_nights_ly_reference: { value: rnLy.value, source_key: rnLy.source_key },
+      room_nights_stly_on_books: { value: rnStly.value, source_key: rnStly.source_key },
+      revenue_ty_booked: { value: revTy.value, source_key: revTy.source_key },
+      revenue_ly_booked: { value: revLy.value, source_key: revLy.source_key },
+      revenue_stly_booked: { value: revStly.value, source_key: revStly.source_key },
+      forecast_room_nights_ty: { value: fcRnTy.value, source_key: fcRnTy.source_key },
+      forecast_revenue_ty: { value: fcRevTy.value, source_key: fcRevTy.source_key },
+      forecast_ly_slot: { value: fcLy.value, source_key: fcLy.source_key },
+      adr_ty: { value: adrTy.value, source_key: adrTy.source_key },
+      adr_ly: { value: adrLy.value, source_key: adrLy.source_key },
+      adr_stly: { value: adrStly.value, source_key: adrStly.source_key },
+      adr_derived_ty_from_rev_rn: derivedAdrTy,
+      adr_derived_ly_from_rev_rn: derivedAdrLy,
+      adr_derived_stly_from_rev_rn: derivedAdrStly
+    },
+    readiness: {
+      has_stay_date: hasStay,
+      has_ty_on_books_rn: hasTyRn,
+      has_ly_rn: hasLyRn,
+      has_stly_rn: hasStlyRn,
+      has_ty_booked_revenue: hasTyRev,
+      has_ly_booked_revenue: hasLyRev,
+      has_stly_booked_revenue: hasStlyRev,
+      same_lead_ty_vs_stly_rn_ready: hasStay && hasTyRn && hasStlyRn,
+      same_lead_ty_vs_stly_rev_ready: hasStay && hasTyRev && hasStlyRev,
+      weekly_rollup_ready: Boolean(week.stay_week_key && hasStay)
+    }
+  };
+}
+
+function buildPmsPaceComparatorLayer(pmsClassifiedRows, snapshotYmd, stlyTabFlag) {
+  const list = Array.isArray(pmsClassifiedRows) ? pmsClassifiedRows : [];
+  const pace_rows = list.map((row, i) => buildPmsPaceComparatorRow(row, snapshotYmd, i));
+
+  const countReady = (pred) => pace_rows.filter(pred).length;
+
+  const tyStlyRnReady = countReady((p) => p.readiness.same_lead_ty_vs_stly_rn_ready);
+  const tyStlyRevReady = countReady((p) => p.readiness.same_lead_ty_vs_stly_rev_ready);
+
+  const missingHints = [];
+  if (!stlyTabFlag) {
+    missingHints.push('PMS sheet headers do not indicate LY/STLY columns (no ly / last year / stly in headers).');
+  }
+  if (stlyTabFlag && tyStlyRnReady === 0) {
+    missingHints.push(
+      'No row matched both TY on-books room nights and STLY room nights — add or rename columns (e.g. Room Nights On Books TY + Room Nights STLY / same-time-last-year).'
+    );
+  }
+  if (stlyTabFlag && tyStlyRevReady === 0) {
+    missingHints.push(
+      'No row matched both TY booked revenue and STLY booked revenue — add or rename columns for STLY revenue.'
+    );
+  }
+
+  return {
+    schema_version: 1,
+    snapshot_date_ymd: snapshotYmd,
+    note:
+      'Comparator values are parsed from the current upload only. True same-lead historical pace requires prior snapshots or explicit as-of/STLY columns.',
+    summary: {
+      pace_row_count: pace_rows.length,
+      rows_with_stay_date: countReady((p) => p.readiness.has_stay_date),
+      rows_future_forward: countReady((p) => p.future_window_class === 'future_forward'),
+      rows_past_actualized: countReady((p) => p.future_window_class === 'past_actualized'),
+      ty_stly_rn_ready_row_count: tyStlyRnReady,
+      ty_stly_rev_ready_row_count: tyStlyRevReady,
+      stly_tab_headers_detected: Boolean(stlyTabFlag),
+      template_sufficient_for_ty_vs_stly_rn_at_stay_date: tyStlyRnReady > 0,
+      template_sufficient_for_ty_vs_stly_rev_at_stay_date: tyStlyRevReady > 0,
+      same_lead_pace_comparison_globally_ready: false,
+      missing_or_weak_columns_hint: missingHints
+    },
+    pace_rows
+  };
 }
 
 function spanDaysInclusive(startYmd, endYmd) {
@@ -2384,6 +2685,12 @@ async function handler(req, res) {
     const corporateNormalized = normalizeCorporateRowsForIngestion(corporateRaw, snapshotYmd);
     const delphiNormalized = normalizeDelphiRowsForIngestion(delphiRaw, snapshotYmd);
 
+    const pmsPaceComparator = buildPmsPaceComparatorLayer(
+      pmsNormalized.all,
+      snapshotYmd,
+      pmsNormalized.stly_supported_tab
+    );
+
     const workbookIngestion = buildWorkbookIngestionModel({
       snapshotYmd,
       strSheetName,
@@ -2391,7 +2698,8 @@ async function handler(req, res) {
       strRowsActualized: strRows,
       pmsNormalized,
       corporateNormalized,
-      delphiNormalized
+      delphiNormalized,
+      pmsPaceComparator
     });
 
     const detection = detectDataContext(workbook);
