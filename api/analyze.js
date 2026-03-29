@@ -1783,6 +1783,8 @@ function buildPmsPaceComparatorLayer(pmsClassifiedRows, snapshotYmd, stlyTabFlag
 
 /** Supabase table name for slim PMS pace history (see sql/pms_pace_snapshots.sql). */
 const PMS_PACE_SNAPSHOTS_TABLE = 'pms_pace_snapshots';
+/** Smaller than default 500 to reduce single-request statement time (PostgREST upsert). */
+const PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE = 100;
 
 /**
  * Slim rows for pms_pace_snapshots — only stay-dated PMS comparator rows (skips undated).
@@ -1852,20 +1854,51 @@ function buildPmsPaceSnapshotRowsForPersistence({ hotelCode, snapshotDateYmd, pm
 async function persistPmsPaceSnapshots(supabaseClient, rows) {
   if (!rows.length) return { ok: true, written: 0 };
 
-  const chunkSize = 500;
-  let written = 0;
+  const maxRowsRaw = process.env.PMS_PACE_SNAPSHOT_UPSERT_MAX_ROWS;
+  const maxRowsParsed =
+    maxRowsRaw !== undefined && maxRowsRaw !== '' && Number.isFinite(Number(maxRowsRaw))
+      ? Math.max(0, Math.floor(Number(maxRowsRaw)))
+      : null;
+  const toWrite =
+    maxRowsParsed !== null ? rows.slice(0, maxRowsParsed) : rows;
+  if (maxRowsParsed !== null) {
+    console.log('DEBUG pms_pace_snapshots upsert row cap:', {
+      cap: maxRowsParsed,
+      inputRowCount: rows.length,
+      writingRowCount: toWrite.length
+    });
+  }
 
-  for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
-    console.log('DEBUG pms_pace_snapshots upsert payload count:', chunk.length);
+  const chunkSize = PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE;
+  let written = 0;
+  const totalChunks = Math.ceil(toWrite.length / chunkSize) || 0;
+
+  for (let i = 0; i < toWrite.length; i += chunkSize) {
+    const chunkIndex = Math.floor(i / chunkSize);
+    const chunk = toWrite.slice(i, i + chunkSize);
+    const t0 = Date.now();
+    console.log('DEBUG pms_pace_snapshots upsert chunk start:', {
+      chunkIndex,
+      totalChunks,
+      chunkRowCount: chunk.length,
+      writtenSoFar: written
+    });
     const { error } = await supabaseClient.from(PMS_PACE_SNAPSHOTS_TABLE).upsert(chunk, {
       onConflict: 'hotel_code,snapshot_date,stay_date_ymd,market_segment_label,source_row_index'
     });
+    const elapsedMs = Date.now() - t0;
 
     if (error) {
+      console.log('DEBUG pms_pace_snapshots upsert chunk error timing:', { chunkIndex, elapsedMs });
       return { ok: false, written, error };
     }
     written += chunk.length;
+    console.log('DEBUG pms_pace_snapshots upsert chunk ok:', {
+      chunkIndex,
+      chunkRowCount: chunk.length,
+      elapsedMs,
+      writtenAfterChunk: written
+    });
   }
 
   return { ok: true, written };
