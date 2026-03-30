@@ -1785,8 +1785,6 @@ function buildPmsPaceComparatorLayer(pmsClassifiedRows, snapshotYmd, stlyTabFlag
 const PMS_PACE_SNAPSHOTS_TABLE = 'pms_pace_snapshots';
 /** Smaller than default 500 to reduce single-request statement time (PostgREST upsert). */
 const PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE = 100;
-/** Default row cap per run; override with env PMS_PACE_SNAPSHOT_UPSERT_MAX_ROWS. */
-const PMS_PACE_SNAPSHOT_DEFAULT_UPSERT_MAX_ROWS = 500;
 
 /**
  * Slim rows for pms_pace_snapshots — only stay-dated PMS comparator rows (skips undated).
@@ -1857,12 +1855,12 @@ async function persistPmsPaceSnapshots(supabaseClient, rows) {
   if (!rows.length) return { ok: true, written: 0 };
 
   const maxRowsRaw = process.env.PMS_PACE_SNAPSHOT_UPSERT_MAX_ROWS;
-  const maxRowsCap =
-    maxRowsRaw !== undefined && maxRowsRaw !== '' && Number.isFinite(Number(maxRowsRaw))
-      ? Math.max(0, Math.floor(Number(maxRowsRaw)))
-      : PMS_PACE_SNAPSHOT_DEFAULT_UPSERT_MAX_ROWS;
-  const toWrite = rows.slice(0, maxRowsCap);
+  const hasManualCap =
+    maxRowsRaw !== undefined && maxRowsRaw !== '' && Number.isFinite(Number(maxRowsRaw));
+  const maxRowsCap = hasManualCap ? Math.max(0, Math.floor(Number(maxRowsRaw))) : null;
+  const toWrite = hasManualCap ? rows.slice(0, maxRowsCap) : rows;
   console.log('DEBUG pms_pace_snapshots upsert row cap:', {
+    envCapApplied: hasManualCap,
     cap: maxRowsCap,
     inputRowCount: rows.length,
     writingRowCount: toWrite.length
