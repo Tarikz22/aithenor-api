@@ -1940,7 +1940,7 @@ function summarizeCurrentTyVsStlyFutureRows(currentFutureRows) {
   };
 }
 
-function buildPmsPaceHiddenSummary({ snapshotDateYmd, currentRows, historicalRows }) {
+function buildPmsSnapshotHistorySummary({ snapshotDateYmd, currentRows, historicalRows }) {
   const currentFutureRows = (currentRows || []).filter(
     (r) => r?.future_window_class === 'future_forward' && r?.stay_date_ymd
   );
@@ -1950,21 +1950,18 @@ function buildPmsPaceHiddenSummary({ snapshotDateYmd, currentRows, historicalRow
     return {
       schema_version: 1,
       snapshot_date_ymd: snapshotDateYmd,
-      historical_rows_scanned: historicalList.length,
-      future_rows_considered: 0,
-      same_stay_segment_comparisons: 0,
-      rn_on_books_change_vs_latest_prior_snapshot: {
-        gaining_count: 0,
-        losing_count: 0,
-        unchanged_count: 0,
-        net_delta: 0
+      coverage: {
+        current_future_rows: 0,
+        historical_rows_scanned: historicalList.length,
+        comparable_stay_segment_pairs: 0,
+        exact_same_lead_matches: 0
       },
-      weekly_strength: [],
-      future_ty_vs_stly_position: summarizeCurrentTyVsStlyFutureRows(currentFutureRows),
-      same_lead_context: {
-        exact_lead_match_rows: 0,
-        no_exact_lead_match_rows: 0
-      }
+      by_stay_date: [],
+      by_stay_week: [],
+      strongest_gainers: [],
+      strongest_decliners: [],
+      ty_vs_stly_future_flags: summarizeCurrentTyVsStlyFutureRows(currentFutureRows),
+      data_quality_notes: ['No future PMS rows available for snapshot-history comparison.']
     };
   }
 
@@ -2039,13 +2036,10 @@ function buildPmsPaceHiddenSummary({ snapshotDateYmd, currentRows, historicalRow
   }
 
   let comparisons = 0;
-  let gainingCount = 0;
-  let losingCount = 0;
-  let unchangedCount = 0;
-  let netDelta = 0;
   let exactLeadMatchRows = 0;
   let noExactLeadMatchRows = 0;
-  const weeklyDeltas = new Map();
+  const weeklyRollup = new Map();
+  const byStayDate = [];
 
   const histByStaySegLead = new Map();
   for (const row of historicalList) {
@@ -2081,48 +2075,85 @@ function buildPmsPaceHiddenSummary({ snapshotDateYmd, currentRows, historicalRow
 
     const delta = current.rn_on_books_ty - prior.rn_on_books_ty;
     comparisons += 1;
-    netDelta += delta;
-    if (delta > 0) gainingCount += 1;
-    else if (delta < 0) losingCount += 1;
-    else unchangedCount += 1;
+    byStayDate.push({
+      stay_date_ymd: current.stay_date_ymd,
+      market_segment_label: current.market_segment_label,
+      stay_week_key: current.stay_week_key || null,
+      current_snapshot_date: snapshotDateYmd,
+      prior_snapshot_date: prior.snapshot_date,
+      rn_on_books_ty_current: current.rn_on_books_ty,
+      rn_on_books_ty_prior: prior.rn_on_books_ty,
+      rn_on_books_ty_delta: delta,
+      trend: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat'
+    });
 
     const weekKey = current.stay_week_key || 'unknown_week';
-    if (!weeklyDeltas.has(weekKey)) weeklyDeltas.set(weekKey, 0);
-    weeklyDeltas.set(weekKey, weeklyDeltas.get(weekKey) + delta);
+    if (!weeklyRollup.has(weekKey)) {
+      weeklyRollup.set(weekKey, {
+        stay_week_key: weekKey,
+        compared_rows: 0,
+        net_rn_on_books_ty_delta: 0
+      });
+    }
+    const week = weeklyRollup.get(weekKey);
+    week.compared_rows += 1;
+    week.net_rn_on_books_ty_delta += delta;
   }
 
-  const weeklyStrength = Array.from(weeklyDeltas.entries())
-    .map(([stay_week_key, net_rn_on_books_ty_delta]) => ({
-      stay_week_key,
-      net_rn_on_books_ty_delta,
+  const byStayWeek = Array.from(weeklyRollup.values())
+    .map((w) => ({
+      ...w,
       trend:
-        net_rn_on_books_ty_delta > 0
+        w.net_rn_on_books_ty_delta > 0
           ? 'strengthening'
-          : net_rn_on_books_ty_delta < 0
+          : w.net_rn_on_books_ty_delta < 0
             ? 'weakening'
             : 'flat'
     }))
     .sort((a, b) => Math.abs(b.net_rn_on_books_ty_delta) - Math.abs(a.net_rn_on_books_ty_delta))
+    .slice(0, 24);
+
+  const sortedByDelta = [...byStayDate].sort((a, b) => b.rn_on_books_ty_delta - a.rn_on_books_ty_delta);
+  const strongestGainers = sortedByDelta.filter((r) => r.rn_on_books_ty_delta > 0).slice(0, 12);
+  const strongestDecliners = [...sortedByDelta]
+    .reverse()
+    .filter((r) => r.rn_on_books_ty_delta < 0)
     .slice(0, 12);
+  const byStayDateLimited = sortedByDelta
+    .sort((a, b) => {
+      if (a.stay_date_ymd === b.stay_date_ymd) return a.market_segment_label.localeCompare(b.market_segment_label);
+      return a.stay_date_ymd.localeCompare(b.stay_date_ymd);
+    })
+    .slice(0, 200);
+
+  const dataQualityNotes = [];
+  if (historicalList.length === 0) {
+    dataQualityNotes.push('No prior pms_pace_snapshots rows matched current future stay-date window.');
+  }
+  if (comparisons === 0) {
+    dataQualityNotes.push(
+      'No stay_date_ymd + market_segment_label pairs had both current TY and prior TY values for comparison.'
+    );
+  }
+  if (noExactLeadMatchRows > exactLeadMatchRows) {
+    dataQualityNotes.push('Same-lead exact matches are sparse; most comparisons use latest prior snapshot fallback.');
+  }
 
   return {
     schema_version: 1,
     snapshot_date_ymd: snapshotDateYmd,
-    historical_rows_scanned: historicalList.length,
-    future_rows_considered: currentFutureRows.length,
-    same_stay_segment_comparisons: comparisons,
-    rn_on_books_change_vs_latest_prior_snapshot: {
-      gaining_count: gainingCount,
-      losing_count: losingCount,
-      unchanged_count: unchangedCount,
-      net_delta: netDelta
+    coverage: {
+      current_future_rows: currentFutureRows.length,
+      historical_rows_scanned: historicalList.length,
+      comparable_stay_segment_pairs: comparisons,
+      exact_same_lead_matches: exactLeadMatchRows
     },
-    weekly_strength: weeklyStrength,
-    future_ty_vs_stly_position: summarizeCurrentTyVsStlyFutureRows(currentFutureRows),
-    same_lead_context: {
-      exact_lead_match_rows: exactLeadMatchRows,
-      no_exact_lead_match_rows: noExactLeadMatchRows
-    }
+    by_stay_date: byStayDateLimited,
+    by_stay_week: byStayWeek,
+    strongest_gainers: strongestGainers,
+    strongest_decliners: strongestDecliners,
+    ty_vs_stly_future_flags: summarizeCurrentTyVsStlyFutureRows(currentFutureRows),
+    data_quality_notes: dataQualityNotes
   };
 }
 
@@ -3328,7 +3359,7 @@ async function handler(req, res) {
       snapshotDateYmd: periodMeta.snapshot_date,
       currentRows: pmsPaceSnapshotRowsForAnalysis
     });
-    const pmsPaceHiddenSummary = buildPmsPaceHiddenSummary({
+    const snapshotHistorySummary = buildPmsSnapshotHistorySummary({
       snapshotDateYmd: periodMeta.snapshot_date,
       currentRows: pmsPaceSnapshotRowsForAnalysis,
       historicalRows: historicalPmsPaceRows
@@ -3347,7 +3378,7 @@ async function handler(req, res) {
       /** Normalized workbook views + row classification (pace engine consumes later). */
       workbook_ingestion: workbookIngestion,
       /** Hidden backend-only same-lead pace history summary (not yet used for issue cards/actions). */
-      pms_pace_history_summary: pmsPaceHiddenSummary,
+      snapshot_history_summary: snapshotHistorySummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
