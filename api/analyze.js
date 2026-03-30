@@ -1903,6 +1903,280 @@ async function persistPmsPaceSnapshots(supabaseClient, rows) {
   return { ok: true, written };
 }
 
+function toFiniteNumberOrNull(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pmsStaySegmentKey(stayDateYmd, marketSegmentLabel) {
+  return `${stayDateYmd || ''}||${(marketSegmentLabel || '').toString().trim()}`;
+}
+
+function summarizeCurrentTyVsStlyFutureRows(currentFutureRows) {
+  let comparableCount = 0;
+  let tyAboveStlyCount = 0;
+  let tyBelowStlyCount = 0;
+  let tyEqualStlyCount = 0;
+  let missingStlyCount = 0;
+
+  for (const row of currentFutureRows) {
+    const ty = toFiniteNumberOrNull(row.rn_on_books_ty);
+    const stly = toFiniteNumberOrNull(row.rn_stly);
+    if (ty === null || stly === null) {
+      missingStlyCount += 1;
+      continue;
+    }
+    comparableCount += 1;
+    if (ty > stly) tyAboveStlyCount += 1;
+    else if (ty < stly) tyBelowStlyCount += 1;
+    else tyEqualStlyCount += 1;
+  }
+
+  return {
+    comparable_count: comparableCount,
+    ty_above_stly_count: tyAboveStlyCount,
+    ty_below_stly_count: tyBelowStlyCount,
+    ty_equal_stly_count: tyEqualStlyCount,
+    missing_stly_count: missingStlyCount
+  };
+}
+
+function buildPmsPaceHiddenSummary({ snapshotDateYmd, currentRows, historicalRows }) {
+  const currentFutureRows = (currentRows || []).filter(
+    (r) => r?.future_window_class === 'future_forward' && r?.stay_date_ymd
+  );
+  const historicalList = Array.isArray(historicalRows) ? historicalRows : [];
+
+  if (!currentFutureRows.length) {
+    return {
+      schema_version: 1,
+      snapshot_date_ymd: snapshotDateYmd,
+      historical_rows_scanned: historicalList.length,
+      future_rows_considered: 0,
+      same_stay_segment_comparisons: 0,
+      rn_on_books_change_vs_latest_prior_snapshot: {
+        gaining_count: 0,
+        losing_count: 0,
+        unchanged_count: 0,
+        net_delta: 0
+      },
+      weekly_strength: [],
+      future_ty_vs_stly_position: summarizeCurrentTyVsStlyFutureRows(currentFutureRows),
+      same_lead_context: {
+        exact_lead_match_rows: 0,
+        no_exact_lead_match_rows: 0
+      }
+    };
+  }
+
+  const currentAgg = new Map();
+  for (const row of currentFutureRows) {
+    const key = pmsStaySegmentKey(row.stay_date_ymd, row.market_segment_label);
+    if (!currentAgg.has(key)) {
+      currentAgg.set(key, {
+        stay_date_ymd: row.stay_date_ymd,
+        stay_week_key: row.stay_week_key || null,
+        market_segment_label: (row.market_segment_label || '').toString().trim(),
+        rn_on_books_ty: 0,
+        rn_stly: 0,
+        hasTy: false,
+        hasStly: false
+      });
+    }
+    const target = currentAgg.get(key);
+    const ty = toFiniteNumberOrNull(row.rn_on_books_ty);
+    const stly = toFiniteNumberOrNull(row.rn_stly);
+    if (ty !== null) {
+      target.rn_on_books_ty += ty;
+      target.hasTy = true;
+    }
+    if (stly !== null) {
+      target.rn_stly += stly;
+      target.hasStly = true;
+    }
+  }
+
+  const priorByKeyAndSnapshot = new Map();
+  for (const row of historicalList) {
+    const stay = row?.stay_date_ymd;
+    if (!stay) continue;
+    const seg = (row.market_segment_label || '').toString().trim();
+    const snapshot = row.snapshot_date;
+    if (!snapshot || snapshot >= snapshotDateYmd) continue;
+    const key = pmsStaySegmentKey(stay, seg);
+    const keySnap = `${key}||${snapshot}`;
+    if (!priorByKeyAndSnapshot.has(keySnap)) {
+      priorByKeyAndSnapshot.set(keySnap, {
+        stay_date_ymd: stay,
+        stay_week_key: row.stay_week_key || null,
+        market_segment_label: seg,
+        snapshot_date: snapshot,
+        rn_on_books_ty: 0,
+        rn_stly: 0,
+        hasTy: false,
+        hasStly: false
+      });
+    }
+    const target = priorByKeyAndSnapshot.get(keySnap);
+    const ty = toFiniteNumberOrNull(row.rn_on_books_ty);
+    const stly = toFiniteNumberOrNull(row.rn_stly);
+    if (ty !== null) {
+      target.rn_on_books_ty += ty;
+      target.hasTy = true;
+    }
+    if (stly !== null) {
+      target.rn_stly += stly;
+      target.hasStly = true;
+    }
+  }
+
+  const latestPriorByKey = new Map();
+  for (const snapshotAgg of priorByKeyAndSnapshot.values()) {
+    const key = pmsStaySegmentKey(snapshotAgg.stay_date_ymd, snapshotAgg.market_segment_label);
+    const prev = latestPriorByKey.get(key);
+    if (!prev || snapshotAgg.snapshot_date > prev.snapshot_date) {
+      latestPriorByKey.set(key, snapshotAgg);
+    }
+  }
+
+  let comparisons = 0;
+  let gainingCount = 0;
+  let losingCount = 0;
+  let unchangedCount = 0;
+  let netDelta = 0;
+  let exactLeadMatchRows = 0;
+  let noExactLeadMatchRows = 0;
+  const weeklyDeltas = new Map();
+
+  const histByStaySegLead = new Map();
+  for (const row of historicalList) {
+    const stay = row?.stay_date_ymd;
+    if (!stay) continue;
+    const seg = (row.market_segment_label || '').toString().trim();
+    const snapshot = row.snapshot_date;
+    const lead = toFiniteNumberOrNull(row.lead_days_snapshot_to_stay);
+    if (!snapshot || snapshot >= snapshotDateYmd || lead === null) continue;
+    const key = `${pmsStaySegmentKey(stay, seg)}||${lead}`;
+    const prev = histByStaySegLead.get(key);
+    if (!prev || snapshot > prev.snapshot_date) {
+      histByStaySegLead.set(key, row);
+    }
+  }
+
+  for (const row of currentFutureRows) {
+    const lead = toFiniteNumberOrNull(row.lead_days_snapshot_to_stay);
+    if (lead === null) {
+      noExactLeadMatchRows += 1;
+    } else {
+      const leadKey = `${pmsStaySegmentKey(row.stay_date_ymd, row.market_segment_label)}||${lead}`;
+      if (histByStaySegLead.has(leadKey)) exactLeadMatchRows += 1;
+      else noExactLeadMatchRows += 1;
+    }
+  }
+
+  for (const current of currentAgg.values()) {
+    if (!current.hasTy) continue;
+    const key = pmsStaySegmentKey(current.stay_date_ymd, current.market_segment_label);
+    const prior = latestPriorByKey.get(key);
+    if (!prior || !prior.hasTy) continue;
+
+    const delta = current.rn_on_books_ty - prior.rn_on_books_ty;
+    comparisons += 1;
+    netDelta += delta;
+    if (delta > 0) gainingCount += 1;
+    else if (delta < 0) losingCount += 1;
+    else unchangedCount += 1;
+
+    const weekKey = current.stay_week_key || 'unknown_week';
+    if (!weeklyDeltas.has(weekKey)) weeklyDeltas.set(weekKey, 0);
+    weeklyDeltas.set(weekKey, weeklyDeltas.get(weekKey) + delta);
+  }
+
+  const weeklyStrength = Array.from(weeklyDeltas.entries())
+    .map(([stay_week_key, net_rn_on_books_ty_delta]) => ({
+      stay_week_key,
+      net_rn_on_books_ty_delta,
+      trend:
+        net_rn_on_books_ty_delta > 0
+          ? 'strengthening'
+          : net_rn_on_books_ty_delta < 0
+            ? 'weakening'
+            : 'flat'
+    }))
+    .sort((a, b) => Math.abs(b.net_rn_on_books_ty_delta) - Math.abs(a.net_rn_on_books_ty_delta))
+    .slice(0, 12);
+
+  return {
+    schema_version: 1,
+    snapshot_date_ymd: snapshotDateYmd,
+    historical_rows_scanned: historicalList.length,
+    future_rows_considered: currentFutureRows.length,
+    same_stay_segment_comparisons: comparisons,
+    rn_on_books_change_vs_latest_prior_snapshot: {
+      gaining_count: gainingCount,
+      losing_count: losingCount,
+      unchanged_count: unchangedCount,
+      net_delta: netDelta
+    },
+    weekly_strength: weeklyStrength,
+    future_ty_vs_stly_position: summarizeCurrentTyVsStlyFutureRows(currentFutureRows),
+    same_lead_context: {
+      exact_lead_match_rows: exactLeadMatchRows,
+      no_exact_lead_match_rows: noExactLeadMatchRows
+    }
+  };
+}
+
+async function readPmsPaceHistoricalRowsForFutureWindow({
+  supabaseClient,
+  hotelCode,
+  snapshotDateYmd,
+  currentRows
+}) {
+  const currentFutureRows = (currentRows || []).filter(
+    (r) => r?.future_window_class === 'future_forward' && r?.stay_date_ymd
+  );
+  if (!currentFutureRows.length || !hotelCode || !snapshotDateYmd) return [];
+
+  const stayDates = Array.from(new Set(currentFutureRows.map((r) => r.stay_date_ymd))).sort();
+  const minStay = stayDates[0];
+  const maxStay = stayDates[stayDates.length - 1];
+
+  const pageSize = 1000;
+  const out = [];
+  let page = 0;
+  const maxPages = 50;
+
+  while (page < maxPages) {
+    const from = page * pageSize;
+    const to = from + pageSize - 1;
+    const { data, error } = await supabaseClient
+      .from(PMS_PACE_SNAPSHOTS_TABLE)
+      .select(
+        'snapshot_date,stay_date_ymd,stay_week_key,market_segment_label,lead_days_snapshot_to_stay,rn_on_books_ty,rn_stly'
+      )
+      .eq('hotel_code', hotelCode)
+      .lt('snapshot_date', snapshotDateYmd)
+      .gte('stay_date_ymd', minStay)
+      .lte('stay_date_ymd', maxStay)
+      .order('snapshot_date', { ascending: false })
+      .range(from, to);
+
+    if (error) throw error;
+    if (!Array.isArray(data) || !data.length) break;
+
+    out.push(...data);
+    if (data.length < pageSize) break;
+    page += 1;
+  }
+
+  const relevantKeySet = new Set(
+    currentFutureRows.map((r) => pmsStaySegmentKey(r.stay_date_ymd, r.market_segment_label))
+  );
+  return out.filter((r) => relevantKeySet.has(pmsStaySegmentKey(r.stay_date_ymd, r.market_segment_label)));
+}
+
 function spanDaysInclusive(startYmd, endYmd) {
   const s = parseYmdToUtcDate(startYmd);
   const e = parseYmdToUtcDate(endYmd);
@@ -3045,6 +3319,22 @@ async function handler(req, res) {
 
     const totalOpportunity = buildTotalOpportunity(enrichedActions);
     const periodMeta = extractPeriodMetadata(strRows, snapshotYmd);
+    const pmsPaceSnapshotRowsForAnalysis = buildPmsPaceSnapshotRowsForPersistence({
+      hotelCode,
+      snapshotDateYmd: periodMeta.snapshot_date,
+      pmsPaceComparator
+    });
+    const historicalPmsPaceRows = await readPmsPaceHistoricalRowsForFutureWindow({
+      supabaseClient: supabase,
+      hotelCode,
+      snapshotDateYmd: periodMeta.snapshot_date,
+      currentRows: pmsPaceSnapshotRowsForAnalysis
+    });
+    const pmsPaceHiddenSummary = buildPmsPaceHiddenSummary({
+      snapshotDateYmd: periodMeta.snapshot_date,
+      currentRows: pmsPaceSnapshotRowsForAnalysis,
+      historicalRows: historicalPmsPaceRows
+    });
 
     const enginePayload = {
       success: true,
@@ -3058,6 +3348,8 @@ async function handler(req, res) {
       total_opportunity: totalOpportunity,
       /** Normalized workbook views + row classification (pace engine consumes later). */
       workbook_ingestion: workbookIngestion,
+      /** Hidden backend-only same-lead pace history summary (not yet used for issue cards/actions). */
+      pms_pace_history_summary: pmsPaceHiddenSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
@@ -3094,11 +3386,7 @@ if (engineSaveError) {
       paceRowCount: Array.isArray(pmsPaceComparator?.pace_rows) ? pmsPaceComparator.pace_rows.length : 0
     });
 
-    const pmsPaceSnapshotRows = buildPmsPaceSnapshotRowsForPersistence({
-      hotelCode,
-      snapshotDateYmd: periodMeta.snapshot_date,
-      pmsPaceComparator
-    });
+    const pmsPaceSnapshotRows = pmsPaceSnapshotRowsForAnalysis;
 
     console.log('DEBUG built pms pace snapshot rows:', {
       builtRowCount: pmsPaceSnapshotRows.length,
