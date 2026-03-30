@@ -2301,6 +2301,143 @@ function buildPaceSignalSummaryFromSnapshotHistory(snapshotHistorySummary) {
   };
 }
 
+function severityFromRnDelta(absDelta, tier) {
+  if (tier === 'date') {
+    if (absDelta >= 20) return 'high';
+    if (absDelta >= 10) return 'medium';
+    return 'low';
+  }
+  if (absDelta >= 40) return 'high';
+  if (absDelta >= 20) return 'medium';
+  return 'low';
+}
+
+function buildPaceCandidateIssuesFromPaceSignalSummary(paceSignalSummary) {
+  const ps = paceSignalSummary || {};
+  const coverageStatus = ps.coverage_status || 'insufficient';
+  const qualityNotes = Array.isArray(ps.data_quality_notes) ? [...ps.data_quality_notes] : [];
+
+  if (coverageStatus === 'insufficient') {
+    qualityNotes.push(
+      'pace_candidate_issues: date- and week-level candidates suppressed (coverage_status insufficient).'
+    );
+  }
+
+  const candidates = [];
+  const allowDateWeek = coverageStatus !== 'insufficient';
+
+  if (allowDateWeek) {
+    for (const s of ps.date_level_signals || []) {
+      const absD = Math.abs(Number(s.rn_on_books_ty_delta || 0));
+      if (s.signal_type === 'future_stay_date_weakening') {
+        candidates.push({
+          issue_family: 'future pace weakening',
+          signal_source: 'snapshot_history_date_delta',
+          title: `Future pace weakening: ${s.stay_date_ymd} · ${s.market_segment_label || 'segment'}`,
+          severity: severityFromRnDelta(absD, 'date'),
+          confidence: s.confidence === 'high' ? 'high' : coverageStatus === 'strong' ? 'medium' : 'low',
+          scope: {
+            kind: 'stay_date_segment',
+            stay_date_ymd: s.stay_date_ymd,
+            market_segment_label: s.market_segment_label,
+            stay_week_key: s.stay_week_key || null
+          },
+          evidence_summary: `TY on-books room nights vs latest prior snapshot: delta ${Number(s.rn_on_books_ty_delta)} (prior snapshot ${s.prior_snapshot_date}).`
+        });
+      } else if (s.signal_type === 'future_stay_date_strengthening' && Number(s.rn_on_books_ty_delta) > 0) {
+        candidates.push({
+          issue_family: 'future pace strengthening',
+          signal_source: 'snapshot_history_date_delta',
+          title: `Future pace strengthening: ${s.stay_date_ymd} · ${s.market_segment_label || 'segment'}`,
+          severity: severityFromRnDelta(absD, 'date'),
+          confidence: s.confidence === 'high' ? 'high' : coverageStatus === 'strong' ? 'medium' : 'low',
+          scope: {
+            kind: 'stay_date_segment',
+            stay_date_ymd: s.stay_date_ymd,
+            market_segment_label: s.market_segment_label,
+            stay_week_key: s.stay_week_key || null
+          },
+          evidence_summary: `TY on-books room nights vs latest prior snapshot: delta +${Number(s.rn_on_books_ty_delta)} (prior snapshot ${s.prior_snapshot_date}).`
+        });
+      }
+    }
+
+    for (const w of ps.week_level_signals || []) {
+      const delta = Number(w.net_rn_on_books_ty_delta || 0);
+      const absD = Math.abs(delta);
+      if (w.signal_type === 'future_week_weakening') {
+        candidates.push({
+          issue_family: 'future pace weakening',
+          signal_source: 'snapshot_history_week_delta',
+          title: `Future week pace weakening: ${w.stay_week_key}`,
+          severity: severityFromRnDelta(absD, 'week'),
+          confidence: w.confidence === 'high' ? 'high' : coverageStatus === 'strong' ? 'medium' : 'low',
+          scope: {
+            kind: 'stay_week',
+            stay_week_key: w.stay_week_key,
+            compared_rows: w.compared_rows
+          },
+          evidence_summary: `Net TY on-books change vs prior snapshot across week: ${delta} (rows compared: ${w.compared_rows}).`
+        });
+      } else if (w.signal_type === 'future_week_strengthening' && delta > 0) {
+        candidates.push({
+          issue_family: 'future pace strengthening',
+          signal_source: 'snapshot_history_week_delta',
+          title: `Future week pace strengthening: ${w.stay_week_key}`,
+          severity: severityFromRnDelta(absD, 'week'),
+          confidence: w.confidence === 'high' ? 'high' : coverageStatus === 'strong' ? 'medium' : 'low',
+          scope: {
+            kind: 'stay_week',
+            stay_week_key: w.stay_week_key,
+            compared_rows: w.compared_rows
+          },
+          evidence_summary: `Net TY on-books change vs prior snapshot across week: +${delta} (rows compared: ${w.compared_rows}).`
+        });
+      }
+    }
+  }
+
+  for (const t of ps.ty_vs_stly_signals || []) {
+    const ratio = Number(t.ratio || 0);
+    const comparable = Number(t.comparable_count || 0);
+    const count = Number(t.count || 0);
+    const material =
+      comparable >= 6 && (ratio >= 0.25 || count >= 8 || (ratio >= 0.15 && comparable >= 12));
+    if (!material) continue;
+
+    if (t.signal_type === 'future_ty_below_stly') {
+      candidates.push({
+        issue_family: 'future TY below STLY',
+        signal_source: 'current_upload_ty_vs_stly_future_rows',
+        title: `Future TY below STLY on ${count} of ${comparable} comparable future rows`,
+        severity: ratio >= 0.45 ? 'high' : ratio >= 0.3 ? 'medium' : 'low',
+        confidence: t.confidence === 'high' && coverageStatus !== 'limited' ? 'high' : 'medium',
+        scope: { kind: 'future_window_aggregate', comparable_future_rows: comparable },
+        evidence_summary: `Share of future rows where TY on-books RN < STLY: ${(ratio * 100).toFixed(1)}%.`
+      });
+    } else if (t.signal_type === 'future_ty_above_stly') {
+      candidates.push({
+        issue_family: 'future TY above STLY',
+        signal_source: 'current_upload_ty_vs_stly_future_rows',
+        title: `Future TY above STLY on ${count} of ${comparable} comparable future rows`,
+        severity: ratio >= 0.45 ? 'high' : ratio >= 0.3 ? 'medium' : 'low',
+        confidence: t.confidence === 'high' && coverageStatus !== 'limited' ? 'high' : 'medium',
+        scope: { kind: 'future_window_aggregate', comparable_future_rows: comparable },
+        evidence_summary: `Share of future rows where TY on-books RN > STLY: ${(ratio * 100).toFixed(1)}%.`
+      });
+    }
+  }
+
+  return {
+    schema_version: 1,
+    coverage_status: coverageStatus,
+    candidates,
+    strongest_hidden_risks: ps.strongest_hidden_risks || [],
+    strongest_hidden_opportunities: ps.strongest_hidden_opportunities || [],
+    data_quality_notes: qualityNotes
+  };
+}
+
 async function readPmsPaceHistoricalRowsForFutureWindow({
   supabaseClient,
   hotelCode,
@@ -3509,6 +3646,7 @@ async function handler(req, res) {
       historicalRows: historicalPmsPaceRows
     });
     const paceSignalSummary = buildPaceSignalSummaryFromSnapshotHistory(snapshotHistorySummary);
+    const paceCandidateIssues = buildPaceCandidateIssuesFromPaceSignalSummary(paceSignalSummary);
 
     const enginePayload = {
       success: true,
@@ -3526,6 +3664,8 @@ async function handler(req, res) {
       snapshot_history_summary: snapshotHistorySummary,
       /** Hidden backend-only pace signal candidates from snapshot history (not yet user-visible). */
       pace_signal_summary: paceSignalSummary,
+      /** Hidden gated pace issue candidates — not merged into retail issues/recommendations/actions. */
+      pace_candidate_issues: paceCandidateIssues,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
