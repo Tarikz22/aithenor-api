@@ -2157,6 +2157,150 @@ function buildPmsSnapshotHistorySummary({ snapshotDateYmd, currentRows, historic
   };
 }
 
+function buildPaceSignalSummaryFromSnapshotHistory(snapshotHistorySummary) {
+  const summary = snapshotHistorySummary || {};
+  const coverage = summary.coverage || {};
+  const byStayDate = Array.isArray(summary.by_stay_date) ? summary.by_stay_date : [];
+  const byStayWeek = Array.isArray(summary.by_stay_week) ? summary.by_stay_week : [];
+  const tyVsStly = summary.ty_vs_stly_future_flags || {};
+  const qualityNotes = Array.isArray(summary.data_quality_notes) ? [...summary.data_quality_notes] : [];
+
+  const comparablePairs = Number(coverage.comparable_stay_segment_pairs || 0);
+  const currentFutureRows = Number(coverage.current_future_rows || 0);
+  const exactSameLeadMatches = Number(coverage.exact_same_lead_matches || 0);
+  const comparableTyVsStly = Number(tyVsStly.comparable_count || 0);
+  const aboveCount = Number(tyVsStly.ty_above_stly_count || 0);
+  const belowCount = Number(tyVsStly.ty_below_stly_count || 0);
+
+  const hasMinimalCoverage = comparablePairs >= 8;
+  const hasStrongCoverage = comparablePairs >= 20;
+  const leadCoverageRatio = comparablePairs > 0 ? exactSameLeadMatches / comparablePairs : 0;
+  const tyVsStlyCoverageRatio = comparableTyVsStly > 0 ? Math.max(aboveCount, belowCount) / comparableTyVsStly : 0;
+
+  const coverageStatus =
+    hasStrongCoverage && leadCoverageRatio >= 0.35
+      ? 'strong'
+      : hasMinimalCoverage
+        ? 'moderate'
+        : comparablePairs > 0
+          ? 'limited'
+          : 'insufficient';
+
+  if (coverageStatus !== 'strong') {
+    qualityNotes.push('Pace signal confidence is gated due to partial snapshot-history coverage.');
+  }
+
+  const signalAbsThreshold = coverageStatus === 'strong' ? 5 : coverageStatus === 'moderate' ? 8 : 12;
+  const weekAbsThreshold = coverageStatus === 'strong' ? 10 : coverageStatus === 'moderate' ? 14 : 20;
+
+  const dateLevelSignals = byStayDate
+    .filter((r) => Math.abs(Number(r.rn_on_books_ty_delta || 0)) >= signalAbsThreshold)
+    .map((r) => {
+      const delta = Number(r.rn_on_books_ty_delta || 0);
+      const magnitude = Math.abs(delta);
+      const direction = delta > 0 ? 'strengthening' : delta < 0 ? 'weakening' : 'flat';
+      const confidence =
+        coverageStatus === 'strong'
+          ? magnitude >= 10
+            ? 'high'
+            : 'medium'
+          : coverageStatus === 'moderate'
+            ? 'medium'
+            : 'low';
+      return {
+        signal_type: direction === 'weakening' ? 'future_stay_date_weakening' : 'future_stay_date_strengthening',
+        stay_date_ymd: r.stay_date_ymd,
+        market_segment_label: r.market_segment_label,
+        stay_week_key: r.stay_week_key || null,
+        rn_on_books_ty_delta: delta,
+        confidence,
+        prior_snapshot_date: r.prior_snapshot_date
+      };
+    })
+    .filter((s) => s.signal_type !== 'future_stay_date_strengthening' || s.rn_on_books_ty_delta > 0)
+    .sort((a, b) => Math.abs(b.rn_on_books_ty_delta) - Math.abs(a.rn_on_books_ty_delta))
+    .slice(0, 40);
+
+  const weekLevelSignals = byStayWeek
+    .filter((w) => Math.abs(Number(w.net_rn_on_books_ty_delta || 0)) >= weekAbsThreshold)
+    .map((w) => {
+      const delta = Number(w.net_rn_on_books_ty_delta || 0);
+      return {
+        signal_type: delta >= 0 ? 'future_week_strengthening' : 'future_week_weakening',
+        stay_week_key: w.stay_week_key,
+        net_rn_on_books_ty_delta: delta,
+        compared_rows: Number(w.compared_rows || 0),
+        confidence:
+          coverageStatus === 'strong' && Number(w.compared_rows || 0) >= 2
+            ? 'high'
+            : coverageStatus === 'insufficient'
+              ? 'low'
+              : 'medium'
+      };
+    })
+    .sort((a, b) => Math.abs(b.net_rn_on_books_ty_delta) - Math.abs(a.net_rn_on_books_ty_delta))
+    .slice(0, 20);
+
+  const tyVsStlySignals = [];
+  if (comparableTyVsStly >= 6) {
+    if (belowCount > 0) {
+      tyVsStlySignals.push({
+        signal_type: 'future_ty_below_stly',
+        count: belowCount,
+        comparable_count: comparableTyVsStly,
+        ratio: comparableTyVsStly > 0 ? belowCount / comparableTyVsStly : 0,
+        confidence: tyVsStlyCoverageRatio >= 0.55 && coverageStatus !== 'insufficient' ? 'high' : 'medium'
+      });
+    }
+    if (aboveCount > 0) {
+      tyVsStlySignals.push({
+        signal_type: 'future_ty_above_stly',
+        count: aboveCount,
+        comparable_count: comparableTyVsStly,
+        ratio: comparableTyVsStly > 0 ? aboveCount / comparableTyVsStly : 0,
+        confidence: tyVsStlyCoverageRatio >= 0.55 && coverageStatus !== 'insufficient' ? 'high' : 'medium'
+      });
+    }
+  } else if (currentFutureRows > 0) {
+    qualityNotes.push('TY vs STLY comparisons are sparse for future windows; TY/STLY signals are low-confidence.');
+  }
+
+  const strongestHiddenRisks = [
+    ...dateLevelSignals.filter((s) => s.rn_on_books_ty_delta < 0),
+    ...weekLevelSignals.filter((s) => s.net_rn_on_books_ty_delta < 0)
+  ]
+    .sort(
+      (a, b) =>
+        Math.abs(
+          Number(b.rn_on_books_ty_delta ?? b.net_rn_on_books_ty_delta ?? 0)
+        ) - Math.abs(Number(a.rn_on_books_ty_delta ?? a.net_rn_on_books_ty_delta ?? 0))
+    )
+    .slice(0, 12);
+
+  const strongestHiddenOpportunities = [
+    ...dateLevelSignals.filter((s) => s.rn_on_books_ty_delta > 0),
+    ...weekLevelSignals.filter((s) => s.net_rn_on_books_ty_delta > 0)
+  ]
+    .sort(
+      (a, b) =>
+        Math.abs(
+          Number(b.rn_on_books_ty_delta ?? b.net_rn_on_books_ty_delta ?? 0)
+        ) - Math.abs(Number(a.rn_on_books_ty_delta ?? a.net_rn_on_books_ty_delta ?? 0))
+    )
+    .slice(0, 12);
+
+  return {
+    schema_version: 1,
+    coverage_status: coverageStatus,
+    date_level_signals: dateLevelSignals,
+    week_level_signals: weekLevelSignals,
+    ty_vs_stly_signals: tyVsStlySignals,
+    strongest_hidden_risks: strongestHiddenRisks,
+    strongest_hidden_opportunities: strongestHiddenOpportunities,
+    data_quality_notes: qualityNotes
+  };
+}
+
 async function readPmsPaceHistoricalRowsForFutureWindow({
   supabaseClient,
   hotelCode,
@@ -3364,6 +3508,7 @@ async function handler(req, res) {
       currentRows: pmsPaceSnapshotRowsForAnalysis,
       historicalRows: historicalPmsPaceRows
     });
+    const paceSignalSummary = buildPaceSignalSummaryFromSnapshotHistory(snapshotHistorySummary);
 
     const enginePayload = {
       success: true,
@@ -3379,6 +3524,8 @@ async function handler(req, res) {
       workbook_ingestion: workbookIngestion,
       /** Hidden backend-only same-lead pace history summary (not yet used for issue cards/actions). */
       snapshot_history_summary: snapshotHistorySummary,
+      /** Hidden backend-only pace signal candidates from snapshot history (not yet user-visible). */
+      pace_signal_summary: paceSignalSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
