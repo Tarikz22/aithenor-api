@@ -2438,6 +2438,82 @@ function buildPaceCandidateIssuesFromPaceSignalSummary(paceSignalSummary) {
   };
 }
 
+function hiddenPaceIssueRankScore(candidate) {
+  const severityBase = candidate.severity === 'high' ? 30 : candidate.severity === 'medium' ? 20 : 10;
+  const confidenceBonus =
+    candidate.confidence === 'high' ? 8 : candidate.confidence === 'medium' ? 4 : 1;
+  const evidence = candidate.evidence_summary || '';
+  const deltaMatch = evidence.match(/delta\s*\+?(-?\d+(\.\d+)?)/i);
+  const ratioMatch = evidence.match(/(\d+(\.\d+)?)%/);
+  const absDelta = deltaMatch ? Math.abs(Number(deltaMatch[1])) : 0;
+  const ratioPct = ratioMatch ? Number(ratioMatch[1]) : 0;
+  return severityBase + confidenceBonus + Math.min(30, absDelta) + Math.min(20, ratioPct / 5);
+}
+
+function paceCandidateToHiddenRetailLikeIssue(candidate, idx) {
+  const familyToDriver = {
+    'future pace weakening': 'visibility',
+    'future pace strengthening': 'pricing',
+    'future TY below STLY': 'conversion',
+    'future TY above STLY': 'pricing'
+  };
+  const issueFamilyNormalized = (candidate.issue_family || '').toLowerCase();
+  const findingKey = `PACE_HIDDEN_${issueFamilyNormalized.replace(/[^a-z0-9]+/gi, '_')}_${idx + 1}`;
+  return {
+    finding_key: findingKey,
+    issue_family: issueFamilyNormalized,
+    driver: familyToDriver[candidate.issue_family] || 'pricing',
+    segment: 'retail',
+    priority: candidate.severity === 'high' ? 'high' : 'medium',
+    title: candidate.title,
+    finding: candidate.evidence_summary,
+    root_cause: candidate.signal_source,
+    expected_outcome:
+      candidate.issue_family === 'future pace weakening' || candidate.issue_family === 'future TY below STLY'
+        ? 'Early hidden warning: future retail pace softness may require corrective pricing/conversion actions.'
+        : 'Early hidden opportunity: future retail pace strength may support selective rate/mix optimization.',
+    rule_triggered: candidate.issue_family,
+    confidence: candidate.confidence || 'low',
+    scope: candidate.scope || null,
+    signal_source: candidate.signal_source || null,
+    hidden_rank_score: hiddenPaceIssueRankScore(candidate)
+  };
+}
+
+function buildHiddenRankedPaceIssuesFromCandidates(paceCandidateIssues) {
+  const pci = paceCandidateIssues || {};
+  const coverageStatus = pci.coverage_status || 'insufficient';
+  const notes = Array.isArray(pci.data_quality_notes) ? [...pci.data_quality_notes] : [];
+  const candidateList = Array.isArray(pci.candidates) ? pci.candidates : [];
+
+  const allowDateWeek = coverageStatus === 'moderate' || coverageStatus === 'strong';
+  if (!allowDateWeek) {
+    notes.push('Hidden pace date/week ranked issues suppressed until coverage_status reaches moderate.');
+  }
+
+  const filtered = candidateList.filter((c) => {
+    const fam = c.issue_family;
+    const isDateWeek = fam === 'future pace weakening' || fam === 'future pace strengthening';
+    if (isDateWeek && !allowDateWeek) return false;
+    if (fam === 'future TY below STLY' || fam === 'future TY above STLY') return true;
+    return false;
+  });
+
+  const hiddenIssues = filtered
+    .map((c, i) => paceCandidateToHiddenRetailLikeIssue(c, i))
+    .sort((a, b) => Number(b.hidden_rank_score || 0) - Number(a.hidden_rank_score || 0))
+    .slice(0, 20);
+
+  return {
+    schema_version: 1,
+    coverage_status: coverageStatus,
+    hidden_ranked_issues: hiddenIssues,
+    strongest_hidden_risks: pci.strongest_hidden_risks || [],
+    strongest_hidden_opportunities: pci.strongest_hidden_opportunities || [],
+    data_quality_notes: notes
+  };
+}
+
 async function readPmsPaceHistoricalRowsForFutureWindow({
   supabaseClient,
   hotelCode,
@@ -3647,6 +3723,7 @@ async function handler(req, res) {
     });
     const paceSignalSummary = buildPaceSignalSummaryFromSnapshotHistory(snapshotHistorySummary);
     const paceCandidateIssues = buildPaceCandidateIssuesFromPaceSignalSummary(paceSignalSummary);
+    const hiddenRankedPaceIssues = buildHiddenRankedPaceIssuesFromCandidates(paceCandidateIssues);
 
     const enginePayload = {
       success: true,
@@ -3666,6 +3743,8 @@ async function handler(req, res) {
       pace_signal_summary: paceSignalSummary,
       /** Hidden gated pace issue candidates — not merged into retail issues/recommendations/actions. */
       pace_candidate_issues: paceCandidateIssues,
+      /** Hidden ranked pace issues in retail-like structure (backend-only; excluded from visible outputs). */
+      hidden_ranked_pace_issues: hiddenRankedPaceIssues,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
