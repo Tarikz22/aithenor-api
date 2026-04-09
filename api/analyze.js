@@ -3473,6 +3473,205 @@ function buildFinancialImpact({ driver, diagnosis, action, detection, pmsRows = 
   };
 }
 
+function estimateRetailIssueImpact(issue, contextData) {
+  const issueFamily = (issue?.issue_family || '').toString();
+  const diagnosis = contextData?.diagnosis || {};
+  const pmsRows = Array.isArray(contextData?.pmsRows) ? contextData.pmsRows : [];
+
+  const cardMetrics = issue?.card_metrics || {};
+  const avgMPI = toFiniteNumberOrNull(cardMetrics.avgMPI ?? diagnosis?.metrics?.avgMPI);
+  const avgARI = toFiniteNumberOrNull(cardMetrics.avgARI ?? diagnosis?.metrics?.avgARI);
+  const avgRGI = toFiniteNumberOrNull(cardMetrics.avgRGI ?? diagnosis?.metrics?.avgRGI);
+  const avgOcc = toFiniteNumberOrNull(cardMetrics.avgOcc ?? diagnosis?.metrics?.avgOcc);
+
+  const adrValues = pmsRows
+    .map((row) => toFiniteNumberOrNull(row.adr ?? row.ADR))
+    .filter((v) => v !== null && v > 0);
+  const rnValues = pmsRows
+    .map((row) => toFiniteNumberOrNull(row.room_nights ?? row.roomNights ?? row.rn ?? row.RN))
+    .filter((v) => v !== null && v > 0);
+
+  const avgADR =
+    adrValues.length > 0
+      ? adrValues.reduce((a, b) => a + b, 0) / adrValues.length
+      : null;
+  const totalRN =
+    rnValues.length > 0
+      ? rnValues.reduce((a, b) => a + b, 0)
+      : null;
+
+  const indexGap =
+    avgMPI !== null
+      ? Math.max(0, 100 - avgMPI)
+      : avgRGI !== null
+        ? Math.max(0, 100 - avgRGI)
+        : null;
+  const adrGap =
+    avgARI !== null
+      ? Math.max(0, 100 - avgARI)
+      : null;
+  const occupancyGap =
+    avgOcc !== null
+      ? Math.max(0, 80 - avgOcc)
+      : null;
+
+  let issueWeight = 0.08;
+  if (issueFamily === 'visibility_gap') issueWeight = 0.10;
+  if (issueFamily === 'discount_inefficiency') issueWeight = 0.09;
+  if (issueFamily === 'pricing_resistance') issueWeight = 0.07;
+  if (issueFamily === 'mix_constraint') issueWeight = 0.06;
+  if (issueFamily === 'missed_pricing_opportunity') issueWeight = 0.05;
+
+  const gapAmplifier =
+    indexGap !== null
+      ? Math.max(0.6, Math.min(1.6, indexGap / 8))
+      : adrGap !== null
+        ? Math.max(0.6, Math.min(1.4, adrGap / 10))
+        : 1;
+
+  const roomNightsAtRisk =
+    totalRN !== null
+      ? Math.round(totalRN * issueWeight * gapAmplifier)
+      : null;
+
+  let revenueRange = null;
+  if (roomNightsAtRisk !== null && roomNightsAtRisk > 0 && avgADR !== null) {
+    // Conservative range: wide enough to avoid fake precision.
+    const min = Math.round(roomNightsAtRisk * avgADR * 0.55);
+    const max = Math.round(roomNightsAtRisk * avgADR * 0.95);
+    revenueRange = { min, max };
+  }
+
+  const dataPoints = [avgMPI, avgARI, avgRGI, avgOcc, avgADR, totalRN].filter((v) => v !== null).length;
+  let confidence = 'low';
+  if (dataPoints >= 5 && revenueRange) confidence = 'high';
+  else if (dataPoints >= 3) confidence = 'medium';
+
+  let impactBand = 'low';
+  const maxRevenue = revenueRange?.max ?? 0;
+  if (maxRevenue >= 15000 || (roomNightsAtRisk ?? 0) >= 120) impactBand = 'high';
+  else if (maxRevenue >= 5000 || (roomNightsAtRisk ?? 0) >= 40) impactBand = 'medium';
+
+  return {
+    impact_band: impactBand,
+    quantified_signals: {
+      room_nights_at_risk: roomNightsAtRisk,
+      adr_gap: adrGap,
+      revenue_range: revenueRange,
+      index_gap: indexGap,
+      occupancy_gap: occupancyGap
+    },
+    confidence
+  };
+}
+
+function interpretCommercialImpact(issue, quantifiedSignals) {
+  const family = (issue?.issue_family || '').toString();
+  const signals = quantifiedSignals || {};
+  const band = signals.impact_band || 'low';
+  const qs = signals.quantified_signals || {};
+  const rev = qs.revenue_range;
+
+  if (!rev && band === 'low') {
+    return 'Financial impact appears contained, but repeated inefficiency may compound over time.';
+  }
+
+  if (family === 'visibility_gap' || family === 'discount_inefficiency') {
+    if (band === 'high') return 'This represents material revenue leakage on high-demand dates.';
+    if (band === 'medium') return 'This appears to be a moderate share loss with limited ADR upside.';
+    return 'Leakage appears limited now, but persistent conversion drag can scale over time.';
+  }
+
+  if (family === 'pricing_resistance' || family === 'mix_constraint') {
+    if (band === 'high') return 'Rate-position friction is likely creating substantial revenue drag.';
+    if (band === 'medium') return 'Commercial drag appears moderate, mainly from suboptimal rate/mix balance.';
+    return 'Pricing/mix pressure is currently contained but should be monitored.';
+  }
+
+  if (family === 'missed_pricing_opportunity') {
+    if (band === 'high') return 'There is material upside if rate strategy is tightened on strong-demand windows.';
+    if (band === 'medium') return 'There appears to be moderate upside from selective pricing optimization.';
+    return 'Upside is limited at current signal strength but remains directionally positive.';
+  }
+
+  if (band === 'high') return 'This represents material commercial impact and warrants priority attention.';
+  if (band === 'medium') return 'This appears to have moderate commercial impact with actionable upside.';
+  return 'Financial impact appears contained at current levels.';
+}
+
+function buildFinancialQuantificationSummary(issues, contextData) {
+  const list = Array.isArray(issues) ? issues : [];
+  const out = [];
+  const notes = [];
+
+  for (const issue of list) {
+    const est = estimateRetailIssueImpact(issue, contextData);
+    out.push({
+      finding_key: issue?.finding_key || null,
+      issue_family: issue?.issue_family || null,
+      impact_band: est.impact_band,
+      quantified_signals: est.quantified_signals,
+      commercial_interpretation: interpretCommercialImpact(issue, est),
+      confidence: est.confidence
+    });
+  }
+
+  const withRevenue = out.filter((r) => r.quantified_signals?.revenue_range?.max != null);
+  if (!withRevenue.length && out.length > 0) {
+    notes.push('Revenue ranges are unavailable for most issues due to partial PMS/ADR/RN coverage.');
+  }
+  if (!out.length) {
+    notes.push('No retail issues were available for financial quantification.');
+  }
+
+  const strongestHiddenLosses = [...out]
+    .filter((r) => (r.issue_family || '') !== 'missed_pricing_opportunity')
+    .sort(
+      (a, b) =>
+        Number(b.quantified_signals?.revenue_range?.max || 0) -
+        Number(a.quantified_signals?.revenue_range?.max || 0)
+    )
+    .slice(0, 8)
+    .map((r) => ({
+      finding_key: r.finding_key,
+      issue_family: r.issue_family,
+      impact_band: r.impact_band,
+      revenue_range: r.quantified_signals?.revenue_range || null,
+      confidence: r.confidence
+    }));
+
+  const strongestHiddenOpportunities = [...out]
+    .filter((r) => (r.issue_family || '') === 'missed_pricing_opportunity')
+    .sort(
+      (a, b) =>
+        Number(b.quantified_signals?.revenue_range?.max || 0) -
+        Number(a.quantified_signals?.revenue_range?.max || 0)
+    )
+    .slice(0, 8)
+    .map((r) => ({
+      finding_key: r.finding_key,
+      issue_family: r.issue_family,
+      impact_band: r.impact_band,
+      revenue_range: r.quantified_signals?.revenue_range || null,
+      confidence: r.confidence
+    }));
+
+  const highConfidenceCount = out.filter((r) => r.confidence === 'high').length;
+  const mediumOrHighCount = out.filter((r) => r.confidence !== 'low').length;
+  let coverageStatus = 'low';
+  if (highConfidenceCount >= 2 || (out.length > 0 && highConfidenceCount === out.length)) coverageStatus = 'high';
+  else if (mediumOrHighCount >= Math.ceil(Math.max(1, out.length) / 2)) coverageStatus = 'medium';
+
+  return {
+    schema_version: '1.0',
+    coverage_status: coverageStatus,
+    issue_level_quantification: out,
+    strongest_hidden_losses: strongestHiddenLosses,
+    strongest_hidden_opportunities: strongestHiddenOpportunities,
+    data_quality_notes: notes
+  };
+}
+
 function buildTotalOpportunity(actions = []) {
   let grossLow = 0;
   let grossHigh = 0;
@@ -3724,6 +3923,14 @@ async function handler(req, res) {
     const paceSignalSummary = buildPaceSignalSummaryFromSnapshotHistory(snapshotHistorySummary);
     const paceCandidateIssues = buildPaceCandidateIssuesFromPaceSignalSummary(paceSignalSummary);
     const hiddenRankedPaceIssues = buildHiddenRankedPaceIssuesFromCandidates(paceCandidateIssues);
+    const financialQuantificationSummary = buildFinancialQuantificationSummary(enrichedIssues, {
+      diagnosis,
+      focus,
+      driver,
+      detection,
+      pmsRows,
+      strRows
+    });
 
     const enginePayload = {
       success: true,
@@ -3745,6 +3952,8 @@ async function handler(req, res) {
       pace_candidate_issues: paceCandidateIssues,
       /** Hidden ranked pace issues in retail-like structure (backend-only; excluded from visible outputs). */
       hidden_ranked_pace_issues: hiddenRankedPaceIssues,
+      /** Hidden financial quantification for visible retail issues (backend-only, not UI-exposed yet). */
+      financial_quantification_summary: financialQuantificationSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
