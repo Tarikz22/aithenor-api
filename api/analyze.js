@@ -3804,6 +3804,219 @@ function buildFinancialQuantificationSummary(issues, contextData) {
   };
 }
 
+function detectRetailCommercialContext(issue, contextData) {
+  const family = (issue?.issue_family || '').toString();
+  const diagnosis = contextData?.diagnosis || {};
+  const q = contextData?.quantification || {};
+  const qs = q.quantified_signals || {};
+  const flags = [];
+
+  const avgMPI = toFiniteNumberOrNull(issue?.card_metrics?.avgMPI ?? diagnosis?.metrics?.avgMPI);
+  const avgARI = toFiniteNumberOrNull(issue?.card_metrics?.avgARI ?? diagnosis?.metrics?.avgARI);
+  const avgRGI = toFiniteNumberOrNull(issue?.card_metrics?.avgRGI ?? diagnosis?.metrics?.avgRGI);
+  const avgOcc = toFiniteNumberOrNull(issue?.card_metrics?.avgOcc ?? diagnosis?.metrics?.avgOcc);
+
+  const idxGap = toFiniteNumberOrNull(qs.index_gap);
+  const occGap = toFiniteNumberOrNull(qs.occupancy_gap);
+  const adrGap = toFiniteNumberOrNull(qs.adr_gap);
+
+  if (avgOcc !== null && avgOcc >= 82) flags.push('inventory_pressure');
+  if (avgOcc !== null && avgOcc >= 88) flags.push('possible_compression');
+  if (avgOcc !== null && avgOcc < 75) flags.push('occupancy_softness');
+  if (idxGap !== null && idxGap >= 6) flags.push('share_softness');
+  if (family === 'pricing_resistance') flags.push('pricing_resistance');
+  if (family === 'discount_inefficiency') flags.push('discount_leakage');
+  if (family === 'mix_constraint') flags.push('mix_inefficiency');
+  if (avgARI !== null && avgARI < 100) flags.push('limited_rate_headroom');
+  if (avgMPI === null && avgRGI === null) flags.push('demand_uncertain');
+
+  let commercialSituation = 'mixed_or_unclear_context';
+  if (flags.includes('possible_compression')) commercialSituation = 'constrained_inventory_context';
+  else if (flags.includes('inventory_pressure')) commercialSituation = 'inventory_pressure_context';
+  else if (flags.includes('pricing_resistance')) commercialSituation = 'pricing_friction_context';
+  else if (flags.includes('discount_leakage')) commercialSituation = 'discount_inefficiency_context';
+  else if (flags.includes('share_softness') || flags.includes('occupancy_softness')) {
+    commercialSituation = 'demand_or_share_softness_context';
+  }
+
+  let dominantSignal = null;
+  if (idxGap !== null && idxGap > 0) dominantSignal = `index_gap_${idxGap.toFixed(1)}`;
+  else if (occGap !== null && occGap > 0) dominantSignal = `occupancy_gap_${occGap.toFixed(1)}`;
+  else if (adrGap !== null && adrGap > 0) dominantSignal = `adr_gap_${adrGap.toFixed(1)}`;
+
+  let constraintStatus = 'unclear';
+  if (avgOcc !== null) {
+    if (avgOcc >= 88) constraintStatus = 'high';
+    else if (avgOcc >= 82) constraintStatus = 'medium';
+    else constraintStatus = 'low';
+  }
+
+  const points = [avgMPI, avgARI, avgRGI, avgOcc, idxGap, occGap, adrGap].filter((v) => v !== null).length;
+  const confidence = points >= 5 ? 'high' : points >= 3 ? 'medium' : 'low';
+
+  return {
+    context_flags: Array.from(new Set(flags)),
+    commercial_situation: commercialSituation,
+    dominant_signal: dominantSignal,
+    constraint_status: constraintStatus,
+    confidence
+  };
+}
+
+function buildRetailIssueNarrative(issue, quantification, commercialContext) {
+  const family = (issue?.issue_family || '').toString();
+  const q = quantification || {};
+  const ctx = commercialContext || {};
+  const qs = q.quantified_signals || {};
+  const rev = qs.revenue_range;
+  const rnRisk = qs.room_nights_at_risk;
+  const impactBand = q.impact_band || 'low';
+  const situation = ctx.commercial_situation || 'mixed_or_unclear_context';
+
+  const scaleText = rev
+    ? `estimated revenue at risk ${rev.min}-${rev.max}`
+    : rnRisk != null
+      ? `${rnRisk} room nights exposed`
+      : 'limited quantified scale';
+
+  let whyThisMatters = `This issue can erode retail performance through ${scaleText}.`;
+  if (impactBand === 'high') whyThisMatters = `This appears commercially material with ${scaleText}.`;
+  else if (impactBand === 'medium') whyThisMatters = `This looks moderately material with ${scaleText}.`;
+
+  let whatThisLikelyMeans = `Pattern is consistent with ${situation.replace(/_/g, ' ')}.`;
+  if (family === 'visibility_gap') {
+    whatThisLikelyMeans = `Signals suggest demand capture weakness and share softness under current market conditions (${situation.replace(/_/g, ' ')}).`;
+  } else if (family === 'discount_inefficiency') {
+    whatThisLikelyMeans = `Signals suggest discounting is not translating into proportional volume gains (${situation.replace(/_/g, ' ')}).`;
+  } else if (family === 'pricing_resistance') {
+    whatThisLikelyMeans = `Signals suggest rate position may be suppressing conversion more than expected (${situation.replace(/_/g, ' ')}).`;
+  } else if (family === 'mix_constraint') {
+    whatThisLikelyMeans = `Signals suggest business-mix friction is limiting performance despite available demand (${situation.replace(/_/g, ' ')}).`;
+  } else if (family === 'missed_pricing_opportunity') {
+    whatThisLikelyMeans = `Signals suggest unrealized pricing upside in periods where demand appears resilient (${situation.replace(/_/g, ' ')}).`;
+  }
+
+  let commercialWatchout =
+    'Watch for repeated underperformance across upcoming periods; compounding effects can emerge even from moderate gaps.';
+  if (ctx.constraint_status === 'high') {
+    commercialWatchout =
+      'High inventory pressure/compression context means execution errors can destroy value quickly; protect mix quality.';
+  } else if (ctx.constraint_status === 'low' && impactBand !== 'low') {
+    commercialWatchout =
+      'With limited inventory pressure, persistent weakness likely reflects execution friction rather than pure capacity constraint.';
+  }
+
+  return {
+    why_this_matters: whyThisMatters,
+    what_this_likely_means: whatThisLikelyMeans,
+    commercial_watchout: commercialWatchout
+  };
+}
+
+function buildCommercialContextSummary(issues, financialQuantificationSummary, contextData) {
+  const retailIssues = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
+  const quantRows = Array.isArray(financialQuantificationSummary?.issue_level_quantification)
+    ? financialQuantificationSummary.issue_level_quantification
+    : [];
+  const quantByKey = new Map(quantRows.map((q) => [q.finding_key, q]));
+  const notes = Array.isArray(financialQuantificationSummary?.data_quality_notes)
+    ? [...financialQuantificationSummary.data_quality_notes]
+    : [];
+
+  const issueLevelContext = retailIssues.map((issue) => {
+    const q = quantByKey.get(issue.finding_key) || {
+      impact_band: 'low',
+      quantified_signals: {
+        room_nights_at_risk: null,
+        adr_gap: null,
+        revenue_range: null,
+        index_gap: null,
+        occupancy_gap: null
+      },
+      confidence: 'low'
+    };
+    const ctx = detectRetailCommercialContext(issue, { ...contextData, quantification: q });
+    const narrative = buildRetailIssueNarrative(issue, q, ctx);
+    return {
+      finding_key: issue.finding_key,
+      issue_family: issue.issue_family,
+      commercial_situation: ctx.commercial_situation,
+      context_flags: ctx.context_flags,
+      dominant_signal: ctx.dominant_signal,
+      constraint_status: ctx.constraint_status,
+      confidence:
+        ctx.confidence === 'low' || q.confidence === 'low'
+          ? 'low'
+          : ctx.confidence === 'high' && q.confidence === 'high'
+            ? 'high'
+            : 'medium',
+      narrative
+    };
+  });
+
+  const flagCounts = {};
+  for (const row of issueLevelContext) {
+    for (const f of row.context_flags || []) flagCounts[f] = (flagCounts[f] || 0) + 1;
+  }
+  const topFlag = Object.entries(flagCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  let overallMarketContext = 'mixed_or_unclear_context';
+  if (topFlag === 'share_softness' || topFlag === 'occupancy_softness') {
+    overallMarketContext = 'demand_or_share_softness_context';
+  } else if (topFlag === 'pricing_resistance') {
+    overallMarketContext = 'pricing_friction_context';
+  } else if (topFlag === 'discount_leakage') {
+    overallMarketContext = 'discount_inefficiency_context';
+  } else if (topFlag === 'possible_compression' || topFlag === 'inventory_pressure') {
+    overallMarketContext = 'inventory_pressure_context';
+  }
+
+  const highConstraint = issueLevelContext.filter((r) => r.constraint_status === 'high').length;
+  const mediumConstraint = issueLevelContext.filter((r) => r.constraint_status === 'medium').length;
+  let overallConstraintContext = 'unclear';
+  if (highConstraint > 0) overallConstraintContext = 'high';
+  else if (mediumConstraint > 0) overallConstraintContext = 'medium';
+  else if (issueLevelContext.length > 0) overallConstraintContext = 'low';
+
+  const highConf = issueLevelContext.filter((r) => r.confidence === 'high').length;
+  const medOrHigh = issueLevelContext.filter((r) => r.confidence !== 'low').length;
+  let contextConfidence = 'low';
+  if (issueLevelContext.length > 0 && highConf >= Math.ceil(issueLevelContext.length / 2)) contextConfidence = 'high';
+  else if (medOrHigh >= Math.ceil(Math.max(1, issueLevelContext.length) / 2)) contextConfidence = 'medium';
+
+  const portfolioWatchouts = [];
+  if (flagCounts.share_softness || flagCounts.occupancy_softness) {
+    portfolioWatchouts.push('Share/occupancy softness appears across multiple retail issue signals.');
+  }
+  if (flagCounts.pricing_resistance) {
+    portfolioWatchouts.push('Pricing resistance context appears repeatedly; watch conversion sensitivity.');
+  }
+  if (flagCounts.discount_leakage) {
+    portfolioWatchouts.push('Discount leakage signals suggest potential margin-for-volume inefficiency.');
+  }
+  if (highConstraint > 0) {
+    portfolioWatchouts.push('Some issues occur under high inventory pressure/compression-like conditions.');
+  }
+  if (!issueLevelContext.length) {
+    notes.push('No visible retail issues available for commercial context classification.');
+  }
+  if (contextConfidence === 'low' && issueLevelContext.length > 0) {
+    notes.push('Commercial context confidence is low due to limited reliable context signals.');
+  }
+
+  return {
+    schema_version: '1.0',
+    overall_market_context: overallMarketContext,
+    overall_constraint_context: overallConstraintContext,
+    context_confidence: contextConfidence,
+    issue_level_context: issueLevelContext,
+    portfolio_watchouts: portfolioWatchouts,
+    data_quality_notes: notes
+  };
+}
+
 function buildTotalOpportunity(actions = []) {
   let grossLow = 0;
   let grossHigh = 0;
@@ -4064,6 +4277,18 @@ async function handler(req, res) {
       pmsPaceRows: pmsPaceSnapshotRowsForAnalysis,
       strRows
     });
+    const commercialContextSummary = buildCommercialContextSummary(
+      enrichedIssues,
+      financialQuantificationSummary,
+      {
+        diagnosis,
+        focus,
+        driver,
+        detection,
+        pmsRows,
+        strRows
+      }
+    );
 
     const enginePayload = {
       success: true,
@@ -4087,6 +4312,8 @@ async function handler(req, res) {
       hidden_ranked_pace_issues: hiddenRankedPaceIssues,
       /** Hidden financial quantification for visible retail issues (backend-only, not UI-exposed yet). */
       financial_quantification_summary: financialQuantificationSummary,
+      /** Hidden issue-level commercial context and narrative framing (backend-only). */
+      commercial_context_summary: commercialContextSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
