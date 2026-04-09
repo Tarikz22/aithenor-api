@@ -4220,6 +4220,262 @@ function buildDecisionFramingSummary(issues, quantSummary, contextSummary) {
   };
 }
 
+function suggestRetailActionFocus(issue, decision, context, quantification) {
+  const family = (issue?.issue_family || '').toString();
+  const dType = decision?.decision_type || 'monitoring_only';
+  const c = context || {};
+  const q = quantification || {};
+  const flags = Array.isArray(c.context_flags) ? c.context_flags : [];
+  const impactBand = q?.impact_band || 'low';
+
+  let actionFocus = 'monitoring';
+  let supportingLevers = ['signal_tracking'];
+  let actionIntent = 'Track signal consistency before changing commercial execution.';
+
+  if (dType === 'pricing_adjustment') {
+    actionFocus = 'rate_positioning';
+    supportingLevers = ['price_ladder', 'fence_integrity', 'value_communication'];
+    actionIntent = 'Refine relative rate posture to improve conversion without eroding value quality.';
+  } else if (dType === 'discount_strategy_review') {
+    actionFocus = 'discount_structure';
+    supportingLevers = ['offer_design', 'discount_fences', 'promo_eligibility'];
+    actionIntent = 'Reassess discount architecture where incentive depth is not yielding efficient demand capture.';
+  } else if (dType === 'conversion_optimization') {
+    actionFocus = 'conversion_path';
+    supportingLevers = ['booking_friction', 'content_strength', 'channel_experience'];
+    actionIntent = 'Improve conversion path quality where visibility is not translating to bookings.';
+  } else if (dType === 'demand_generation') {
+    actionFocus = 'demand_stimulation';
+    supportingLevers = ['demand_activation', 'campaign_timing', 'market_visibility'];
+    actionIntent = 'Strengthen demand capture posture in softer periods while preserving pricing discipline.';
+  } else if (dType === 'mix_rebalancing') {
+    if (flags.includes('possible_compression') || c?.constraint_status === 'high') {
+      actionFocus = 'inventory_control';
+      supportingLevers = ['inventory_protection', 'segment_priority', 'stay_pattern_control'];
+      actionIntent = 'Protect value under constrained conditions and avoid low-quality demand displacement.';
+    } else {
+      actionFocus = 'channel_mix';
+      supportingLevers = ['segment_mix', 'channel_weighting', 'value_quality'];
+      actionIntent = 'Rebalance demand sources toward healthier contribution mix.';
+    }
+  }
+
+  let confidence = 'low';
+  if ((decision?.confidence === 'high' || context?.confidence === 'high') && impactBand !== 'low') confidence = 'high';
+  else if (decision?.confidence !== 'low' || context?.confidence !== 'low') confidence = 'medium';
+
+  // Family-level safety override for weak signals.
+  if (family === 'visibility_gap' && impactBand === 'low' && context?.confidence === 'low') {
+    actionFocus = 'monitoring';
+    supportingLevers = ['signal_tracking', 'diagnostic_validation'];
+    actionIntent = 'Validate whether demand softness signal persists before activating broader interventions.';
+    confidence = 'low';
+  }
+
+  return {
+    action_focus: actionFocus,
+    supporting_levers: supportingLevers,
+    action_intent: actionIntent,
+    confidence
+  };
+}
+
+function identifyActionConstraints(issue, context, quantification) {
+  const family = (issue?.issue_family || '').toString();
+  const c = context || {};
+  const q = quantification || {};
+  const qs = q?.quantified_signals || {};
+  const flags = Array.isArray(c.context_flags) ? c.context_flags : [];
+  const constraints = [];
+
+  const occGap = toFiniteNumberOrNull(qs.occupancy_gap);
+  const adrGap = toFiniteNumberOrNull(qs.adr_gap);
+  const idxGap = toFiniteNumberOrNull(qs.index_gap);
+
+  if (c?.constraint_status === 'high' || flags.includes('possible_compression')) constraints.push('limited_inventory');
+  if (flags.includes('occupancy_softness') || (occGap !== null && occGap >= 6)) constraints.push('low_demand_environment');
+  if (family === 'pricing_resistance' || (adrGap !== null && adrGap > 0)) constraints.push('price_sensitivity');
+  if (family === 'discount_inefficiency') constraints.push('rate_integrity_risk');
+  if (family === 'mix_constraint' || flags.includes('mix_inefficiency')) constraints.push('channel_dependency');
+  if (flags.includes('demand_uncertain') || c?.confidence === 'low') constraints.push('uncertain_signal');
+  if (q?.confidence === 'low' || idxGap === null) constraints.push('data_limitations');
+
+  let constraintSeverity = 'low';
+  if (constraints.includes('limited_inventory') || constraints.includes('rate_integrity_risk')) {
+    constraintSeverity = 'high';
+  } else if (constraints.length >= 2) {
+    constraintSeverity = 'medium';
+  }
+
+  return {
+    constraints: Array.from(new Set(constraints)),
+    constraint_severity: constraintSeverity
+  };
+}
+
+function buildActionGuidance(issue, actionFocus, constraints, decision, context) {
+  const family = (issue?.issue_family || '').toString();
+  const focus = actionFocus?.action_focus || 'monitoring';
+  const leverText = (actionFocus?.supporting_levers || []).join(', ') || 'signal tracking';
+  const cons = Array.isArray(constraints?.constraints) ? constraints.constraints : [];
+
+  let recommendedDirection = `Use a ${focus.replace(/_/g, ' ')} posture while preserving commercial discipline.`;
+  if (focus === 'rate_positioning') {
+    recommendedDirection = 'Reassess price positioning framework against demand response and value perception.';
+  } else if (focus === 'discount_structure') {
+    recommendedDirection = 'Tighten discount governance and evaluate whether current incentive architecture is efficient.';
+  } else if (focus === 'conversion_path') {
+    recommendedDirection = 'Prioritize conversion-path quality improvements before broad pricing changes.';
+  } else if (focus === 'demand_stimulation') {
+    recommendedDirection = 'Strengthen demand stimulation posture while protecting baseline rate integrity.';
+  } else if (focus === 'inventory_control') {
+    recommendedDirection = 'Protect inventory quality and avoid low-value demand under constrained conditions.';
+  } else if (focus === 'channel_mix') {
+    recommendedDirection = 'Rebalance channel/segment mix toward demand sources with stronger value contribution.';
+  }
+
+  const keyConsiderations = [
+    `Primary levers to evaluate: ${leverText}.`,
+    `Decision framing alignment: ${(decision?.decision_type || 'monitoring_only').replace(/_/g, ' ')}.`
+  ];
+  if (context?.commercial_situation) {
+    keyConsiderations.push(`Current commercial situation: ${context.commercial_situation.replace(/_/g, ' ')}.`);
+  }
+  if (cons.includes('limited_inventory')) keyConsiderations.push('Guard inventory quality before adding demand pressure.');
+  if (cons.includes('low_demand_environment')) keyConsiderations.push('In low-demand context, prioritize conversion efficiency over pure rate movement.');
+  if (cons.includes('price_sensitivity')) keyConsiderations.push('Assess sensitivity risk before tightening price posture.');
+
+  const riskWatchouts = [];
+  if (cons.includes('rate_integrity_risk')) riskWatchouts.push('Further discounting may dilute rate integrity without proportional volume lift.');
+  if (cons.includes('channel_dependency')) riskWatchouts.push('Over-reliance on narrow channels can weaken mix resilience.');
+  if (cons.includes('limited_inventory')) riskWatchouts.push('Demand-push tactics under tight inventory can displace higher-value demand.');
+  if (cons.includes('uncertain_signal') || cons.includes('data_limitations')) {
+    riskWatchouts.push('Signal confidence is limited; avoid over-rotating strategy on incomplete evidence.');
+  }
+  if (!riskWatchouts.length) {
+    riskWatchouts.push('Execution drift can reduce impact even when decision direction is sound.');
+  }
+  if (family === 'visibility_gap' && focus === 'demand_stimulation') {
+    riskWatchouts.push('Demand activation without conversion readiness can increase cost without proportional booking gain.');
+  }
+
+  return {
+    recommended_direction: recommendedDirection,
+    key_considerations: keyConsiderations.slice(0, 5),
+    risk_watchouts: riskWatchouts.slice(0, 5)
+  };
+}
+
+function buildActionIntelligenceSummary(issues, decisionSummary, contextSummary, quantSummary) {
+  const retailIssues = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
+  const decisionRows = Array.isArray(decisionSummary?.issue_level_decisions)
+    ? decisionSummary.issue_level_decisions
+    : [];
+  const contextRows = Array.isArray(contextSummary?.issue_level_context)
+    ? contextSummary.issue_level_context
+    : [];
+  const quantRows = Array.isArray(quantSummary?.issue_level_quantification)
+    ? quantSummary.issue_level_quantification
+    : [];
+
+  const decisionByKey = new Map(decisionRows.map((d) => [d.finding_key, d]));
+  const contextByKey = new Map(contextRows.map((c) => [c.finding_key, c]));
+  const quantByKey = new Map(quantRows.map((q) => [q.finding_key, q]));
+
+  const notes = [
+    ...(Array.isArray(decisionSummary?.data_quality_notes) ? decisionSummary.data_quality_notes : []),
+    ...(Array.isArray(contextSummary?.data_quality_notes) ? contextSummary.data_quality_notes : []),
+    ...(Array.isArray(quantSummary?.data_quality_notes) ? quantSummary.data_quality_notes : [])
+  ];
+
+  const issueLevelActions = retailIssues.map((issue) => {
+    const d = decisionByKey.get(issue.finding_key) || {
+      decision_type: 'monitoring_only',
+      confidence: 'low',
+      urgency_level: 'low'
+    };
+    const c = contextByKey.get(issue.finding_key) || {
+      commercial_situation: 'mixed_or_unclear_context',
+      context_flags: [],
+      constraint_status: 'unclear',
+      confidence: 'low'
+    };
+    const q = quantByKey.get(issue.finding_key) || {
+      impact_band: 'low',
+      quantified_signals: {
+        room_nights_at_risk: null,
+        adr_gap: null,
+        revenue_range: null,
+        index_gap: null,
+        occupancy_gap: null
+      },
+      confidence: 'low'
+    };
+
+    const focus = suggestRetailActionFocus(issue, d, c, q);
+    const cons = identifyActionConstraints(issue, c, q);
+    const guidance = buildActionGuidance(issue, focus, cons, d, c);
+    const confidence =
+      focus.confidence === 'high' && d.confidence === 'high' ? 'high' : focus.confidence === 'low' ? 'low' : 'medium';
+
+    return {
+      finding_key: issue.finding_key,
+      issue_family: issue.issue_family,
+      action_focus: focus.action_focus,
+      supporting_levers: focus.supporting_levers,
+      action_intent: focus.action_intent,
+      constraints: cons.constraints,
+      constraint_severity: cons.constraint_severity,
+      recommended_direction: guidance.recommended_direction,
+      key_considerations: guidance.key_considerations,
+      risk_watchouts: guidance.risk_watchouts,
+      confidence
+    };
+  });
+
+  let overallActionPosture = 'balanced_guided_posture';
+  if (issueLevelActions.every((a) => a.action_focus === 'monitoring') && issueLevelActions.length > 0) {
+    overallActionPosture = 'monitoring_posture';
+  } else if (issueLevelActions.some((a) => a.constraint_severity === 'high')) {
+    overallActionPosture = 'constraint_aware_posture';
+  } else if (issueLevelActions.length > 0) {
+    overallActionPosture = 'active_guided_posture';
+  }
+
+  const portfolioActionPriorities = [];
+  const highConstraintCount = issueLevelActions.filter((a) => a.constraint_severity === 'high').length;
+  if (highConstraintCount > 0) {
+    portfolioActionPriorities.push('Prioritize constraint-aware execution where inventory/rate integrity risk is elevated.');
+  }
+  const focusCounts = {};
+  for (const row of issueLevelActions) focusCounts[row.action_focus] = (focusCounts[row.action_focus] || 0) + 1;
+  const topFocus = Object.entries(focusCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (topFocus) {
+    portfolioActionPriorities.push(`Primary action focus this run: ${topFocus.replace(/_/g, ' ')}.`);
+  }
+
+  const globalRiskFlags = [];
+  if (issueLevelActions.some((a) => a.constraints.includes('limited_inventory'))) globalRiskFlags.push('limited_inventory');
+  if (issueLevelActions.some((a) => a.constraints.includes('rate_integrity_risk'))) globalRiskFlags.push('rate_integrity_risk');
+  if (issueLevelActions.some((a) => a.constraints.includes('uncertain_signal'))) globalRiskFlags.push('uncertain_signal');
+  if (issueLevelActions.some((a) => a.constraints.includes('data_limitations'))) globalRiskFlags.push('data_limitations');
+
+  if (!issueLevelActions.length) {
+    notes.push('No visible retail issues available for action intelligence framing.');
+  }
+
+  return {
+    schema_version: '1.0',
+    overall_action_posture: overallActionPosture,
+    portfolio_action_priorities: portfolioActionPriorities,
+    issue_level_actions: issueLevelActions,
+    global_risk_flags: Array.from(new Set(globalRiskFlags)),
+    data_quality_notes: Array.from(new Set(notes))
+  };
+}
+
 function buildTotalOpportunity(actions = []) {
   let grossLow = 0;
   let grossHigh = 0;
@@ -4497,6 +4753,12 @@ async function handler(req, res) {
       financialQuantificationSummary,
       commercialContextSummary
     );
+    const actionIntelligenceSummary = buildActionIntelligenceSummary(
+      enrichedIssues,
+      decisionFramingSummary,
+      commercialContextSummary,
+      financialQuantificationSummary
+    );
 
     const enginePayload = {
       success: true,
@@ -4524,6 +4786,8 @@ async function handler(req, res) {
       commercial_context_summary: commercialContextSummary,
       /** Hidden decision framing layer (what type of decision is needed, not execution). */
       decision_framing_summary: decisionFramingSummary,
+      /** Hidden action intelligence layer (guided, non-prescriptive, backend-only). */
+      action_intelligence_summary: actionIntelligenceSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
