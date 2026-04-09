@@ -4017,6 +4017,209 @@ function buildCommercialContextSummary(issues, financialQuantificationSummary, c
   };
 }
 
+function classifyRetailDecisionType(issue, quantification, context) {
+  const family = (issue?.issue_family || '').toString();
+  const q = quantification || {};
+  const c = context || {};
+  const flags = Array.isArray(c.context_flags) ? c.context_flags : [];
+  const idxGap = toFiniteNumberOrNull(q?.quantified_signals?.index_gap);
+  const occGap = toFiniteNumberOrNull(q?.quantified_signals?.occupancy_gap);
+
+  let decisionType = 'monitoring_only';
+  let primaryLever = 'performance_monitoring';
+  let decisionIntent = 'Validate whether current signals persist before committing major commercial changes.';
+
+  if (family === 'pricing_resistance') {
+    decisionType = 'pricing_adjustment';
+    primaryLever = 'rate_positioning';
+    decisionIntent = 'Re-evaluate price positioning versus demand response to reduce conversion drag.';
+  } else if (family === 'discount_inefficiency') {
+    decisionType = 'discount_strategy_review';
+    primaryLever = 'discount_architecture';
+    decisionIntent = 'Review discount depth/structure where volume response appears insufficient.';
+  } else if (family === 'mix_constraint') {
+    decisionType = 'mix_rebalancing';
+    primaryLever = 'channel_mix';
+    decisionIntent = 'Rebalance business mix priorities where current composition suppresses performance quality.';
+  } else if (family === 'missed_pricing_opportunity') {
+    decisionType = 'pricing_adjustment';
+    primaryLever = 'rate_capture';
+    decisionIntent = 'Assess selective pricing uplift where demand appears resilient.';
+  } else if (family === 'visibility_gap') {
+    if (flags.includes('occupancy_softness') || (occGap !== null && occGap >= 6) || (idxGap !== null && idxGap >= 6)) {
+      decisionType = 'demand_generation';
+      primaryLever = 'demand_capture';
+      decisionIntent = 'Prioritize demand capture and conversion readiness in periods showing softness.';
+    } else {
+      decisionType = 'conversion_optimization';
+      primaryLever = 'conversion_funnel';
+      decisionIntent = 'Tighten conversion execution where visibility appears to underperform relative to demand.';
+    }
+  } else if (flags.includes('possible_compression') || flags.includes('inventory_pressure')) {
+    decisionType = 'mix_rebalancing';
+    primaryLever = 'inventory_allocation';
+    decisionIntent = 'Protect value quality under constrained inventory conditions.';
+  }
+
+  const signalPoints = [
+    q?.impact_band,
+    q?.quantified_signals?.room_nights_at_risk,
+    q?.quantified_signals?.revenue_range?.max,
+    c?.dominant_signal
+  ].filter((v) => v !== null && v !== undefined).length;
+  const confidence =
+    signalPoints >= 4 && (q?.confidence === 'high' || c?.confidence === 'high')
+      ? 'high'
+      : signalPoints >= 2
+        ? 'medium'
+        : 'low';
+
+  return {
+    decision_type: decisionType,
+    primary_lever: primaryLever,
+    decision_intent: decisionIntent,
+    confidence
+  };
+}
+
+function assessDecisionUrgency(issue, quantification, context) {
+  const q = quantification || {};
+  const c = context || {};
+  const maxRev = Number(q?.quantified_signals?.revenue_range?.max || 0);
+  const rnRisk = Number(q?.quantified_signals?.room_nights_at_risk || 0);
+  const impactBand = q?.impact_band || 'low';
+  const isConstraintHigh = c?.constraint_status === 'high';
+  const family = (issue?.issue_family || '').toString();
+
+  let urgencyLevel = 'low';
+  let urgencyReason = 'Current quantified exposure appears limited; monitor for persistence.';
+
+  if (maxRev >= 18000 || rnRisk >= 140 || (impactBand === 'high' && isConstraintHigh)) {
+    urgencyLevel = 'high';
+    urgencyReason = 'Material near-term exposure under current market context indicates a priority decision need.';
+  } else if (
+    maxRev >= 6000 ||
+    rnRisk >= 50 ||
+    impactBand === 'medium' ||
+    family === 'discount_inefficiency' ||
+    family === 'pricing_resistance'
+  ) {
+    urgencyLevel = 'medium';
+    urgencyReason = 'Commercial impact is meaningful and should be addressed before inefficiency compounds.';
+  }
+
+  return {
+    urgency_level: urgencyLevel,
+    urgency_reason: urgencyReason
+  };
+}
+
+function buildDecisionFramingSummary(issues, quantSummary, contextSummary) {
+  const retailIssues = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
+  const quantRows = Array.isArray(quantSummary?.issue_level_quantification)
+    ? quantSummary.issue_level_quantification
+    : [];
+  const contextRows = Array.isArray(contextSummary?.issue_level_context)
+    ? contextSummary.issue_level_context
+    : [];
+  const quantByKey = new Map(quantRows.map((q) => [q.finding_key, q]));
+  const contextByKey = new Map(contextRows.map((r) => [r.finding_key, r]));
+  const notes = [
+    ...(Array.isArray(quantSummary?.data_quality_notes) ? quantSummary.data_quality_notes : []),
+    ...(Array.isArray(contextSummary?.data_quality_notes) ? contextSummary.data_quality_notes : [])
+  ];
+
+  const issueLevelDecisions = retailIssues.map((issue) => {
+    const q = quantByKey.get(issue.finding_key) || {
+      impact_band: 'low',
+      quantified_signals: {
+        room_nights_at_risk: null,
+        adr_gap: null,
+        revenue_range: null,
+        index_gap: null,
+        occupancy_gap: null
+      },
+      confidence: 'low'
+    };
+    const c = contextByKey.get(issue.finding_key) || {
+      commercial_situation: 'mixed_or_unclear_context',
+      context_flags: [],
+      dominant_signal: null,
+      constraint_status: 'unclear',
+      confidence: 'low'
+    };
+
+    const cls = classifyRetailDecisionType(issue, q, c);
+    const urg = assessDecisionUrgency(issue, q, c);
+    const confidence =
+      cls.confidence === 'high' && q.confidence === 'high' && c.confidence === 'high'
+        ? 'high'
+        : cls.confidence === 'low' || q.confidence === 'low' || c.confidence === 'low'
+          ? 'low'
+          : 'medium';
+
+    return {
+      finding_key: issue.finding_key,
+      issue_family: issue.issue_family,
+      decision_type: cls.decision_type,
+      primary_lever: cls.primary_lever,
+      decision_intent: cls.decision_intent,
+      urgency_level: urg.urgency_level,
+      urgency_reason: urg.urgency_reason,
+      confidence
+    };
+  });
+
+  const portfolioPriorities = [];
+  if (issueLevelDecisions.some((d) => d.urgency_level === 'high')) {
+    portfolioPriorities.push('Prioritize high-urgency retail decisions where near-term exposure is material.');
+  }
+  const decisionCounts = {};
+  for (const d of issueLevelDecisions) decisionCounts[d.decision_type] = (decisionCounts[d.decision_type] || 0) + 1;
+  const topDecisionType = Object.entries(decisionCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (topDecisionType) {
+    portfolioPriorities.push(`Primary decision pattern this run: ${topDecisionType}.`);
+  }
+  if (contextSummary?.overall_constraint_context === 'high') {
+    portfolioPriorities.push('Balance value capture versus volume under high inventory pressure.');
+  }
+
+  const portfolioRisks = [];
+  if (issueLevelDecisions.some((d) => d.decision_type === 'discount_strategy_review')) {
+    portfolioRisks.push('Discount leakage risk: margin loss may continue without proportional volume gain.');
+  }
+  if (issueLevelDecisions.some((d) => d.decision_type === 'pricing_adjustment')) {
+    portfolioRisks.push('Pricing execution risk: delayed adjustment can widen share and revenue gaps.');
+  }
+  if (issueLevelDecisions.some((d) => d.decision_type === 'demand_generation')) {
+    portfolioRisks.push('Demand softness risk: unresolved capture weakness can compound into forward periods.');
+  }
+
+  let overallDecisionEnvironment = 'mixed_decision_environment';
+  if (issueLevelDecisions.every((d) => d.decision_type === 'monitoring_only') && issueLevelDecisions.length > 0) {
+    overallDecisionEnvironment = 'monitoring_environment';
+  } else if (issueLevelDecisions.some((d) => d.urgency_level === 'high')) {
+    overallDecisionEnvironment = 'active_intervention_environment';
+  } else if (issueLevelDecisions.length > 0) {
+    overallDecisionEnvironment = 'managed_adjustment_environment';
+  }
+
+  if (!issueLevelDecisions.length) {
+    notes.push('No visible retail issues available for decision framing.');
+  }
+
+  return {
+    schema_version: '1.0',
+    overall_decision_environment: overallDecisionEnvironment,
+    portfolio_priorities: portfolioPriorities,
+    issue_level_decisions: issueLevelDecisions,
+    portfolio_risks: portfolioRisks,
+    data_quality_notes: Array.from(new Set(notes))
+  };
+}
+
 function buildTotalOpportunity(actions = []) {
   let grossLow = 0;
   let grossHigh = 0;
@@ -4289,6 +4492,11 @@ async function handler(req, res) {
         strRows
       }
     );
+    const decisionFramingSummary = buildDecisionFramingSummary(
+      enrichedIssues,
+      financialQuantificationSummary,
+      commercialContextSummary
+    );
 
     const enginePayload = {
       success: true,
@@ -4314,6 +4522,8 @@ async function handler(req, res) {
       financial_quantification_summary: financialQuantificationSummary,
       /** Hidden issue-level commercial context and narrative framing (backend-only). */
       commercial_context_summary: commercialContextSummary,
+      /** Hidden decision framing layer (what type of decision is needed, not execution). */
+      decision_framing_summary: decisionFramingSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
