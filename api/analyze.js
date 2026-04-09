@@ -4476,6 +4476,143 @@ function buildActionIntelligenceSummary(issues, decisionSummary, contextSummary,
   };
 }
 
+function buildControlledAction(issue, actionIntel, decision, context, quant) {
+  const family = (issue?.issue_family || '').toString();
+  const ai = actionIntel || {};
+  const d = decision || {};
+  const c = context || {};
+  const q = quant || {};
+  const qs = q.quantified_signals || {};
+
+  const titleByFocus = {
+    rate_positioning: 'Recalibrate transient rate positioning',
+    discount_structure: 'Tighten discount structure',
+    conversion_path: 'Strengthen conversion efficiency',
+    demand_stimulation: 'Strengthen demand capture posture',
+    channel_mix: 'Rebalance channel mix quality',
+    inventory_control: 'Protect inventory value quality',
+    monitoring: 'Monitor retail signal progression'
+  };
+  const actionTitle = titleByFocus[ai.action_focus] || 'Refine commercial execution focus';
+
+  const summaryByFocus = {
+    rate_positioning:
+      'Refine pricing posture to better align value perception with observed demand response.',
+    discount_structure:
+      'Reassess discount architecture to improve volume efficiency without unnecessary rate dilution.',
+    conversion_path:
+      'Reduce conversion friction across core retail journeys to improve demand-to-booking capture.',
+    demand_stimulation:
+      'Prioritize demand stimulation with disciplined execution in softer retail windows.',
+    channel_mix:
+      'Rebalance channel and segment mix toward stronger contribution quality.',
+    inventory_control:
+      'Protect inventory value under constrained conditions while preserving commercial flexibility.',
+    monitoring:
+      'Maintain close monitoring while validating whether current signals persist.'
+  };
+  const actionSummary = summaryByFocus[ai.action_focus] || 'Use a controlled commercial adjustment posture.';
+
+  const rev = qs.revenue_range;
+  const rn = qs.room_nights_at_risk;
+  const quantText = rev
+    ? `Estimated revenue-at-risk range is ${rev.min}-${rev.max}.`
+    : rn != null
+      ? `Estimated room nights at risk are ~${rn}.`
+      : 'Quantified scale is limited; directional signals should still be monitored.';
+  const contextText = c?.commercial_situation
+    ? `Context indicates ${String(c.commercial_situation).replace(/_/g, ' ')}.`
+    : 'Context remains mixed.';
+  const decisionText = d?.decision_type
+    ? `Decision framing points to ${String(d.decision_type).replace(/_/g, ' ')}.`
+    : 'Decision framing remains monitoring-oriented.';
+  const actionRationale = `${quantText} ${contextText} ${decisionText}`;
+
+  const maxRev = Number(rev?.max || 0);
+  const rnRisk = Number(rn || 0);
+  const impactBand = q?.impact_band || 'low';
+  const urgency = d?.urgency_level || 'low';
+  let priority = 'low';
+  if ((impactBand === 'high' && urgency !== 'low') || maxRev >= 15000 || rnRisk >= 120) priority = 'high';
+  else if (impactBand === 'medium' || urgency === 'medium' || maxRev >= 5000 || rnRisk >= 40) priority = 'medium';
+
+  const confParts = [q?.confidence || 'low', c?.confidence || 'low', d?.confidence || 'low', ai?.confidence || 'low'];
+  const highCount = confParts.filter((x) => x === 'high').length;
+  const lowCount = confParts.filter((x) => x === 'low').length;
+  let confidence = 'medium';
+  if (highCount >= 3) confidence = 'high';
+  else if (lowCount >= 2) confidence = 'low';
+
+  // Conservative downgrade in weak-signal situations.
+  if (
+    ai?.action_focus === 'monitoring' ||
+    (family === 'visibility_gap' && confidence === 'low' && impactBand === 'low')
+  ) {
+    priority = 'low';
+  }
+
+  return {
+    action_title: actionTitle,
+    action_summary: actionSummary,
+    action_rationale: actionRationale,
+    priority,
+    confidence
+  };
+}
+
+function applyControlledActionsToRetailIssues(
+  issues,
+  actionIntelligenceSummary,
+  decisionFramingSummary,
+  commercialContextSummary,
+  financialQuantificationSummary
+) {
+  const list = Array.isArray(issues) ? issues : [];
+  const actionRows = Array.isArray(actionIntelligenceSummary?.issue_level_actions)
+    ? actionIntelligenceSummary.issue_level_actions
+    : [];
+  const decisionRows = Array.isArray(decisionFramingSummary?.issue_level_decisions)
+    ? decisionFramingSummary.issue_level_decisions
+    : [];
+  const contextRows = Array.isArray(commercialContextSummary?.issue_level_context)
+    ? commercialContextSummary.issue_level_context
+    : [];
+  const quantRows = Array.isArray(financialQuantificationSummary?.issue_level_quantification)
+    ? financialQuantificationSummary.issue_level_quantification
+    : [];
+
+  const actionByKey = new Map(actionRows.map((x) => [x.finding_key, x]));
+  const decisionByKey = new Map(decisionRows.map((x) => [x.finding_key, x]));
+  const contextByKey = new Map(contextRows.map((x) => [x.finding_key, x]));
+  const quantByKey = new Map(quantRows.map((x) => [x.finding_key, x]));
+
+  return list.map((issue) => {
+    if ((issue?.segment || 'retail') !== 'retail') return issue;
+    const actionIntel = actionByKey.get(issue.finding_key);
+    const decision = decisionByKey.get(issue.finding_key);
+    const context = contextByKey.get(issue.finding_key);
+    const quant = quantByKey.get(issue.finding_key);
+    if (!actionIntel && !decision && !context && !quant) return issue;
+
+    const controlled = buildControlledAction(issue, actionIntel, decision, context, quant);
+    const updatedActions = (issue.actions || []).map((act) => ({
+      ...act,
+      title: controlled.action_title,
+      description: `${controlled.action_summary} ${controlled.action_rationale}`,
+      priority: controlled.priority,
+      confidence: controlled.confidence
+    }));
+
+    return {
+      ...issue,
+      priority: controlled.priority,
+      expected_outcome: controlled.action_summary,
+      root_cause: controlled.action_rationale,
+      actions: updatedActions
+    };
+  });
+}
+
 function buildTotalOpportunity(actions = []) {
   let grossLow = 0;
   let grossHigh = 0;
@@ -4759,6 +4896,16 @@ async function handler(req, res) {
       commercialContextSummary,
       financialQuantificationSummary
     );
+    if ((focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0) {
+      enrichedIssues = applyControlledActionsToRetailIssues(
+        enrichedIssues,
+        actionIntelligenceSummary,
+        decisionFramingSummary,
+        commercialContextSummary,
+        financialQuantificationSummary
+      );
+      enrichedActions = flattenIssuesToLegacyActions(enrichedIssues);
+    }
 
     const enginePayload = {
       success: true,
