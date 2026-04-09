@@ -3485,10 +3485,41 @@ function estimateRetailIssueImpact(issue, contextData) {
   const avgOcc = toFiniteNumberOrNull(cardMetrics.avgOcc ?? diagnosis?.metrics?.avgOcc);
 
   const adrValues = pmsRows
-    .map((row) => toFiniteNumberOrNull(row.adr ?? row.ADR))
+    .map((row) =>
+      toFiniteNumberOrNull(
+        row.adr ??
+          row.ADR ??
+          row['Average Rate'] ??
+          row['Avg Rate'] ??
+          row['Average ADR'] ??
+          row.adr_ty ??
+          row['ADR TY']
+      )
+    )
     .filter((v) => v !== null && v > 0);
   const rnValues = pmsRows
-    .map((row) => toFiniteNumberOrNull(row.room_nights ?? row.roomNights ?? row.rn ?? row.RN))
+    .map((row) =>
+      toFiniteNumberOrNull(
+        row.room_nights ??
+          row.roomNights ??
+          row.rn ??
+          row.RN ??
+          row['room nights on books ty'] ??
+          row['Room Nights On Books TY'] ??
+          row.rn_on_books_ty
+      )
+    )
+    .filter((v) => v !== null && v > 0);
+  const revenueValues = pmsRows
+    .map((row) =>
+      toFiniteNumberOrNull(
+        row.revenue ??
+          row.Revenue ??
+          row['booked revenue ty'] ??
+          row['Booked Revenue TY'] ??
+          row.booked_revenue_ty
+      )
+    )
     .filter((v) => v !== null && v > 0);
 
   const avgADR =
@@ -3499,6 +3530,17 @@ function estimateRetailIssueImpact(issue, contextData) {
     rnValues.length > 0
       ? rnValues.reduce((a, b) => a + b, 0)
       : null;
+  const totalRevenueTY =
+    revenueValues.length > 0
+      ? revenueValues.reduce((a, b) => a + b, 0)
+      : null;
+
+  const effectiveADR =
+    avgADR !== null
+      ? avgADR
+      : totalRevenueTY !== null && totalRN !== null && totalRN > 0
+        ? totalRevenueTY / totalRN
+        : null;
 
   const indexGap =
     avgMPI !== null
@@ -3535,14 +3577,14 @@ function estimateRetailIssueImpact(issue, contextData) {
       : null;
 
   let revenueRange = null;
-  if (roomNightsAtRisk !== null && roomNightsAtRisk > 0 && avgADR !== null) {
+  if (roomNightsAtRisk !== null && roomNightsAtRisk > 0 && effectiveADR !== null) {
     // Conservative range: wide enough to avoid fake precision.
-    const min = Math.round(roomNightsAtRisk * avgADR * 0.55);
-    const max = Math.round(roomNightsAtRisk * avgADR * 0.95);
+    const min = Math.round(roomNightsAtRisk * effectiveADR * 0.55);
+    const max = Math.round(roomNightsAtRisk * effectiveADR * 0.95);
     revenueRange = { min, max };
   }
 
-  const dataPoints = [avgMPI, avgARI, avgRGI, avgOcc, avgADR, totalRN].filter((v) => v !== null).length;
+  const dataPoints = [avgMPI, avgARI, avgRGI, avgOcc, effectiveADR, totalRN].filter((v) => v !== null).length;
   let confidence = 'low';
   if (dataPoints >= 5 && revenueRange) confidence = 'high';
   else if (dataPoints >= 3) confidence = 'medium';
@@ -3600,7 +3642,9 @@ function interpretCommercialImpact(issue, quantifiedSignals) {
 }
 
 function buildFinancialQuantificationSummary(issues, contextData) {
-  const list = Array.isArray(issues) ? issues : [];
+  const list = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
   const out = [];
   const notes = [];
 
@@ -3617,8 +3661,20 @@ function buildFinancialQuantificationSummary(issues, contextData) {
   }
 
   const withRevenue = out.filter((r) => r.quantified_signals?.revenue_range?.max != null);
+  const withRoomNights = out.filter((r) => r.quantified_signals?.room_nights_at_risk != null);
+  const withIndexGap = out.filter((r) => r.quantified_signals?.index_gap != null);
+  const withOccGap = out.filter((r) => r.quantified_signals?.occupancy_gap != null);
   if (!withRevenue.length && out.length > 0) {
     notes.push('Revenue ranges are unavailable for most issues due to partial PMS/ADR/RN coverage.');
+  }
+  if (out.length > 0 && withRoomNights.length < Math.ceil(out.length / 2)) {
+    notes.push('Room-nights-at-risk coverage is limited; PMS room-night fields are sparse or inconsistent.');
+  }
+  if (out.length > 0 && withIndexGap.length < Math.ceil(out.length / 2)) {
+    notes.push('Index-gap coverage is limited; MPI/RGI metrics are missing for several issues.');
+  }
+  if (out.length > 0 && withOccGap.length < Math.ceil(out.length / 2)) {
+    notes.push('Occupancy-gap coverage is limited; STR occupancy metrics are partially missing.');
   }
   if (!out.length) {
     notes.push('No retail issues were available for financial quantification.');
@@ -3627,9 +3683,13 @@ function buildFinancialQuantificationSummary(issues, contextData) {
   const strongestHiddenLosses = [...out]
     .filter((r) => (r.issue_family || '') !== 'missed_pricing_opportunity')
     .sort(
-      (a, b) =>
-        Number(b.quantified_signals?.revenue_range?.max || 0) -
-        Number(a.quantified_signals?.revenue_range?.max || 0)
+      (a, b) => {
+        const d =
+          Number(b.quantified_signals?.revenue_range?.max || 0) -
+          Number(a.quantified_signals?.revenue_range?.max || 0);
+        if (d !== 0) return d;
+        return String(a.finding_key || '').localeCompare(String(b.finding_key || ''));
+      }
     )
     .slice(0, 8)
     .map((r) => ({
@@ -3643,9 +3703,13 @@ function buildFinancialQuantificationSummary(issues, contextData) {
   const strongestHiddenOpportunities = [...out]
     .filter((r) => (r.issue_family || '') === 'missed_pricing_opportunity')
     .sort(
-      (a, b) =>
-        Number(b.quantified_signals?.revenue_range?.max || 0) -
-        Number(a.quantified_signals?.revenue_range?.max || 0)
+      (a, b) => {
+        const d =
+          Number(b.quantified_signals?.revenue_range?.max || 0) -
+          Number(a.quantified_signals?.revenue_range?.max || 0);
+        if (d !== 0) return d;
+        return String(a.finding_key || '').localeCompare(String(b.finding_key || ''));
+      }
     )
     .slice(0, 8)
     .map((r) => ({
