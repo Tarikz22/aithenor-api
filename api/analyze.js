@@ -4968,29 +4968,112 @@ function buildDecisionArbitrationSummary(
   };
 }
 
+function toSentence(text, fallback) {
+  const v = (text || fallback || '').toString().trim();
+  if (!v) return fallback || '';
+  return /[.!?]$/.test(v) ? v : `${v}.`;
+}
+
+function buildEnforcedDecisionLine(issue, arbitration, portfolioPrimaryDriver) {
+  const role = arbitration?.arbitration_role || 'monitor';
+  const adapted = toSentence(arbitration?.adapted_action_posture, null);
+  const primary = portfolioPrimaryDriver || arbitration?.primary_driver || 'primary strategy';
+
+  if (role === 'primary') {
+    return adapted || toSentence(issue?.expected_outcome, 'Execute the primary strategy for this cycle');
+  }
+  if (role === 'supporting') {
+    return adapted || `Align this issue to the ${primary} strategy; keep this lever tactical only.`;
+  }
+  if (role === 'suppressed') {
+    return adapted || `Defer active changes on this lever until ${primary} execution is evaluated.`;
+  }
+  return 'Monitor this issue during the current strategy window.';
+}
+
+function buildEnforcedExecutionActions(issue, arbitration, portfolioPrimaryDriver) {
+  const role = arbitration?.arbitration_role || 'monitor';
+  const primary = portfolioPrimaryDriver || arbitration?.primary_driver || 'primary strategy';
+  const adapted = arbitration?.adapted_action_posture || '';
+
+  if (role === 'primary') {
+    return (issue?.actions || []).map((a) => toSentence(a?.description, 'Execute primary strategy steps'));
+  }
+  if (role === 'supporting') {
+    return [
+      toSentence(adapted, `Keep this lever tactical while ${primary} remains primary`),
+      toSentence(`Avoid independent moves that conflict with ${primary}`, 'Avoid conflicting secondary moves'),
+      toSentence(`Reassess this lever after ${primary} response is observed`, 'Reassess after primary response')
+    ];
+  }
+  if (role === 'suppressed') {
+    return [
+      toSentence(`Defer active changes on this lever during the ${primary} reset window`, 'Defer active changes'),
+      toSentence(`Hold broad tactical shifts until ${primary} impact is measured`, 'Hold broad tactical shifts'),
+      toSentence('Revisit once primary-cycle evidence is available', 'Revisit after primary-cycle evidence')
+    ];
+  }
+  return [
+    'Track pickup and share response during the current strategy window.',
+    `Revisit this issue after the ${primary} adjustment window.`
+  ];
+}
+
 function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummary) {
   const list = Array.isArray(issues) ? issues : [];
   const arbRows = Array.isArray(decisionArbitrationSummary?.issue_level_arbitration)
     ? decisionArbitrationSummary.issue_level_arbitration
     : [];
   const arbByKey = new Map(arbRows.map((x) => [x.finding_key, x]));
+  const portfolioPrimaryDriver = decisionArbitrationSummary?.portfolio_primary_driver || null;
 
   return list.map((issue) => {
     const arb = arbByKey.get(issue.finding_key);
     if (!arb || (issue?.segment || 'retail') !== 'retail') return issue;
-    const posturePrefix =
-      arb.adapted_action_posture && arb.arbitration_role !== 'primary'
-        ? `Arbitrated posture: ${arb.adapted_action_posture}. `
-        : '';
+
+    const enforcedDecisionLine = buildEnforcedDecisionLine(issue, arb, portfolioPrimaryDriver);
+    const enforcedExecutionActions = buildEnforcedExecutionActions(issue, arb, portfolioPrimaryDriver);
+    const enforcementReason =
+      arb.suppression_reason ||
+      (arb.arbitration_role === 'primary'
+        ? 'aligned_with_primary_driver'
+        : `aligned_to_${portfolioPrimaryDriver || arb.primary_driver || 'portfolio_strategy'}`);
+
+    const existingActions = issue.actions || [];
+    const targetLen = Math.max(1, Math.min(3, enforcedExecutionActions.length || existingActions.length || 1));
+    const normalized = [];
+    for (let i = 0; i < targetLen; i += 1) {
+      const base = existingActions[i] || existingActions[0] || {};
+      normalized.push({
+        ...base,
+        title:
+          arb.arbitration_role === 'monitor'
+            ? 'Monitor this issue'
+            : arb.arbitration_role === 'suppressed'
+              ? 'Defer conflicting execution'
+              : arb.arbitration_role === 'supporting'
+                ? 'Execute supporting posture'
+                : base.title || issue.title,
+        description: enforcedExecutionActions[i] || enforcedExecutionActions[enforcedExecutionActions.length - 1],
+        priority:
+          arb.arbitration_role === 'suppressed' || arb.arbitration_role === 'monitor'
+            ? 'low'
+            : issue.priority || base.priority || 'medium',
+        confidence: arb.confidence || base.confidence || 'medium'
+      });
+    }
+
     return {
       ...issue,
       arbitration_role: arb.arbitration_role,
-      adapted_action_posture: arb.adapted_action_posture,
       primary_driver: arb.primary_driver,
-      actions: (issue.actions || []).map((a) => ({
-        ...a,
-        description: `${posturePrefix}${a.description || ''}`.trim()
-      }))
+      adapted_action_posture: arb.adapted_action_posture,
+      enforced_decision_line: enforcedDecisionLine,
+      enforced_execution_actions: enforcedExecutionActions,
+      enforcement_reason: enforcementReason,
+      root_cause: enforcedDecisionLine,
+      expected_outcome: enforcedDecisionLine,
+      actions: normalized
     };
   });
 }
