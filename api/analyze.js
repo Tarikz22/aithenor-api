@@ -4613,6 +4613,388 @@ function applyControlledActionsToRetailIssues(
   });
 }
 
+function mapRetailIssueFamilyToDriver(issueFamily, decisionType, contextFlags = []) {
+  const fam = (issueFamily || '').toString();
+  const dec = (decisionType || '').toString();
+  const flags = Array.isArray(contextFlags) ? contextFlags : [];
+
+  if (fam === 'pricing_resistance' || fam === 'missed_pricing_opportunity') return 'pricing';
+  if (fam === 'discount_inefficiency') return 'discounting';
+  if (fam === 'mix_constraint') return flags.includes('channel_dependency') ? 'distribution' : 'pricing';
+  if (fam === 'visibility_gap') {
+    if (dec === 'conversion_optimization') return 'conversion';
+    if (dec === 'demand_generation') return 'distribution';
+    return 'conversion';
+  }
+
+  if (dec === 'pricing_adjustment') return 'pricing';
+  if (dec === 'discount_strategy_review') return 'discounting';
+  if (dec === 'conversion_optimization') return 'conversion';
+  if (dec === 'demand_generation' || dec === 'mix_rebalancing') return 'distribution';
+  return 'monitoring';
+}
+
+function buildRetailDriverScorecard(
+  issues,
+  quantSummary,
+  contextSummary,
+  decisionSummary,
+  actionSummary
+) {
+  const retailIssues = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
+  const quantByKey = new Map(
+    (Array.isArray(quantSummary?.issue_level_quantification) ? quantSummary.issue_level_quantification : [])
+      .map((q) => [q.finding_key, q])
+  );
+  const contextByKey = new Map(
+    (Array.isArray(contextSummary?.issue_level_context) ? contextSummary.issue_level_context : [])
+      .map((c) => [c.finding_key, c])
+  );
+  const decisionByKey = new Map(
+    (Array.isArray(decisionSummary?.issue_level_decisions) ? decisionSummary.issue_level_decisions : [])
+      .map((d) => [d.finding_key, d])
+  );
+  const actionByKey = new Map(
+    (Array.isArray(actionSummary?.issue_level_actions) ? actionSummary.issue_level_actions : [])
+      .map((a) => [a.finding_key, a])
+  );
+
+  const driverStats = new Map();
+  const confScore = { low: 1, medium: 2, high: 3 };
+  const scoreImpact = { low: 1.0, medium: 2.0, high: 3.0 };
+  const scoreUrgency = { low: 1.0, medium: 1.8, high: 2.6 };
+
+  for (const issue of retailIssues) {
+    const q = quantByKey.get(issue.finding_key) || {};
+    const c = contextByKey.get(issue.finding_key) || {};
+    const d = decisionByKey.get(issue.finding_key) || {};
+    const a = actionByKey.get(issue.finding_key) || {};
+
+    const driver = mapRetailIssueFamilyToDriver(issue.issue_family, d.decision_type, c.context_flags);
+    if (!driverStats.has(driver)) {
+      driverStats.set(driver, {
+        driver,
+        weighted_score: 0,
+        issue_count: 0,
+        total_estimated_impact: 0,
+        conf_acc: 0
+      });
+    }
+    const bucket = driverStats.get(driver);
+    const maxRev = Number(q?.quantified_signals?.revenue_range?.max || 0);
+    const rnRisk = Number(q?.quantified_signals?.room_nights_at_risk || 0);
+    const impactProxy = maxRev > 0 ? maxRev : rnRisk * 120;
+    const impactBand = q?.impact_band || 'low';
+    const urgency = d?.urgency_level || 'low';
+
+    const blendedConfidence = Math.max(
+      confScore[q?.confidence || 'low'],
+      confScore[c?.confidence || 'low'],
+      confScore[d?.confidence || 'low'],
+      confScore[a?.confidence || 'low']
+    );
+
+    const weighted =
+      scoreImpact[impactBand] * scoreUrgency[urgency] * (0.9 + blendedConfidence * 0.2) +
+      Math.min(4, impactProxy / 10000);
+
+    bucket.weighted_score += weighted;
+    bucket.issue_count += 1;
+    bucket.total_estimated_impact += impactProxy > 0 ? impactProxy : 0;
+    bucket.conf_acc += blendedConfidence;
+  }
+
+  return Array.from(driverStats.values())
+    .map((row) => ({
+      driver: row.driver,
+      weighted_score: Number(row.weighted_score.toFixed(2)),
+      issue_count: row.issue_count,
+      total_estimated_impact: row.total_estimated_impact > 0 ? Math.round(row.total_estimated_impact) : null,
+      average_confidence:
+        row.issue_count > 0
+          ? row.conf_acc / row.issue_count >= 2.5
+            ? 'high'
+            : row.conf_acc / row.issue_count >= 1.7
+              ? 'medium'
+              : 'low'
+          : 'low'
+    }))
+    .sort((a, b) => {
+      if (b.weighted_score !== a.weighted_score) return b.weighted_score - a.weighted_score;
+      const bi = Number(b.total_estimated_impact || 0);
+      const ai = Number(a.total_estimated_impact || 0);
+      if (bi !== ai) return bi - ai;
+      const rank = { high: 3, medium: 2, low: 1 };
+      const bc = rank[b.average_confidence] || 1;
+      const ac = rank[a.average_confidence] || 1;
+      if (bc !== ac) return bc - ac;
+      if (b.issue_count !== a.issue_count) return b.issue_count - a.issue_count;
+      return String(a.driver).localeCompare(String(b.driver));
+    });
+}
+
+function selectPrimaryRetailDriver(driverScorecard) {
+  const list = Array.isArray(driverScorecard) ? driverScorecard : [];
+  if (!list.length) return null;
+  return list[0].driver || null;
+}
+
+function deriveAdaptedActionPosture(issue, primaryDriver) {
+  const fam = (issue?.issue_family || '').toString();
+  if (!primaryDriver) return 'monitor this issue while primary strategy is clarified';
+  if (primaryDriver === 'pricing') {
+    if (fam === 'discount_inefficiency') return 'remove public discount leakage after rate correction';
+    if (fam === 'visibility_gap') return 'support pricing correction with conversion readiness, avoid broad discount expansion';
+    return 'align execution to pricing-first strategy';
+  }
+  if (primaryDriver === 'discounting') {
+    if (fam === 'pricing_resistance') return 'hold broad rate moves until discount architecture is stabilized';
+    return 'prioritize discount discipline and keep other levers secondary';
+  }
+  if (primaryDriver === 'conversion') {
+    if (fam === 'pricing_resistance') return 'hold broad pricing moves until conversion friction is addressed';
+    return 'prioritize conversion repair before secondary rate/discount shifts';
+  }
+  if (primaryDriver === 'distribution') {
+    return 'prioritize mix/distribution alignment before broad pricing/discount changes';
+  }
+  return 'monitor this issue while primary strategy is executed';
+}
+
+function resolveRetailDriverConflict(issue, primaryDriver, contextData) {
+  const issueDriver = contextData?.issueDriver || 'monitoring';
+  const decisionType = contextData?.decisionType || 'monitoring_only';
+  if (!primaryDriver) {
+    return {
+      arbitration_role: 'monitor',
+      suppression_reason: 'no_primary_driver_selected',
+      adapted_action_posture: 'monitor this issue while strategy hierarchy is established'
+    };
+  }
+
+  if (issueDriver === primaryDriver) {
+    return {
+      arbitration_role: 'primary',
+      suppression_reason: null,
+      adapted_action_posture: deriveAdaptedActionPosture(issue, primaryDriver)
+    };
+  }
+
+  // Controlled conflict rules
+  if (primaryDriver === 'pricing' && issueDriver === 'discounting') {
+    return {
+      arbitration_role: 'supporting',
+      suppression_reason: 'avoid independent discount expansion while pricing correction is primary',
+      adapted_action_posture: 'remove public discount leakage after rate correction'
+    };
+  }
+  if (primaryDriver === 'discounting' && issueDriver === 'pricing') {
+    return {
+      arbitration_role: 'supporting',
+      suppression_reason: 'avoid simultaneous broad rate and discount shifts in same recovery window',
+      adapted_action_posture: 'support discount discipline first; keep pricing tactical'
+    };
+  }
+  if (primaryDriver === 'conversion' && (issueDriver === 'pricing' || issueDriver === 'discounting')) {
+    return {
+      arbitration_role: 'suppressed',
+      suppression_reason: 'conversion friction is dominant; defer broad pricing/discount shifts',
+      adapted_action_posture: deriveAdaptedActionPosture(issue, primaryDriver)
+    };
+  }
+  if (primaryDriver === 'distribution' && (issueDriver === 'pricing' || issueDriver === 'discounting')) {
+    return {
+      arbitration_role: 'supporting',
+      suppression_reason: 'distribution/mix posture leads this cycle; pricing/discounting are secondary',
+      adapted_action_posture: deriveAdaptedActionPosture(issue, primaryDriver)
+    };
+  }
+
+  if (decisionType === 'monitoring_only') {
+    return {
+      arbitration_role: 'monitor',
+      suppression_reason: 'signal_strength_insufficient_for_primary_execution_role',
+      adapted_action_posture: 'monitor this issue while primary strategy is executed'
+    };
+  }
+
+  return {
+    arbitration_role: 'supporting',
+    suppression_reason: null,
+    adapted_action_posture: deriveAdaptedActionPosture(issue, primaryDriver)
+  };
+}
+
+function arbitrateRetailIssuesAgainstPrimaryDriver(issues, primaryDriver, contextData) {
+  const retailIssues = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
+  const decisionByKey = contextData?.decisionByKey || new Map();
+  const contextByKey = contextData?.contextByKey || new Map();
+  const quantByKey = contextData?.quantByKey || new Map();
+
+  return retailIssues.map((issue) => {
+    const d = decisionByKey.get(issue.finding_key) || {};
+    const c = contextByKey.get(issue.finding_key) || {};
+    const q = quantByKey.get(issue.finding_key) || {};
+    const issueDriver = mapRetailIssueFamilyToDriver(issue.issue_family, d.decision_type, c.context_flags);
+    const resolved = resolveRetailDriverConflict(issue, primaryDriver, {
+      issueDriver,
+      decisionType: d.decision_type,
+      context: c,
+      quantification: q
+    });
+    const confRank = { low: 1, medium: 2, high: 3 };
+    const maxRank = Math.max(confRank[d.confidence || 'low'], confRank[c.confidence || 'low'], confRank[q.confidence || 'low']);
+    const confidence = maxRank >= 3 ? 'high' : maxRank >= 2 ? 'medium' : 'low';
+    return {
+      finding_key: issue.finding_key,
+      issue_family: issue.issue_family,
+      original_driver: issue.driver || 'unknown',
+      primary_driver: issueDriver,
+      arbitration_role: resolved.arbitration_role,
+      suppression_reason: resolved.suppression_reason,
+      adapted_action_posture: resolved.adapted_action_posture,
+      confidence
+    };
+  });
+}
+
+function buildRetailGlobalStrategyStatement(primaryDriver, driverScorecard, issues) {
+  const issueCount = Array.isArray(issues) ? issues.length : 0;
+  if (!primaryDriver) {
+    return {
+      global_strategy_statement:
+        'Current cycle lacks a clear dominant retail driver; maintain monitoring posture until stronger signal hierarchy emerges.',
+      global_execution_principles: [
+        'One primary commercial lever should lead each cycle when evidence is sufficient.',
+        'Avoid conflicting tactical moves while signal confidence is low.',
+        'Escalate from monitoring only when impact and confidence strengthen.'
+      ]
+    };
+  }
+  const top = (Array.isArray(driverScorecard) ? driverScorecard : []).find((d) => d.driver === primaryDriver);
+  const impactText = top?.total_estimated_impact ? `estimated impact ~${top.total_estimated_impact}` : 'impact evidence available';
+
+  const strategyByDriver = {
+    pricing: 'Current cycle should prioritize pricing correction before secondary discount or conversion adjustments.',
+    discounting: 'Current cycle should prioritize discount discipline before broader pricing or distribution shifts.',
+    conversion: 'Current cycle should prioritize conversion repair before broader rate or discount intervention.',
+    distribution: 'Current cycle should prioritize channel/mix alignment before broad pricing and discount moves.',
+    monitoring: 'Current cycle should prioritize monitoring while preserving strategic flexibility.'
+  };
+
+  return {
+    global_strategy_statement:
+      `${strategyByDriver[primaryDriver] || strategyByDriver.monitoring} ` +
+      `Driver strength is led by ${primaryDriver} across ${issueCount} visible issues (${impactText}).`,
+    global_execution_principles: [
+      'One primary commercial lever should lead this cycle.',
+      'Secondary tactics must align to the primary strategy.',
+      'Conflicting rate and discount moves should be avoided in the same recovery window.'
+    ]
+  };
+}
+
+function buildDecisionArbitrationSummary(
+  issues,
+  financialQuantificationSummary,
+  commercialContextSummary,
+  decisionFramingSummary,
+  actionIntelligenceSummary
+) {
+  const retailIssues = (Array.isArray(issues) ? issues : []).filter(
+    (issue) => (issue?.segment || 'retail') === 'retail'
+  );
+  const quantRows = Array.isArray(financialQuantificationSummary?.issue_level_quantification)
+    ? financialQuantificationSummary.issue_level_quantification
+    : [];
+  const contextRows = Array.isArray(commercialContextSummary?.issue_level_context)
+    ? commercialContextSummary.issue_level_context
+    : [];
+  const decisionRows = Array.isArray(decisionFramingSummary?.issue_level_decisions)
+    ? decisionFramingSummary.issue_level_decisions
+    : [];
+  const actionRows = Array.isArray(actionIntelligenceSummary?.issue_level_actions)
+    ? actionIntelligenceSummary.issue_level_actions
+    : [];
+
+  const quantByKey = new Map(quantRows.map((x) => [x.finding_key, x]));
+  const contextByKey = new Map(contextRows.map((x) => [x.finding_key, x]));
+  const decisionByKey = new Map(decisionRows.map((x) => [x.finding_key, x]));
+  const actionByKey = new Map(actionRows.map((x) => [x.finding_key, x]));
+
+  const driverScorecard = buildRetailDriverScorecard(
+    retailIssues,
+    financialQuantificationSummary,
+    commercialContextSummary,
+    decisionFramingSummary,
+    actionIntelligenceSummary
+  );
+  const portfolioPrimaryDriver = selectPrimaryRetailDriver(driverScorecard);
+  const issueLevelArbitration = arbitrateRetailIssuesAgainstPrimaryDriver(
+    retailIssues,
+    portfolioPrimaryDriver,
+    { decisionByKey, contextByKey, quantByKey, actionByKey }
+  );
+
+  const suppressedConflicts = issueLevelArbitration
+    .filter((row) => row.arbitration_role === 'suppressed')
+    .map((row) => ({
+      finding_key: row.finding_key,
+      original_driver: row.original_driver,
+      suppression_reason: row.suppression_reason || 'conflict_with_primary_driver'
+    }));
+
+  const { global_strategy_statement, global_execution_principles } =
+    buildRetailGlobalStrategyStatement(portfolioPrimaryDriver, driverScorecard, retailIssues);
+
+  const notes = [];
+  if (!driverScorecard.length) notes.push('No retail driver scorecard rows were produced for arbitration.');
+  if (!portfolioPrimaryDriver) notes.push('Primary driver could not be selected deterministically.');
+  if (!issueLevelArbitration.length) notes.push('No retail issues available for arbitration layer.');
+
+  return {
+    schema_version: '1.0',
+    portfolio_primary_driver: portfolioPrimaryDriver,
+    portfolio_driver_scores: driverScorecard,
+    issue_level_arbitration: issueLevelArbitration,
+    global_strategy_statement,
+    global_execution_principles,
+    suppressed_conflicts: suppressedConflicts,
+    data_quality_notes: notes
+  };
+}
+
+function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummary) {
+  const list = Array.isArray(issues) ? issues : [];
+  const arbRows = Array.isArray(decisionArbitrationSummary?.issue_level_arbitration)
+    ? decisionArbitrationSummary.issue_level_arbitration
+    : [];
+  const arbByKey = new Map(arbRows.map((x) => [x.finding_key, x]));
+
+  return list.map((issue) => {
+    const arb = arbByKey.get(issue.finding_key);
+    if (!arb || (issue?.segment || 'retail') !== 'retail') return issue;
+    const posturePrefix =
+      arb.adapted_action_posture && arb.arbitration_role !== 'primary'
+        ? `Arbitrated posture: ${arb.adapted_action_posture}. `
+        : '';
+    return {
+      ...issue,
+      arbitration_role: arb.arbitration_role,
+      adapted_action_posture: arb.adapted_action_posture,
+      primary_driver: arb.primary_driver,
+      actions: (issue.actions || []).map((a) => ({
+        ...a,
+        description: `${posturePrefix}${a.description || ''}`.trim()
+      }))
+    };
+  });
+}
+
 function buildTotalOpportunity(actions = []) {
   let grossLow = 0;
   let grossHigh = 0;
@@ -4896,6 +5278,13 @@ async function handler(req, res) {
       commercialContextSummary,
       financialQuantificationSummary
     );
+    const decisionArbitrationSummary = buildDecisionArbitrationSummary(
+      enrichedIssues,
+      financialQuantificationSummary,
+      commercialContextSummary,
+      decisionFramingSummary,
+      actionIntelligenceSummary
+    );
     if ((focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0) {
       enrichedIssues = applyControlledActionsToRetailIssues(
         enrichedIssues,
@@ -4903,6 +5292,10 @@ async function handler(req, res) {
         decisionFramingSummary,
         commercialContextSummary,
         financialQuantificationSummary
+      );
+      enrichedIssues = applyArbitrationOverlayToRetailIssues(
+        enrichedIssues,
+        decisionArbitrationSummary
       );
       enrichedActions = flattenIssuesToLegacyActions(enrichedIssues);
     }
@@ -4935,6 +5328,8 @@ async function handler(req, res) {
       decision_framing_summary: decisionFramingSummary,
       /** Hidden action intelligence layer (guided, non-prescriptive, backend-only). */
       action_intelligence_summary: actionIntelligenceSummary,
+      /** Hidden decision arbitration layer to resolve cross-issue strategic conflicts. */
+      decision_arbitration_summary: decisionArbitrationSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
     };
