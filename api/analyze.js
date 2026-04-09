@@ -3477,6 +3477,7 @@ function estimateRetailIssueImpact(issue, contextData) {
   const issueFamily = (issue?.issue_family || '').toString();
   const diagnosis = contextData?.diagnosis || {};
   const pmsRows = Array.isArray(contextData?.pmsRows) ? contextData.pmsRows : [];
+  const pmsPaceRows = Array.isArray(contextData?.pmsPaceRows) ? contextData.pmsPaceRows : [];
 
   const cardMetrics = issue?.card_metrics || {};
   const avgMPI = toFiniteNumberOrNull(cardMetrics.avgMPI ?? diagnosis?.metrics?.avgMPI);
@@ -3484,7 +3485,7 @@ function estimateRetailIssueImpact(issue, contextData) {
   const avgRGI = toFiniteNumberOrNull(cardMetrics.avgRGI ?? diagnosis?.metrics?.avgRGI);
   const avgOcc = toFiniteNumberOrNull(cardMetrics.avgOcc ?? diagnosis?.metrics?.avgOcc);
 
-  const adrValues = pmsRows
+  const adrValuesRaw = pmsRows
     .map((row) =>
       toFiniteNumberOrNull(
         row.adr ??
@@ -3497,7 +3498,7 @@ function estimateRetailIssueImpact(issue, contextData) {
       )
     )
     .filter((v) => v !== null && v > 0);
-  const rnValues = pmsRows
+  const rnValuesRaw = pmsRows
     .map((row) =>
       toFiniteNumberOrNull(
         row.room_nights ??
@@ -3510,7 +3511,7 @@ function estimateRetailIssueImpact(issue, contextData) {
       )
     )
     .filter((v) => v !== null && v > 0);
-  const revenueValues = pmsRows
+  const revenueValuesRaw = pmsRows
     .map((row) =>
       toFiniteNumberOrNull(
         row.revenue ??
@@ -3521,6 +3522,23 @@ function estimateRetailIssueImpact(issue, contextData) {
       )
     )
     .filter((v) => v !== null && v > 0);
+
+  const paceRowsFuture = pmsPaceRows.filter((r) => (r?.future_window_class || '') === 'future_forward');
+  const paceRowsForQuant = paceRowsFuture.length ? paceRowsFuture : pmsPaceRows;
+
+  const adrValuesPace = paceRowsForQuant
+    .map((row) => toFiniteNumberOrNull(row.adr_ty))
+    .filter((v) => v !== null && v > 0);
+  const rnValuesPace = paceRowsForQuant
+    .map((row) => toFiniteNumberOrNull(row.rn_on_books_ty))
+    .filter((v) => v !== null && v > 0);
+  const revenueValuesPace = paceRowsForQuant
+    .map((row) => toFiniteNumberOrNull(row.booked_revenue_ty))
+    .filter((v) => v !== null && v > 0);
+
+  const adrValues = adrValuesPace.length ? adrValuesPace : adrValuesRaw;
+  const rnValues = rnValuesPace.length ? rnValuesPace : rnValuesRaw;
+  const revenueValues = revenueValuesPace.length ? revenueValuesPace : revenueValuesRaw;
 
   const avgADR =
     adrValues.length > 0
@@ -3541,6 +3559,11 @@ function estimateRetailIssueImpact(issue, contextData) {
       : totalRevenueTY !== null && totalRN !== null && totalRN > 0
         ? totalRevenueTY / totalRN
         : null;
+
+  // Conservative proxy fallback: use existing issue action impact max as a floor signal,
+  // then back-derive RN proxy only when ADR is available.
+  const maxActionImpact =
+    (issue?.actions || []).reduce((m, a) => Math.max(m, Number(a?.financial_impact?.impact_range?.high || 0)), 0) || 0;
 
   const indexGap =
     avgMPI !== null
@@ -3571,10 +3594,13 @@ function estimateRetailIssueImpact(issue, contextData) {
         ? Math.max(0.6, Math.min(1.4, adrGap / 10))
         : 1;
 
-  const roomNightsAtRisk =
+  let roomNightsAtRisk =
     totalRN !== null
       ? Math.round(totalRN * issueWeight * gapAmplifier)
       : null;
+  if (roomNightsAtRisk === null && effectiveADR !== null && maxActionImpact > 0) {
+    roomNightsAtRisk = Math.max(1, Math.round((maxActionImpact * 0.55) / effectiveADR));
+  }
 
   let revenueRange = null;
   if (roomNightsAtRisk !== null && roomNightsAtRisk > 0 && effectiveADR !== null) {
@@ -3582,6 +3608,11 @@ function estimateRetailIssueImpact(issue, contextData) {
     const min = Math.round(roomNightsAtRisk * effectiveADR * 0.55);
     const max = Math.round(roomNightsAtRisk * effectiveADR * 0.95);
     revenueRange = { min, max };
+  } else if (maxActionImpact > 0) {
+    revenueRange = {
+      min: Math.round(maxActionImpact * 0.45),
+      max: Math.round(maxActionImpact * 0.75)
+    };
   }
 
   const dataPoints = [avgMPI, avgARI, avgRGI, avgOcc, effectiveADR, totalRN].filter((v) => v !== null).length;
@@ -3591,8 +3622,28 @@ function estimateRetailIssueImpact(issue, contextData) {
 
   let impactBand = 'low';
   const maxRevenue = revenueRange?.max ?? 0;
-  if (maxRevenue >= 15000 || (roomNightsAtRisk ?? 0) >= 120) impactBand = 'high';
-  else if (maxRevenue >= 5000 || (roomNightsAtRisk ?? 0) >= 40) impactBand = 'medium';
+  const occGapForBand = occupancyGap ?? 0;
+  const idxGapForBand = indexGap ?? 0;
+  if (
+    maxRevenue >= 15000 ||
+    (roomNightsAtRisk ?? 0) >= 120 ||
+    occGapForBand >= 12 ||
+    idxGapForBand >= 12
+  ) {
+    impactBand = 'high';
+  } else if (
+    maxRevenue >= 5000 ||
+    (roomNightsAtRisk ?? 0) >= 40 ||
+    occGapForBand >= 6 ||
+    idxGapForBand >= 6
+  ) {
+    impactBand = 'medium';
+  }
+
+  if (confidence === 'low' && impactBand === 'high') {
+    // Keep conservative posture under low data confidence.
+    impactBand = 'medium';
+  }
 
   return {
     impact_band: impactBand,
@@ -3613,32 +3664,47 @@ function interpretCommercialImpact(issue, quantifiedSignals) {
   const band = signals.impact_band || 'low';
   const qs = signals.quantified_signals || {};
   const rev = qs.revenue_range;
+  const rnRisk = qs.room_nights_at_risk;
+  const idxGap = qs.index_gap;
+  const occGap = qs.occupancy_gap;
+  const adrGap = qs.adr_gap;
+  const revText = rev ? `estimated revenue range ${rev.min}-${rev.max}` : 'revenue range not robust';
+  const dominantSignal =
+    rnRisk != null && rnRisk > 0
+      ? `${rnRisk} room nights at risk`
+      : idxGap != null && idxGap > 0
+        ? `index gap ${idxGap.toFixed(1)}`
+        : occGap != null && occGap > 0
+          ? `occupancy gap ${occGap.toFixed(1)} pts`
+          : adrGap != null && adrGap > 0
+            ? `ADR index gap ${adrGap.toFixed(1)}`
+            : 'directional evidence only';
 
   if (!rev && band === 'low') {
-    return 'Financial impact appears contained, but repeated inefficiency may compound over time.';
+    return `Financial impact appears contained, but repeated inefficiency may compound over time (${dominantSignal}).`;
   }
 
   if (family === 'visibility_gap' || family === 'discount_inefficiency') {
-    if (band === 'high') return 'This represents material revenue leakage on high-demand dates.';
-    if (band === 'medium') return 'This appears to be a moderate share loss with limited ADR upside.';
-    return 'Leakage appears limited now, but persistent conversion drag can scale over time.';
+    if (band === 'high') return `Material leakage signal: ${dominantSignal}; ${revText}.`;
+    if (band === 'medium') return `Moderate share-loss signal: ${dominantSignal}; ${revText}.`;
+    return `Leakage appears limited now (${dominantSignal}), but persistent conversion drag can scale over time.`;
   }
 
   if (family === 'pricing_resistance' || family === 'mix_constraint') {
-    if (band === 'high') return 'Rate-position friction is likely creating substantial revenue drag.';
-    if (band === 'medium') return 'Commercial drag appears moderate, mainly from suboptimal rate/mix balance.';
-    return 'Pricing/mix pressure is currently contained but should be monitored.';
+    if (band === 'high') return `Rate/mix friction looks material (${dominantSignal}); ${revText}.`;
+    if (band === 'medium') return `Commercial drag appears moderate from rate/mix imbalance (${dominantSignal}).`;
+    return `Pricing/mix pressure is currently contained (${dominantSignal}) but should be monitored.`;
   }
 
   if (family === 'missed_pricing_opportunity') {
-    if (band === 'high') return 'There is material upside if rate strategy is tightened on strong-demand windows.';
-    if (band === 'medium') return 'There appears to be moderate upside from selective pricing optimization.';
-    return 'Upside is limited at current signal strength but remains directionally positive.';
+    if (band === 'high') return `Material upside signal for pricing optimization (${dominantSignal}); ${revText}.`;
+    if (band === 'medium') return `Moderate pricing upside indicated (${dominantSignal}); ${revText}.`;
+    return `Upside is limited at current signal strength (${dominantSignal}) but remains directionally positive.`;
   }
 
-  if (band === 'high') return 'This represents material commercial impact and warrants priority attention.';
-  if (band === 'medium') return 'This appears to have moderate commercial impact with actionable upside.';
-  return 'Financial impact appears contained at current levels.';
+  if (band === 'high') return `Material commercial impact signal (${dominantSignal}); ${revText}.`;
+  if (band === 'medium') return `Moderate commercial impact with actionable upside (${dominantSignal}).`;
+  return `Financial impact appears contained at current levels (${dominantSignal}).`;
 }
 
 function buildFinancialQuantificationSummary(issues, contextData) {
@@ -3666,6 +3732,8 @@ function buildFinancialQuantificationSummary(issues, contextData) {
   const withOccGap = out.filter((r) => r.quantified_signals?.occupancy_gap != null);
   if (!withRevenue.length && out.length > 0) {
     notes.push('Revenue ranges are unavailable for most issues due to partial PMS/ADR/RN coverage.');
+  } else if (withRevenue.length > 0 && withRevenue.length < out.length) {
+    notes.push('Revenue ranges were estimated for some issues; others lacked enough financial fields for conservative quantification.');
   }
   if (out.length > 0 && withRoomNights.length < Math.ceil(out.length / 2)) {
     notes.push('Room-nights-at-risk coverage is limited; PMS room-night fields are sparse or inconsistent.');
@@ -3993,6 +4061,7 @@ async function handler(req, res) {
       driver,
       detection,
       pmsRows,
+      pmsPaceRows: pmsPaceSnapshotRowsForAnalysis,
       strRows
     });
 
