@@ -4977,18 +4977,33 @@ function toSentence(text, fallback) {
 function buildEnforcedDecisionLine(issue, arbitration, portfolioPrimaryDriver) {
   const role = arbitration?.arbitration_role || 'monitor';
   const adapted = toSentence(arbitration?.adapted_action_posture, null);
-  const primary = portfolioPrimaryDriver || arbitration?.primary_driver || 'primary strategy';
+  const primary = (portfolioPrimaryDriver || arbitration?.primary_driver || 'primary strategy').toString();
 
   if (role === 'primary') {
-    return adapted || toSentence(issue?.expected_outcome, 'Execute the primary strategy for this cycle');
+    const strong =
+      toSentence(issue?.enforced_decision_line, null) ||
+      toSentence(issue?.expected_outcome, null) ||
+      toSentence(issue?.root_cause, null) ||
+      adapted;
+    return strong || 'Execute the primary strategy for this cycle.';
   }
   if (role === 'supporting') {
-    return adapted || `Align this issue to the ${primary} strategy; keep this lever tactical only.`;
+    if (primary === 'pricing') {
+      return 'Align this lever with pricing correction and avoid independent discount expansion.';
+    }
+    if (primary === 'discounting') {
+      return 'Support discount discipline without introducing conflicting pricing changes.';
+    }
+    if (primary === 'conversion') {
+      return 'Defer pricing and discount changes until conversion performance stabilizes.';
+    }
+    return 'Support the primary commercial strategy without introducing conflicting actions.';
   }
   if (role === 'suppressed') {
-    return adapted || `Defer active changes on this lever until ${primary} execution is evaluated.`;
+    return 'Defer active changes on this lever until the primary strategy is evaluated.';
   }
-  return 'Monitor this issue during the current strategy window.';
+  const monitorLine = 'Monitor this issue during the current execution window.';
+  return monitorLine || 'Monitor this issue during the current execution window.';
 }
 
 function buildEnforcedExecutionActions(issue, arbitration, portfolioPrimaryDriver) {
@@ -4996,27 +5011,58 @@ function buildEnforcedExecutionActions(issue, arbitration, portfolioPrimaryDrive
   const primary = portfolioPrimaryDriver || arbitration?.primary_driver || 'primary strategy';
   const adapted = arbitration?.adapted_action_posture || '';
 
+  let actions = [];
   if (role === 'primary') {
-    return (issue?.actions || []).map((a) => toSentence(a?.description, 'Execute primary strategy steps'));
+    actions = (issue?.actions || [])
+      .map((a) => toSentence(a?.description, 'Execute primary strategy steps'))
+      .filter(Boolean);
+    if (!actions.length) {
+      actions = ['Execute primary strategy steps.', 'Track primary-lever response across the current cycle.'];
+    }
+    return actions;
   }
   if (role === 'supporting') {
-    return [
+    actions = [
       toSentence(adapted, `Keep this lever tactical while ${primary} remains primary`),
       toSentence(`Avoid independent moves that conflict with ${primary}`, 'Avoid conflicting secondary moves'),
       toSentence(`Reassess this lever after ${primary} response is observed`, 'Reassess after primary response')
     ];
-  }
-  if (role === 'suppressed') {
-    return [
+  } else if (role === 'suppressed') {
+    actions = [
       toSentence(`Defer active changes on this lever during the ${primary} reset window`, 'Defer active changes'),
       toSentence(`Hold broad tactical shifts until ${primary} impact is measured`, 'Hold broad tactical shifts'),
       toSentence('Revisit once primary-cycle evidence is available', 'Revisit after primary-cycle evidence')
     ];
+  } else {
+    actions = [
+      'Track pickup and share response during the current strategy window.',
+      `Revisit this issue after the ${primary} adjustment window.`
+    ];
   }
-  return [
-    'Track pickup and share response during the current strategy window.',
-    `Revisit this issue after the ${primary} adjustment window.`
-  ];
+
+  const cleaned = actions.filter((x) => typeof x === 'string' && x.trim() !== '');
+  if (cleaned.length) return cleaned;
+
+  if (role === 'supporting') {
+    return [
+      'Avoid independent tactical changes on this lever.',
+      'Align adjustments with the primary strategy.',
+      'Reassess after the next performance cycle.'
+    ];
+  }
+  if (role === 'suppressed') {
+    return [
+      'Hold current settings on this lever.',
+      'Re-evaluate after primary strategy impact is observed.'
+    ];
+  }
+  if (role === 'monitor') {
+    return [
+      'Track performance evolution on this issue.',
+      'Revisit if performance does not improve.'
+    ];
+  }
+  return ['Monitor this issue during the current execution window.'];
 }
 
 function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummary) {
