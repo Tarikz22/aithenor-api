@@ -891,6 +891,7 @@ function buildDiagnosisFromSTR(strRows) {
   const avgRGI = averageMetric(strRows, ['RGI', 'RGI (Index)', 'RevPAR Index']);
   const avgOcc = averageMetric(strRows, ['Occupancy %', 'Hotel Occupancy %']);
   const mpiChange = averageMetric(strRows, ['MPI % Change', 'MPI %']);
+  const ariChange = averageMetric(strRows, ['ARI % Change', 'ARI %']);
   const rgiChange = averageMetric(strRows, ['RGI % Change', 'RGI %']);
 
   let performance_status = 'balanced';
@@ -933,6 +934,9 @@ function buildDiagnosisFromSTR(strRows) {
     performance_status,
     diagnosis_type,
     trend_status,
+    mpiVar: mpiChange,
+    ariVar: ariChange,
+    rgiVar: rgiChange,
     metrics: {
       avgMPI,
       avgARI,
@@ -1037,6 +1041,9 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
   const avgMPI = Number(diagnosis?.metrics?.avgMPI || 0);
   const avgARI = Number(diagnosis?.metrics?.avgARI || 0);
   const avgRGI = Number(diagnosis?.metrics?.avgRGI || 0);
+  const mpiVar = diagnosis?.mpiVar ?? null;
+  const ariVar = diagnosis?.ariVar ?? null;
+  const rgiVar = diagnosis?.rgiVar ?? null;
   const avgOcc = Number(diagnosis?.metrics?.avgOcc || 0);
   const trendStatus = diagnosis?.trend_status || 'stable';
   const focusSegment = focus?.focus_segment || 'other';
@@ -1203,12 +1210,28 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
   }
 
   if (avgARI < 100 && avgMPI <= 100) {
+    const isRecovering = (mpiVar !== null && mpiVar > 0) && (rgiVar !== null && rgiVar > 0);
+    const paceNotClosed = (mpiVar !== null && mpiVar > 0) && (rgiVar !== null && rgiVar > 0) && avgRGI < 100;
+
+    if (isRecovering) {
+      return {
+        ...result,
+        primary_driver: 'pricing',
+        secondary_driver: null,
+        driver_reason: paceNotClosed
+          ? 'Hotel is in intentional volume recovery: ARI below market but MPI and RGI are improving vs LY. Rate discount is the strategy. Risk is that pace has not yet fully closed — monitor whether volume materializes before extending rate concessions further.'
+          : 'Hotel is in intentional volume recovery: ARI below market and MPI improving vs LY. Strategy appears to be working. No correction required; monitor rate dilution risk.',
+        rule_triggered: 'intentional_volume_recovery',
+        confidence: 'medium'
+      };
+    }
+
     return {
       ...result,
       primary_driver: 'conversion',
       secondary_driver: null,
       driver_reason:
-        'The hotel is trading below market rate without generating sufficient share gain, indicating discount inefficiency and weak conversion.',
+        'Hotel is trading below market rate without generating sufficient share gain, and performance is not improving vs LY. Rate is not the ceiling — execution is failing to convert available demand.',
       rule_triggered: 'discount_inefficiency',
       confidence: 'high'
     };
@@ -5187,7 +5210,7 @@ function mapRetailIssueFamilyToDriver(issueFamily, decisionType, contextFlags = 
   const flags = Array.isArray(contextFlags) ? contextFlags : [];
 
   if (fam === 'pricing_resistance' || fam === 'missed_pricing_opportunity') return 'pricing';
-  if (fam === 'discount_inefficiency') return 'discounting';
+  if (fam === 'discount_inefficiency') return 'conversion';
   if (fam === 'mix_constraint') return flags.includes('channel_dependency') ? 'distribution' : 'pricing';
   if (fam === 'visibility_gap') {
     if (dec === 'conversion_optimization') return 'conversion';
