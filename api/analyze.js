@@ -3560,6 +3560,7 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
         daily_validation_summary: reasoningIssue.daily_validation_summary,
         final_decision_rationale: reasoningIssue.final_decision_rationale,
         narrative_chain: reasoningIssue.narrative_chain,
+        commercial_narrative: reasoningIssue.commercial_narrative || null,
         weekKey,
         weekOrdinal: weekOrdinalMap.get(weekKey),
         metrics,
@@ -3849,7 +3850,7 @@ function enrichRetailIssue(issue, ctx) {
     ctx?.pmsRows || [],
     ctx?.paceSignalSummary || null
   );
-  issue.commercial_narrative = commercialNarrative || null;
+  issue.commercial_narrative = commercialNarrative || issue.commercial_narrative || null;
   return issue;
 }
 
