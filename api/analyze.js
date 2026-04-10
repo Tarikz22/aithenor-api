@@ -5969,7 +5969,15 @@ function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummar
       }
     }
 
-    const enforcedDecisionLine = buildEnforcedDecisionLine(issue, arb, portfolioPrimaryDriver);
+    let enforcedDecisionLine = buildEnforcedDecisionLine(issue, arb, portfolioPrimaryDriver);
+    if (
+      (arb.arbitration_role === 'primary' || arb.arbitration_role === 'supporting') &&
+      issue?.commercial_narrative
+    ) {
+      const paragraphs = String(issue.commercial_narrative).split('\n\n').map((s) => s.trim()).filter(Boolean);
+      const lastParagraph = paragraphs.length ? paragraphs[paragraphs.length - 1] : '';
+      if (lastParagraph) enforcedDecisionLine = lastParagraph;
+    }
     const enforcedExecutionActions = buildEnforcedExecutionActions(issue, arb, portfolioPrimaryDriver);
     const enforcementReason =
       arb.suppression_reason ||
