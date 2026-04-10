@@ -3858,6 +3858,11 @@ function enrichRetailIssue(issue, ctx) {
     ctx?.paceSignalSummary || null
   );
   issue.commercial_narrative = commercialNarrative || issue.commercial_narrative || null;
+  if (issue.commercial_narrative) {
+    const paragraphs = String(issue.commercial_narrative).split('\n\n').map((s) => s.trim()).filter(Boolean);
+    const lastParagraph = paragraphs.length ? paragraphs[paragraphs.length - 1] : '';
+    if (lastParagraph.length > 40) issue.enforced_decision_line = lastParagraph;
+  }
   return issue;
 }
 
@@ -4495,7 +4500,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
   const rgiVar = toFiniteNumberOrNull(diagnosis?.rgiVar);
   const family = (issue?.issue_family || '').toString();
 
-  if (avgMPI === null || avgARI === null || avgRGI === null) {
+  if ((avgMPI === null || avgARI === null || avgRGI === null) && family !== 'visibility_gap') {
     return null;
   }
 
@@ -4678,6 +4683,23 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     }
 
     return [para1, para2].filter(s => s && s.trim()).join('\n\n');
+  }
+
+  if (family === 'visibility_gap') {
+    const hasGlobal = avgMPI !== null || avgARI !== null || avgRGI !== null || avgOcc !== null;
+    const mpiText = avgMPI !== null ? `MPI ${avgMPI.toFixed(1)}` : null;
+    const ariText = avgARI !== null ? `ARI ${avgARI.toFixed(1)}` : null;
+    const rgiText = avgRGI !== null ? `RGI ${avgRGI.toFixed(1)}` : null;
+    const metricSummary = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
+
+    const para1 = hasGlobal
+      ? `This issue points to upstream demand capture softness before the booking decision stage. Available market indicators (${metricSummary || 'limited index coverage'}) do not show a pure rate-position or conversion-collapse signal as the primary cause.`
+      : `This issue points to upstream demand capture softness before the booking decision stage, but index coverage for this card is limited in the current data path.`;
+    const para2 = hasGlobal
+      ? `The commercial question is reach and relevance: is qualified demand failing to enter the hotel funnel, or entering too late to convert at normal efficiency? This is primarily a demand-arrival problem, not a broad pricing or conversion reset by default.`
+      : `Because this card can be generated from a lighter signal path, treat the diagnosis as directional: the gap is likely in demand reaching the hotel funnel rather than in immediate booking-path execution.`;
+    const decisionLine = `The decision is where to intervene first: upstream demand generation or booking-path friction. Priority is to identify which one is dominant before spending on either.`;
+    return [para1, para2, decisionLine].filter(s => s && s.trim()).join('\n\n');
   }
 
   return null;
