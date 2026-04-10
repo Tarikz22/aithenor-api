@@ -3578,7 +3578,40 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
   });
   temporal_meta.executive_family_count = consolidated.length;
 
-  const rawIssues = rankAndCapExecutiveRetailIssues(consolidated, MAX_RETAIL_ISSUES_PER_RUN);
+  const rankedIssues = rankAndCapExecutiveRetailIssues(consolidated, MAX_RETAIL_ISSUES_PER_RUN);
+
+  // FINAL deterministic commercial override (post consolidation/ranking):
+  // if pricing truth exists (RGI<100, ARI>100, MPI<100), force it primary and downgrade visibility/distribution narratives.
+  const pricingTruthIssue = rankedIssues.find((issue) => {
+    const driver = issue?.primary_driver || issue?.driver;
+    const m = issue?.card_metrics || {};
+    const ari = Number(m.avgARI);
+    const mpi = Number(m.avgMPI);
+    const rgi = Number(m.avgRGI);
+    return driver === 'pricing' && Number.isFinite(ari) && Number.isFinite(mpi) && Number.isFinite(rgi) && ari > 100 && mpi < 100 && rgi < 100;
+  });
+
+  let rawIssues = rankedIssues;
+  if (pricingTruthIssue) {
+    rawIssues = [
+      {
+        ...pricingTruthIssue,
+        arbitration_role: 'primary'
+      },
+      ...rankedIssues
+        .filter((issue) => issue.finding_key !== pricingTruthIssue.finding_key)
+        .map((issue) => {
+          const driver = issue?.primary_driver || issue?.driver;
+          const family = issue?.issue_family || '';
+          const isVisibilityOrDistribution =
+            family === 'visibility_gap' || driver === 'visibility' || driver === 'distribution';
+          return isVisibilityOrDistribution
+            ? { ...issue, arbitration_role: 'supporting' }
+            : issue;
+        })
+    ];
+  }
+
   temporal_meta.executive_capped_count = rawIssues.length;
 
   return { rawIssues, temporal_meta };
