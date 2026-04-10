@@ -2685,7 +2685,13 @@ function mergeWeeklyCandidatesIntoEpisodes(sortedCandidates) {
         lastWeekOrdinal: c.weekOrdinal,
         lastMetrics: c.metrics,
         startYmd: c.startYmd,
-        endYmd: c.endYmd
+        endYmd: c.endYmd,
+        segment_attribution_summary: c.segment_attribution_summary != null ? c.segment_attribution_summary : null,
+        daily_validation_summary: c.daily_validation_summary != null ? c.daily_validation_summary : null,
+        narrative_chain: c.narrative_chain != null ? c.narrative_chain : null,
+        performance_story: c.performance_story != null ? c.performance_story : null,
+        final_decision_rationale: c.final_decision_rationale != null ? c.final_decision_rationale : null,
+        commercial_narrative: c.commercial_narrative != null ? c.commercial_narrative : null
       };
     } else {
       cur.weekKeys.push(c.weekKey);
@@ -2694,6 +2700,20 @@ function mergeWeeklyCandidatesIntoEpisodes(sortedCandidates) {
       cur.lastWeekOrdinal = c.weekOrdinal;
       cur.lastMetrics = c.metrics;
       cur.endYmd = c.endYmd;
+      if (cur.segment_attribution_summary == null && c.segment_attribution_summary != null) {
+        cur.segment_attribution_summary = c.segment_attribution_summary;
+      }
+      if (cur.daily_validation_summary == null && c.daily_validation_summary != null) {
+        cur.daily_validation_summary = c.daily_validation_summary;
+      }
+      if (cur.narrative_chain == null && c.narrative_chain != null) cur.narrative_chain = c.narrative_chain;
+      if (cur.performance_story == null && c.performance_story != null) cur.performance_story = c.performance_story;
+      if (cur.final_decision_rationale == null && c.final_decision_rationale != null) {
+        cur.final_decision_rationale = c.final_decision_rationale;
+      }
+      if (cur.commercial_narrative == null && c.commercial_narrative != null) {
+        cur.commercial_narrative = c.commercial_narrative;
+      }
     }
   }
   if (cur) episodes.push(cur);
