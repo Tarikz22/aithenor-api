@@ -5063,7 +5063,7 @@ function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummar
       });
     }
 
-    return {
+    const updatedIssue = {
       ...issue,
       arbitration_role: arb.arbitration_role,
       primary_driver: arb.primary_driver,
@@ -5075,6 +5075,14 @@ function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummar
       expected_outcome: enforcedDecisionLine,
       actions: normalized
     };
+    console.log("ARBITRATION_ENFORCED", {
+      finding_key: updatedIssue.finding_key,
+      title: updatedIssue.title,
+      arbitration_role: updatedIssue.arbitration_role,
+      enforced_decision_line: updatedIssue.enforced_decision_line,
+      enforced_execution_actions: updatedIssue.enforced_execution_actions
+    });
+    return updatedIssue;
   });
 }
 
