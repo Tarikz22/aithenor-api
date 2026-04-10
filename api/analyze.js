@@ -2750,6 +2750,10 @@ function materializeRetailEpisode(ep, focus) {
     episode_week_count: ep.weekKeys.length,
     window_label: `${ep.startYmd} → ${ep.endYmd}`,
     temporal_layer: 'weekly_episode',
+    performance_story: ep.performance_story || null,
+    segment_attribution_summary: ep.segment_attribution_summary || null,
+    daily_validation_summary: ep.daily_validation_summary || null,
+    final_decision_rationale: ep.final_decision_rationale || null,
     card_metrics: snapshotCardMetricsFromDiagnosisLike(windowDiagnosis)
   };
 }
@@ -2904,6 +2908,10 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus, temporalCon
       span_days: spanDays,
       representative_episode_type: representativeEpisodeType,
       ongoing_across_most_uploaded_period: isOngoingMost,
+      performance_story: rep.performance_story || null,
+      segment_attribution_summary: rep.segment_attribution_summary || null,
+      daily_validation_summary: rep.daily_validation_summary || null,
+      final_decision_rationale: rep.final_decision_rationale || null,
       executive_synthesis: {
         contributing_episode_count: eps.length,
         contributing_week_keys: weekKeysSorted,
@@ -3021,7 +3029,15 @@ function buildWeeklyPerformanceStory(context) {
 function attributePrimarySegmentDriver(pmsRows, context) {
   const list = Array.isArray(pmsRows) ? pmsRows : [];
   if (!list.length) {
-    return { primary_segment: 'unknown', segment_scores: [], attribution_confidence: 'low' };
+    return {
+      primary_segment: 'unknown',
+      segment_scores: [],
+      attribution_confidence: 'low',
+      primary_segment_story: 'no_segment_data',
+      rn_delta: null,
+      adr_delta: null,
+      revenue_delta: null
+    };
   }
 
   const bucket = new Map();
@@ -3048,19 +3064,110 @@ function attributePrimarySegmentDriver(pmsRows, context) {
     const rnLy = toFiniteNumberOrNull(
       row['room nights on books ly'] || row['Room Nights On Books LY'] || row.rn_ly_actual
     ) || 0;
-    const delta = rnTy - rnLy;
-    if (!bucket.has(seg)) bucket.set(seg, { segment: seg, rn_delta: 0, count: 0 });
+    const revTy = toFiniteNumberOrNull(
+      row['booked revenue ty'] || row['Booked Revenue TY'] || row.booked_revenue_ty
+    );
+    const revLy = toFiniteNumberOrNull(
+      row['booked revenue ly'] || row['Booked Revenue LY'] || row.booked_revenue_ly_actual
+    );
+    const adrTy = toFiniteNumberOrNull(
+      row.adr_ty || row['ADR TY'] || row.adr || row.ADR || row['Average Rate']
+    );
+    const adrLy = toFiniteNumberOrNull(
+      row.adr_ly_actual || row['ADR LY'] || row['Average Rate LY']
+    );
+
+    const rnDelta = rnTy - rnLy;
+    const revDelta = revTy !== null && revLy !== null ? revTy - revLy : null;
+    let adrDelta = null;
+    if (adrTy !== null && adrLy !== null) adrDelta = adrTy - adrLy;
+    else if (revTy !== null && revLy !== null && rnTy > 0 && rnLy > 0) adrDelta = revTy / rnTy - revLy / rnLy;
+
+    if (!bucket.has(seg)) {
+      bucket.set(seg, {
+        segment: seg,
+        rn_ty: 0,
+        rn_ly: 0,
+        rn_delta: 0,
+        rev_ty: 0,
+        rev_ly: 0,
+        revenue_delta: 0,
+        adr_delta_sum: 0,
+        adr_delta_count: 0,
+        score: 0,
+        count: 0
+      });
+    }
     const b = bucket.get(seg);
-    b.rn_delta += delta;
+    b.rn_ty += rnTy;
+    b.rn_ly += rnLy;
+    b.rn_delta += rnDelta;
+    if (revTy !== null) b.rev_ty += revTy;
+    if (revLy !== null) b.rev_ly += revLy;
+    if (revDelta !== null) b.revenue_delta += revDelta;
+    if (adrDelta !== null) {
+      b.adr_delta_sum += adrDelta;
+      b.adr_delta_count += 1;
+    }
     b.count += 1;
   }
-
-  const segmentScores = Array.from(bucket.values()).sort((a, b) => Math.abs(b.rn_delta) - Math.abs(a.rn_delta));
+  const perfStory = context?.performance_story || 'mixed_or_unclear';
+  const segmentScores = Array.from(bucket.values())
+    .map((b) => {
+      const adr_delta = b.adr_delta_count > 0 ? b.adr_delta_sum / b.adr_delta_count : null;
+      let score = Math.abs(b.rn_delta);
+      if (perfStory === 'volume_led_recovery') {
+        // Favor volume gain with ADR softness (MPI up, ARI down pattern).
+        score += b.rn_delta > 0 ? Math.abs(b.rn_delta) * 0.7 : 0;
+        score += adr_delta !== null && adr_delta < 0 ? Math.abs(adr_delta) * 10 : 0;
+      } else if (perfStory === 'pricing_resistance_underperformance') {
+        // Favor premium-ish ADR with weak/negative volume response.
+        score += adr_delta !== null && adr_delta > 0 ? Math.abs(adr_delta) * 12 : 0;
+        score += b.rn_delta <= 0 ? Math.abs(b.rn_delta) * 0.8 : 0;
+      } else {
+        score += Math.abs(b.revenue_delta) * 0.05;
+      }
+      return {
+        segment: b.segment,
+        rn_ty: b.rn_ty,
+        rn_ly: b.rn_ly,
+        rn_delta: b.rn_delta,
+        rev_ty: b.rev_ty || null,
+        rev_ly: b.rev_ly || null,
+        revenue_delta: b.revenue_delta || null,
+        adr_delta,
+        score: Number(score.toFixed(3)),
+        count: b.count
+      };
+    })
+    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
   const primary = segmentScores[0]?.segment || 'unknown';
+  const primaryRow = segmentScores[0] || null;
+  const confidence =
+    primaryRow && primaryRow.count >= 2
+      ? primaryRow.adr_delta !== null || primaryRow.revenue_delta !== null
+        ? 'high'
+        : 'medium'
+      : segmentScores.length
+        ? 'medium'
+        : 'low';
+  const primaryStory =
+    primaryRow === null
+      ? 'no_segment_data'
+      : perfStory === 'volume_led_recovery'
+        ? 'volume_led_segment_with_adr_softness_check'
+        : perfStory === 'pricing_resistance_underperformance'
+          ? 'premium_pricing_with_weak_volume_response'
+          : 'mixed_segment_driver';
+
   return {
     primary_segment: primary,
     segment_scores: segmentScores.slice(0, 5),
-    attribution_confidence: segmentScores.length > 0 ? 'medium' : 'low'
+    attribution_confidence: confidence,
+    primary_segment_story: primaryStory,
+    rn_delta: primaryRow?.rn_delta ?? null,
+    adr_delta: primaryRow?.adr_delta ?? null,
+    revenue_delta: primaryRow?.revenue_delta ?? null
   };
 }
 
@@ -3068,34 +3175,90 @@ function buildDailyValidationLayer(strWeekRows, pmsRows, context, segmentAttribu
   const rows = Array.isArray(strWeekRows) ? strWeekRows : [];
   if (!rows.length) return { displacement_risk: 'unknown', validation_notes: ['no_daily_rows'] };
   const dayClass = { peak: 0, shoulder: 0, low_demand: 0 };
+  const dayTypeDates = { peak: new Set(), shoulder: new Set(), low_demand: new Set() };
   for (const r of rows) {
     const occ = toFiniteNumberOrNull(getMetricFromRow(r, ['Occupancy %', 'Hotel Occupancy %']));
+    const d = getStrRowDate(r);
+    const ymd = d ? formatDateToYMD(d) : null;
     if (occ === null) continue;
-    if (occ >= 85) dayClass.peak += 1;
-    else if (occ >= 72) dayClass.shoulder += 1;
-    else dayClass.low_demand += 1;
+    if (occ >= 85) {
+      dayClass.peak += 1;
+      if (ymd) dayTypeDates.peak.add(ymd);
+    } else if (occ >= 72) {
+      dayClass.shoulder += 1;
+      if (ymd) dayTypeDates.shoulder.add(ymd);
+    } else {
+      dayClass.low_demand += 1;
+      if (ymd) dayTypeDates.low_demand.add(ymd);
+    }
   }
 
-  const story = context?.performance_story || 'mixed_or_unclear';
   const seg = segmentAttribution?.primary_segment || 'unknown';
+  const mapSeg = (name = '') => {
+    const s = String(name).toLowerCase();
+    if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
+    if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
+    if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
+    if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
+    return 'other';
+  };
+
+  const validatedPeak = [];
+  const validatedShoulder = [];
+  const validatedLowDemand = [];
+  const primaryRows = (Array.isArray(pmsRows) ? pmsRows : []).filter((row) => {
+    const segName =
+      row['market segment name'] ||
+      row['Market Segment Name'] ||
+      row.segment ||
+      row.Segment ||
+      'other';
+    return mapSeg(segName) === seg;
+  });
+
+  for (const row of primaryRows) {
+    const ymd = row?._ingestion?.stay_date_ymd || getRowStayDateYmd(row);
+    if (!ymd) continue;
+    const rnTy = toFiniteNumberOrNull(
+      row['room nights on books ty'] || row['Room Nights On Books TY'] || row.rn_on_books_ty || row.rn
+    );
+    const rnLy = toFiniteNumberOrNull(
+      row['room nights on books ly'] || row['Room Nights On Books LY'] || row.rn_ly_actual
+    );
+    if (rnTy === null || rnLy === null) continue;
+    const delta = rnTy - rnLy;
+    if (delta <= 0) continue;
+    if (dayTypeDates.peak.has(ymd)) validatedPeak.push(ymd);
+    if (dayTypeDates.shoulder.has(ymd)) validatedShoulder.push(ymd);
+    if (dayTypeDates.low_demand.has(ymd)) validatedLowDemand.push(ymd);
+  }
+
   let displacementRisk = 'unknown';
-  if (dayClass.peak > 0 && story === 'volume_led_recovery' && (seg === 'retail' || seg === 'ota' || seg === 'other')) {
+  if (seg === 'unknown' || primaryRows.length === 0) {
+    displacementRisk = 'unknown';
+  } else if (validatedPeak.length > 0) {
     displacementRisk = 'high';
-  } else if (dayClass.peak === 0 && story === 'volume_led_recovery') {
+  } else if (validatedShoulder.length > 0 || validatedLowDemand.length > 0) {
     displacementRisk = 'low';
-  } else if (dayClass.peak > 0 && story.includes('underperformance')) {
-    displacementRisk = 'medium';
   } else {
-    displacementRisk = 'low';
+    displacementRisk = 'unknown';
   }
 
   return {
     displacement_risk: displacementRisk,
     day_mix: dayClass,
+    validated_peak_growth_dates: [...new Set(validatedPeak)].sort(),
+    validated_shoulder_growth_dates: [...new Set(validatedShoulder)].sort(),
+    validated_low_demand_growth_dates: [...new Set(validatedLowDemand)].sort(),
     validation_notes: [
       `daily_peak_days=${dayClass.peak}`,
       `daily_shoulder_days=${dayClass.shoulder}`,
-      `daily_low_demand_days=${dayClass.low_demand}`
+      `daily_low_demand_days=${dayClass.low_demand}`,
+      `primary_segment=${seg}`,
+      `primary_segment_rows_scanned=${primaryRows.length}`,
+      `validated_peak_growth_count=${validatedPeak.length}`,
+      `validated_shoulder_growth_count=${validatedShoulder.length}`,
+      `validated_low_demand_growth_count=${validatedLowDemand.length}`
     ]
   };
 }
@@ -3126,12 +3289,12 @@ function buildRetailCommercialDecision(context, performanceStory, segmentAttribu
     primary_driver = 'conversion';
     rationale = 'ARI/MPI weakness indicates discount or conversion inefficiency; discounting remains subordinate to core strategy.';
   } else if (cls.performance_story === 'volume_led_recovery') {
-    family = risk === 'high' ? 'mix_constraint' : 'visibility_gap';
-    primary_driver = risk === 'high' ? 'mix_strategy' : 'visibility';
+    family = risk === 'high' ? 'mix_constraint' : 'pricing_resistance';
+    primary_driver = risk === 'high' ? 'mix_strategy' : 'pricing';
     rationale =
       risk === 'high'
         ? 'Volume-led recovery is concentrated in potentially displacing day types; protect value on peak windows.'
-        : 'Volume-led recovery appears acceptable in non-peak day types; continue controlled demand capture.';
+        : 'Volume-led recovery appears controlled in non-peak day types; continue selective pricing/mix strategy while rebuilding fair share.';
   }
 
   return {
@@ -3148,6 +3311,22 @@ function buildRetailReasoningIssue({ context, performanceStory, segmentAttributi
   return {
     family: finalDecision.issue_family,
     primary_driver: finalDecision.primary_driver,
+    performance_story: performanceStory?.performance_story || null,
+    segment_attribution_summary: {
+      primary_segment: segmentAttribution?.primary_segment || 'unknown',
+      attribution_confidence: segmentAttribution?.attribution_confidence || 'low',
+      primary_segment_story: segmentAttribution?.primary_segment_story || null,
+      rn_delta: segmentAttribution?.rn_delta ?? null,
+      adr_delta: segmentAttribution?.adr_delta ?? null,
+      revenue_delta: segmentAttribution?.revenue_delta ?? null
+    },
+    daily_validation_summary: {
+      displacement_risk: dailyValidation?.displacement_risk || 'unknown',
+      validated_peak_growth_dates: dailyValidation?.validated_peak_growth_dates || [],
+      validated_shoulder_growth_dates: dailyValidation?.validated_shoulder_growth_dates || [],
+      validated_low_demand_growth_dates: dailyValidation?.validated_low_demand_growth_dates || []
+    },
+    final_decision_rationale: finalDecision?.rationale || null,
     reasoning: {
       position: {
         rgi_current: performanceStory?.rgi ?? null,
@@ -3235,6 +3414,10 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
       candidates.push({
         family: reasoningIssue.family,
         primary_driver: reasoningIssue.primary_driver,
+        performance_story: reasoningIssue.performance_story,
+        segment_attribution_summary: reasoningIssue.segment_attribution_summary,
+        daily_validation_summary: reasoningIssue.daily_validation_summary,
+        final_decision_rationale: reasoningIssue.final_decision_rationale,
         weekKey,
         weekOrdinal: weekOrdinalMap.get(weekKey),
         metrics,
