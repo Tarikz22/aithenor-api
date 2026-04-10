@@ -3762,7 +3762,13 @@ function materializeRetailIssue(spec, diagnosis, focus) {
       RETAIL_ISSUE_EXPECTED_OUTCOMES[family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
     rule_triggered: family,
     _library_actions: cappedLib,
-    card_metrics: snapshotCardMetricsFromDiagnosisLike(diagnosis)
+    card_metrics: snapshotCardMetricsFromDiagnosisLike(diagnosis),
+    segment_attribution_summary: spec.segment_attribution_summary || null,
+    daily_validation_summary: spec.daily_validation_summary || null,
+    narrative_chain: spec.narrative_chain || null,
+    performance_story: spec.performance_story || null,
+    commercial_narrative: spec.commercial_narrative || null,
+    final_decision_rationale: spec.final_decision_rationale || null
   };
 }
 
