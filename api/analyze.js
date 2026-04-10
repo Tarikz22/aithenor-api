@@ -2730,6 +2730,16 @@ function materializeRetailEpisode(ep, focus) {
   const lib = pickRetailLibraryActionsForFamily(ep.family);
   const cappedLib = lib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
   const pri = cappedLib.some((a) => a.priority === 'high') ? 'high' : 'medium';
+  const chain = ep.narrative_chain || {};
+  const findingText = [
+    chain.position_summary,
+    chain.variance_summary,
+    chain.source_summary,
+    chain.segment_summary,
+    chain.daily_validation_summary_text
+  ].filter(Boolean).join(' ');
+  const rootCauseText = [ep.final_decision_rationale, chain.segment_summary].filter(Boolean).join(' ');
+  const expectedOutcomeText = [chain.daily_validation_summary_text, ep.final_decision_rationale].filter(Boolean).join(' ');
 
   return {
     finding_key,
@@ -2738,10 +2748,10 @@ function materializeRetailEpisode(ep, focus) {
     segment: 'retail',
     priority: pri,
     title: RETAIL_ISSUE_TITLES[ep.family] || RETAIL_ISSUE_TITLES.share_loss_fallback,
-    finding: retailIssueFindingText(ep.family, windowDiagnosis, focus),
-    root_cause: RETAIL_ISSUE_ROOT_CAUSES[ep.family] || RETAIL_ISSUE_ROOT_CAUSES.share_loss_fallback,
+    finding: findingText || retailIssueFindingText(ep.family, windowDiagnosis, focus),
+    root_cause: rootCauseText || RETAIL_ISSUE_ROOT_CAUSES[ep.family] || RETAIL_ISSUE_ROOT_CAUSES.share_loss_fallback,
     expected_outcome:
-      RETAIL_ISSUE_EXPECTED_OUTCOMES[ep.family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
+      expectedOutcomeText || RETAIL_ISSUE_EXPECTED_OUTCOMES[ep.family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
     rule_triggered: ep.family,
     _library_actions: cappedLib,
     episode_week_start: ep.startYmd,
@@ -2754,6 +2764,7 @@ function materializeRetailEpisode(ep, focus) {
     segment_attribution_summary: ep.segment_attribution_summary || null,
     daily_validation_summary: ep.daily_validation_summary || null,
     final_decision_rationale: ep.final_decision_rationale || null,
+    narrative_chain: ep.narrative_chain || null,
     card_metrics: snapshotCardMetricsFromDiagnosisLike(windowDiagnosis)
   };
 }
@@ -2912,6 +2923,7 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus, temporalCon
       segment_attribution_summary: rep.segment_attribution_summary || null,
       daily_validation_summary: rep.daily_validation_summary || null,
       final_decision_rationale: rep.final_decision_rationale || null,
+      narrative_chain: rep.narrative_chain || null,
       executive_synthesis: {
         contributing_episode_count: eps.length,
         contributing_week_keys: weekKeysSorted,
@@ -3009,6 +3021,10 @@ function buildWeeklyPerformanceStory(context) {
     else if (cls.source_of_movement === 'ARI-led') story = 'ari_led_outperformance';
     else story = 'stable_outperformance';
   } else if (cls.position === 'underperforming') {
+    // RGI-first hard pricing gate: premium with weak share should not be flattened.
+    if ((cls.ari || 0) > 100 && (cls.mpi || 0) < 100) {
+      story = 'pricing_resistance_underperformance';
+    } else
     if (
       cls.direction === 'improving' &&
       (cls.mpiVar || 0) > 0 &&
@@ -3024,6 +3040,49 @@ function buildWeeklyPerformanceStory(context) {
     }
   }
   return { ...cls, performance_story: story };
+}
+
+function rankReasoningCandidatePriority(candidate) {
+  const fam = candidate?.family || 'unknown';
+  const perf = candidate?.performance_story || '';
+  const m = candidate?.metrics || {};
+  const rgi = toFiniteNumberOrNull(m.avgRGI) ?? 100;
+  const mpi = toFiniteNumberOrNull(m.avgMPI) ?? 100;
+  const ari = toFiniteNumberOrNull(m.avgARI) ?? 100;
+
+  if (fam === 'pricing_resistance' && rgi < 100 && ari > 100 && mpi < 100) return 100;
+  if (fam === 'mix_constraint' && perf === 'volume_led_recovery') return 95;
+  if (fam === 'pricing_resistance') return 85;
+  if (fam === 'mix_constraint') return 80;
+  if (fam === 'discount_inefficiency') return 70;
+  if (fam === 'missed_pricing_opportunity') return 60;
+  if (fam === 'visibility_gap' && rgi < 100 && ari > 100 && mpi < 100) return 20;
+  if (fam === 'visibility_gap') return 50;
+  return 40;
+}
+
+function enforceReasoningCandidateHierarchy(candidates) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const byWeek = new Map();
+  for (const c of list) {
+    const key = Number(c.weekOrdinal);
+    if (!byWeek.has(key)) byWeek.set(key, []);
+    byWeek.get(key).push(c);
+  }
+  const out = [];
+  for (const weekList of byWeek.values()) {
+    const hasPricingOrMixTruth = weekList.some(
+      (c) =>
+        c.family === 'pricing_resistance' ||
+        c.family === 'mix_constraint' ||
+        c.performance_story === 'volume_led_recovery'
+    );
+    const filtered = hasPricingOrMixTruth
+      ? weekList.filter((c) => c.family !== 'visibility_gap')
+      : weekList;
+    out.push(...filtered);
+  }
+  return out;
 }
 
 function attributePrimarySegmentDriver(pmsRows, context) {
@@ -3295,6 +3354,10 @@ function buildRetailCommercialDecision(context, performanceStory, segmentAttribu
       risk === 'high'
         ? 'Volume-led recovery is concentrated in potentially displacing day types; protect value on peak windows.'
         : 'Volume-led recovery appears controlled in non-peak day types; continue selective pricing/mix strategy while rebuilding fair share.';
+  } else if (cls.position === 'underperforming' && (cls.ari || 0) > 100 && (cls.mpi || 0) < 100) {
+    family = 'pricing_resistance';
+    primary_driver = 'pricing';
+    rationale = 'Below-fair-share performance with ARI premium and MPI weakness indicates pricing-led share rejection.';
   }
 
   return {
@@ -3308,6 +3371,24 @@ function buildRetailCommercialDecision(context, performanceStory, segmentAttribu
 
 function buildRetailReasoningIssue({ context, performanceStory, segmentAttribution, dailyValidation, finalDecision }) {
   if (!finalDecision?.issue_family) return null;
+  const positionSummary =
+    performanceStory?.rgi != null
+      ? `RGI ${Number(performanceStory.rgi).toFixed(1)} (${performanceStory.position || 'unknown'}).`
+      : 'RGI position unavailable.';
+  const varianceSummary =
+    performanceStory?.rgiVar != null
+      ? `RGI variance vs LY ${Number(performanceStory.rgiVar).toFixed(1)}; MPI variance ${Number(performanceStory?.mpiVar ?? 0).toFixed(1)}; ARI variance ${Number(performanceStory?.ariVar ?? 0).toFixed(1)}.`
+      : 'Variance vs LY unavailable.';
+  const sourceSummary = `Source of movement: ${performanceStory?.source_of_movement || 'mixed'}.`;
+  const segmentSummary =
+    `Segment driver: ${segmentAttribution?.primary_segment || 'unknown'} ` +
+    `(RN delta ${segmentAttribution?.rn_delta ?? 'n/a'}, ADR delta ${segmentAttribution?.adr_delta ?? 'n/a'}).`;
+  const dailySummary =
+    dailyValidation?.displacement_risk === 'high'
+      ? 'Daily validation: low-rated growth appeared on peak dates, creating displacement risk.'
+      : dailyValidation?.displacement_risk === 'low'
+        ? 'Daily validation: growth concentrated on shoulder/low-demand dates, limiting displacement risk.'
+        : 'Daily validation inconclusive; maintain caution before escalation.';
   return {
     family: finalDecision.issue_family,
     primary_driver: finalDecision.primary_driver,
@@ -3327,6 +3408,13 @@ function buildRetailReasoningIssue({ context, performanceStory, segmentAttributi
       validated_low_demand_growth_dates: dailyValidation?.validated_low_demand_growth_dates || []
     },
     final_decision_rationale: finalDecision?.rationale || null,
+    narrative_chain: {
+      position_summary: positionSummary,
+      variance_summary: varianceSummary,
+      source_summary: sourceSummary,
+      segment_summary: segmentSummary,
+      daily_validation_summary_text: dailySummary
+    },
     reasoning: {
       position: {
         rgi_current: performanceStory?.rgi ?? null,
@@ -3414,10 +3502,16 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
       candidates.push({
         family: reasoningIssue.family,
         primary_driver: reasoningIssue.primary_driver,
+        reasoning_priority_score: rankReasoningCandidatePriority({
+          family: reasoningIssue.family,
+          performance_story: reasoningIssue.performance_story,
+          metrics
+        }),
         performance_story: reasoningIssue.performance_story,
         segment_attribution_summary: reasoningIssue.segment_attribution_summary,
         daily_validation_summary: reasoningIssue.daily_validation_summary,
         final_decision_rationale: reasoningIssue.final_decision_rationale,
+        narrative_chain: reasoningIssue.narrative_chain,
         weekKey,
         weekOrdinal: weekOrdinalMap.get(weekKey),
         metrics,
@@ -3434,7 +3528,11 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
     return { rawIssues: [], temporal_meta };
   }
 
-  candidates.sort((a, b) => {
+  const arbitratedCandidates = enforceReasoningCandidateHierarchy(candidates);
+  arbitratedCandidates.sort((a, b) => {
+    const pa = Number(a.reasoning_priority_score || 0);
+    const pb = Number(b.reasoning_priority_score || 0);
+    if (pb !== pa) return pb - pa;
     if (a.weekOrdinal !== b.weekOrdinal) return a.weekOrdinal - b.weekOrdinal;
     const ra = a.family || '';
     const rb = b.family || '';
@@ -3442,7 +3540,7 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
   });
 
   const byFamily = new Map();
-  for (const c of candidates) {
+  for (const c of arbitratedCandidates) {
     if (!byFamily.has(c.family)) byFamily.set(c.family, []);
     byFamily.get(c.family).push(c);
   }
