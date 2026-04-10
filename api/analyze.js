@@ -2887,6 +2887,10 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus, temporalCon
     });
 
     const rep = scored[0].ep;
+    const repWithContext =
+      scored.find(
+        ({ ep }) => ep?.segment_attribution_summary != null && ep?.daily_validation_summary != null
+      )?.ep || rep;
     let minStart = null;
     let maxEnd = null;
     const weekKeySet = new Set();
@@ -2943,8 +2947,8 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus, temporalCon
       representative_episode_type: representativeEpisodeType,
       ongoing_across_most_uploaded_period: isOngoingMost,
       performance_story: rep.performance_story || null,
-      segment_attribution_summary: rep.segment_attribution_summary || null,
-      daily_validation_summary: rep.daily_validation_summary || null,
+      segment_attribution_summary: repWithContext.segment_attribution_summary || null,
+      daily_validation_summary: repWithContext.daily_validation_summary || null,
       final_decision_rationale: rep.final_decision_rationale || null,
       narrative_chain: rep.narrative_chain || null,
       executive_synthesis: {
