@@ -3842,9 +3842,16 @@ function enrichRetailIssue(issue, ctx) {
 
   const { _library_actions, ...rest } = issue;
   issue = { ...rest, actions };
+  const mergedDiagnosis = {
+    ...(ctx?.diagnosis || {}),
+    metrics: {
+      ...((ctx?.diagnosis && ctx.diagnosis.metrics) || {}),
+      ...((issue && issue.card_metrics) || {})
+    }
+  };
   const commercialNarrative = buildCommercialNarrative(
     { issue_family: issue.issue_family },
-    ctx?.diagnosis,
+    mergedDiagnosis,
     issue.segment_attribution_summary,
     issue.daily_validation_summary,
     ctx?.pmsRows || [],
@@ -5339,7 +5346,7 @@ function buildControlledAction(issue, actionIntel, decision, context, quant) {
   const decisionText = d?.decision_type
     ? `Decision framing points to ${String(d.decision_type).replace(/_/g, ' ')}.`
     : 'Decision framing remains monitoring-oriented.';
-  const actionRationale = `${quantText} ${contextText} ${decisionText}`;
+  const actionRationale = '';
 
   const maxRev = Number(rev?.max || 0);
   const rnRisk = Number(rn || 0);
@@ -5368,6 +5375,7 @@ function buildControlledAction(issue, actionIntel, decision, context, quant) {
     action_title: actionTitle,
     action_summary: actionSummary,
     action_rationale: actionRationale,
+    internal_context_summary: `${quantText} ${contextText} ${decisionText}`,
     priority,
     confidence
   };
