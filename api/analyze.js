@@ -4504,207 +4504,245 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
   const ariVar = toFiniteNumberOrNull(diagnosis?.ariVar);
   const rgiVar = toFiniteNumberOrNull(diagnosis?.rgiVar);
   const family = (issue?.issue_family || '').toString();
+  const rows = Array.isArray(pmsRows) ? pmsRows : [];
 
-  if ((avgMPI === null || avgARI === null || avgRGI === null) && family !== 'visibility_gap') {
+  const mapSeg = (name = '') => {
+    const s = String(name).toLowerCase();
+    if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
+    if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
+    if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
+    if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
+    return 'other';
+  };
+  const segLabel = (seg) => {
+    if (seg === 'negotiated') return 'Negotiated';
+    if (seg === 'groups') return 'Groups';
+    if (seg === 'retail') return 'Retail';
+    if (seg === 'ota') return 'OTA';
+    return 'Other';
+  };
+  const pct = (v, d = 1) => (v === null || !Number.isFinite(v) ? null : `${v >= 0 ? '+' : ''}${v.toFixed(d)}%`);
+  const dirPoints = (v) => (v === null ? null : `${v >= 0 ? 'up' : 'down'} ${Math.abs(v).toFixed(1)} points vs LY`);
+  const parseYmd = (row) =>
+    row?.stay_date_ymd || row?.date_ymd || row?.stayDateYmd || row?.date || row?.Date || row?.['Date'] || null;
+  const toYmd = (raw) => {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d = parseExcelDate(s);
+    return d ? formatDateToYMD(d) : null;
+  };
+  const fmtDate = (ymd) => {
+    if (!ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+    const [y, mth, d] = ymd.split('-').map(Number);
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const mn = monthNames[(mth || 1) - 1];
+    if (!mn || !d) return null;
+    return `${d} ${mn}`;
+  };
+  const num = (row, keys) => {
+    for (const k of keys) {
+      const v = toFiniteNumberOrNull(row?.[k]);
+      if (v !== null) return v;
+    }
     return null;
-  }
+  };
+  const adrTyFromRow = (row) => {
+    const direct = num(row, ['ADR TY', 'adr ty', 'adr_ty', 'Average Rate TY', 'Avg Rate TY', 'adr_derived_ty_from_rev_rn']);
+    if (direct !== null) return direct;
+    const revTy = num(row, ['Booked Revenue TY', 'booked revenue ty', 'booked_revenue_ty', 'Revenue TY', 'revenue_ty']);
+    const rnTy = num(row, ['Room Nights On Books TY', 'room nights on books ty', 'rn_on_books_ty', 'RN TY', 'rn ty']);
+    return revTy !== null && rnTy !== null && rnTy > 0 ? revTy / rnTy : null;
+  };
+  const adrLyFromRow = (row) => {
+    const direct = num(row, [
+      'ADR LY', 'adr ly', 'adr_ly', 'Average Rate LY', 'Avg Rate LY',
+      'ADR STLY', 'adr stly', 'adr_stly', 'adr_derived_ly_from_rev_rn'
+    ]);
+    if (direct !== null) return direct;
+    const revLy = num(row, ['Booked Revenue LY', 'booked revenue ly', 'booked_revenue_ly', 'Revenue LY', 'revenue_ly', 'Booked Revenue STLY', 'booked_revenue_stly']);
+    const rnLy = num(row, ['Room Nights On Books LY', 'room nights on books ly', 'rn_ly_actual', 'Room Nights STLY', 'room nights stly', 'rn_stly', 'RN LY', 'rn ly']);
+    return revLy !== null && rnLy !== null && rnLy > 0 ? revLy / rnLy : null;
+  };
 
-  const primarySegment = segmentAttribution?.primary_segment || null;
-  const segRnDelta = toFiniteNumberOrNull(segmentAttribution?.rn_delta);
-  const segAdrDelta = toFiniteNumberOrNull(segmentAttribution?.adr_delta);
+  const segAgg = new Map();
+  const segDateAgg = new Map();
+  for (const row of rows) {
+    const seg = mapSeg(row?.market_segment_label || row?.['Market Segment Name'] || row?.['market segment name'] || row?.segment || '');
+    const rnTy = num(row, ['Room Nights On Books TY', 'room nights on books ty', 'rn_on_books_ty', 'RN TY', 'rn ty']);
+    const rnLy = num(row, ['Room Nights On Books LY', 'room nights on books ly', 'rn_ly_actual', 'Room Nights STLY', 'room nights stly', 'rn_stly', 'RN LY', 'rn ly']);
+    const adrTy = adrTyFromRow(row);
+    const adrLy = adrLyFromRow(row);
+    const revTy = (rnTy !== null && adrTy !== null) ? rnTy * adrTy : null;
+    const revLy = (rnLy !== null && adrLy !== null) ? rnLy * adrLy : null;
+    const ymd = toYmd(parseYmd(row));
 
-  let segAdrDeltaPct = null;
-  if (primarySegment && Array.isArray(pmsRows) && pmsRows.length) {
-    const mapSeg = (name = '') => {
-      const s = String(name).toLowerCase();
-      if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
-      if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
-      if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
-      if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
-      return 'other';
-    };
-    const segRows = pmsRows.filter(row => {
-      const name = row['Market Segment Name'] || row['market segment name'] || row.segment || '';
-      return mapSeg(name) === primarySegment;
-    });
-    const adrTyVals = segRows.map(r => toFiniteNumberOrNull(
-      r['ADR TY'] || r['adr ty'] || r.adr_ty || r['Average Rate TY'] || r['Avg Rate TY']
-    )).filter(v => v !== null && v > 0);
-    const adrLyVals = segRows.map(r => toFiniteNumberOrNull(
-      r['ADR LY'] || r['adr ly'] || r.adr_ly || r['Average Rate LY'] || r['Avg Rate LY'] ||
-      r['ADR STLY'] || r['adr stly'] || r.adr_stly
-    )).filter(v => v !== null && v > 0);
-    if (adrTyVals.length && adrLyVals.length) {
-      const avgTy = adrTyVals.reduce((a, b) => a + b, 0) / adrTyVals.length;
-      const avgLy = adrLyVals.reduce((a, b) => a + b, 0) / adrLyVals.length;
-      if (avgLy > 0) segAdrDeltaPct = ((avgTy - avgLy) / avgLy) * 100;
+    if (!segAgg.has(seg)) segAgg.set(seg, { seg, rnTy: 0, rnLy: 0, revTy: 0, revLy: 0, rnTySeen: false, rnLySeen: false, revTySeen: false, revLySeen: false });
+    const a = segAgg.get(seg);
+    if (rnTy !== null) { a.rnTy += rnTy; a.rnTySeen = true; }
+    if (rnLy !== null) { a.rnLy += rnLy; a.rnLySeen = true; }
+    if (revTy !== null) { a.revTy += revTy; a.revTySeen = true; }
+    if (revLy !== null) { a.revLy += revLy; a.revLySeen = true; }
+
+    if (ymd) {
+      const k = `${seg}|${ymd}`;
+      if (!segDateAgg.has(k)) segDateAgg.set(k, { seg, ymd, rnTy: 0, rnLy: 0, revTy: 0, revLy: 0, rnTySeen: false, rnLySeen: false, revTySeen: false, revLySeen: false });
+      const d = segDateAgg.get(k);
+      if (rnTy !== null) { d.rnTy += rnTy; d.rnTySeen = true; }
+      if (rnLy !== null) { d.rnLy += rnLy; d.rnLySeen = true; }
+      if (revTy !== null) { d.revTy += revTy; d.revTySeen = true; }
+      if (revLy !== null) { d.revLy += revLy; d.revLySeen = true; }
     }
   }
 
-  let paceGapPct = null;
-  let paceDirection = null;
-  if (Array.isArray(pmsRows) && pmsRows.length) {
-    const rnTyVals = pmsRows.map(r => toFiniteNumberOrNull(
-      r['Room Nights On Books TY'] || r['room nights on books ty'] || r.rn_on_books_ty || r['RN TY'] || r['rn ty']
-    )).filter(v => v !== null && v > 0);
-    const rnLyVals = pmsRows.map(r => toFiniteNumberOrNull(
-      r['Room Nights On Books LY'] || r['room nights on books ly'] || r.rn_ly_actual ||
-      r['Room Nights STLY'] || r['room nights stly'] || r.rn_stly || r['RN LY'] || r['rn ly']
-    )).filter(v => v !== null && v > 0);
-    if (rnTyVals.length && rnLyVals.length) {
-      const totalTy = rnTyVals.reduce((a, b) => a + b, 0);
-      const totalLy = rnLyVals.reduce((a, b) => a + b, 0);
-      if (totalLy > 0) {
-        paceGapPct = ((totalTy - totalLy) / totalLy) * 100;
-        paceDirection = paceGapPct >= 0 ? 'ahead' : 'behind';
-      }
-    }
+  const segStats = [...segAgg.values()].map((x) => {
+    const rnDelta = (x.rnTySeen && x.rnLySeen) ? (x.rnTy - x.rnLy) : null;
+    const rnPct = (rnDelta !== null && x.rnLy > 0) ? (rnDelta / x.rnLy) * 100 : null;
+    const adrTy = (x.revTySeen && x.rnTy > 0) ? (x.revTy / x.rnTy) : null;
+    const adrLy = (x.revLySeen && x.rnLy > 0) ? (x.revLy / x.rnLy) : null;
+    const adrPct = (adrTy !== null && adrLy !== null && adrLy > 0) ? ((adrTy - adrLy) / adrLy) * 100 : null;
+    return { ...x, rnDelta, rnPct, adrTy, adrLy, adrPct, absDelta: rnDelta === null ? 0 : Math.abs(rnDelta) };
+  }).sort((a, b) => b.absDelta - a.absDelta);
+
+  const topGrower = segStats.find((s) => s.rnDelta !== null && s.rnDelta > 0) || null;
+  const topDecliner = segStats.find((s) => s.rnDelta !== null && s.rnDelta < 0) || null;
+
+  const peakDatesFromValidation = Array.isArray(dailyValidation?.validated_peak_growth_dates)
+    ? [...new Set(dailyValidation.validated_peak_growth_dates.map((d) => toYmd(d)).filter(Boolean))].sort()
+    : [];
+  const peakDates = peakDatesFromValidation.slice(0, 5);
+  const peakDateSet = new Set(peakDates);
+
+  let peakGrowthDates = [];
+  let confirmedDisplacementDates = [];
+  if (topGrower) {
+    const segDateRows = [...segDateAgg.values()].filter((x) => x.seg === topGrower.seg);
+    peakGrowthDates = segDateRows
+      .filter((x) => x.rnTySeen && x.rnLySeen && x.rnTy > x.rnLy && peakDateSet.has(x.ymd))
+      .map((x) => x.ymd)
+      .sort();
+    confirmedDisplacementDates = segDateRows
+      .filter((x) => {
+        if (!(x.rnTySeen && x.rnLySeen && x.rnTy > x.rnLy && peakDateSet.has(x.ymd))) return false;
+        const adrTy = x.rnTy > 0 && x.revTySeen ? x.revTy / x.rnTy : null;
+        const adrLy = x.rnLy > 0 && x.revLySeen ? x.revLy / x.rnLy : null;
+        return adrTy !== null && adrLy !== null && adrTy < adrLy;
+      })
+      .map((x) => x.ymd)
+      .sort();
   }
 
-  const fmt1 = v => v !== null ? Math.abs(v).toFixed(1) : null;
-  const fmt0 = v => v !== null ? Math.abs(Math.round(v)) : null;
-  const dir = (v, posWord, negWord) => v === null ? null : v > 0 ? posWord : negWord;
+  const totalRnTy = rows.reduce((s, row) => s + (num(row, ['Room Nights On Books TY', 'room nights on books ty', 'rn_on_books_ty', 'RN TY', 'rn ty']) || 0), 0);
+  const totalRnStly = rows.reduce((s, row) => s + (num(row, ['Room Nights STLY', 'room nights stly', 'rn_stly']) || 0), 0);
+  const totalRnLy = rows.reduce((s, row) => s + (num(row, ['Room Nights On Books LY', 'room nights on books ly', 'rn_ly_actual', 'RN LY', 'rn ly']) || 0), 0);
+  const paceBase = totalRnStly > 0 ? totalRnStly : totalRnLy > 0 ? totalRnLy : null;
+  const paceGapPct = paceBase ? ((totalRnTy - paceBase) / paceBase) * 100 : null;
+
+  const fmtPeakDates = (dates) => dates.map((d) => fmtDate(d)).filter(Boolean).slice(0, 5).join(', ');
+  const topGrowerLine = topGrower && (topGrower.rnPct !== null || topGrower.adrPct !== null)
+    ? `${segLabel(topGrower.seg)} grew room nights ${pct(topGrower.rnPct) || ''}${topGrower.adrPct !== null ? ` with ADR ${pct(topGrower.adrPct)}` : ''}.`.replace(/\s+/g, ' ').trim()
+    : null;
+  const topDeclinerLine = topDecliner && (topDecliner.rnPct !== null || topDecliner.adrPct !== null)
+    ? `${segLabel(topDecliner.seg)} declined room nights ${pct(topDecliner.rnPct) || ''}${topDecliner.adrPct !== null ? ` with ADR ${pct(topDecliner.adrPct)}` : ''}.`.replace(/\s+/g, ' ').trim()
+    : null;
+
+  const lines = [];
+  const pushLine = (t) => { if (t && t.trim()) lines.push(t.trim()); };
+  const trendStr = [
+    mpiVar !== null ? `MPI ${dirPoints(mpiVar)}` : null,
+    ariVar !== null ? `ARI ${dirPoints(ariVar)}` : null,
+    rgiVar !== null ? `RGI ${dirPoints(rgiVar)}` : null
+  ].filter(Boolean).join('; ');
+
+  if (family === 'pricing_resistance') {
+    pushLine([
+      avgARI !== null ? `ARI is ${avgARI.toFixed(1)}` : null,
+      avgMPI !== null ? `MPI is ${avgMPI.toFixed(1)}` : null,
+      avgRGI !== null ? `RGI is ${avgRGI.toFixed(1)}` : null
+    ].filter(Boolean).join(', ') + (trendStr ? `. ${trendStr}.` : '.'));
+    pushLine([topGrowerLine, topDeclinerLine].filter(Boolean).join(' ') || null);
+    if (confirmedDisplacementDates.length) {
+      pushLine(`On ${fmtPeakDates(confirmedDisplacementDates)} the ${segLabel(topGrower.seg)} segment grew volume at below-last-year ADR on peak occupancy days above 85%, confirming displacement risk.`);
+    } else if (peakGrowthDates.length) {
+      pushLine(`Peak-date checks on ${fmtPeakDates(peakGrowthDates)} show growth on high-occupancy days without confirmed below-last-year ADR displacement.`);
+    } else if (peakDates.length) {
+      pushLine(`Peak-date checks on ${fmtPeakDates(peakDates)} are clean for confirmed low-rated displacement in the lead growth segment.`);
+    }
+    if (paceGapPct !== null) pushLine(`Forward room-night pace is ${pct(paceGapPct)} versus reference pace, so rate decisions now directly determine whether the share gap closes or widens.`);
+    pushLine(`Decide now between targeted rate correction on loss-making dates and segments or holding premium and accepting continued sub-fair-share performance.`);
+    return lines.slice(0, 5).join('\n\n');
+  }
 
   if (
     family === 'intentional_volume_recovery' ||
-    (avgARI < 100 && avgMPI > 95 && mpiVar !== null && mpiVar > 0 && ariVar !== null && ariVar < 0)
+    (avgARI !== null && avgMPI !== null && avgARI < 100 && avgMPI > 95 && mpiVar !== null && mpiVar > 0 && ariVar !== null && ariVar < 0)
   ) {
-    const mpiVarStr = mpiVar !== null ? `${fmt1(mpiVar)} points` : 'meaningfully';
-    const ariVarStr = ariVar !== null ? `${fmt1(Math.abs(ariVar))} points` : 'significantly';
-    const rgiStr = avgRGI !== null ? avgRGI.toFixed(1) : null;
-    const fairShareGap = avgRGI !== null ? (100 - avgRGI).toFixed(1) : null;
-
-    let para1 = `You are trading rate for share`;
-    if (primarySegment && primarySegment !== 'unknown') {
-      para1 += ` — and the ${primarySegment} segment is doing most of the work`;
+    pushLine(`This is a deliberate volume-recovery posture: ${avgARI !== null ? `ARI ${avgARI.toFixed(1)}` : ''}${avgMPI !== null ? `, MPI ${avgMPI.toFixed(1)}` : ''}${avgRGI !== null ? `, RGI ${avgRGI.toFixed(1)}` : ''}. ${trendStr}`.trim());
+    pushLine(topGrowerLine || null);
+    if (confirmedDisplacementDates.length) {
+      pushLine(`On ${fmtPeakDates(confirmedDisplacementDates)} the recovery segment is growing on peak dates at below-last-year ADR, which indicates value destruction rather than need-period fill.`);
+    } else if (peakGrowthDates.length) {
+      pushLine(`Growth dates on peaks are ${fmtPeakDates(peakGrowthDates)} and do not show confirmed below-last-year ADR displacement.`);
+    } else if (topGrower) {
+      pushLine(`Current growth in ${segLabel(topGrower.seg)} is concentrated away from confirmed peak-displacement signals, consistent with need-period filling.`);
     }
-    para1 += `. MPI has recovered ${mpiVarStr} versus last year while ARI has fallen ${ariVarStr}.`;
-    if (segAdrDeltaPct !== null) {
-      const pctStr = Math.abs(segAdrDeltaPct).toFixed(0);
-      const segDir = segAdrDeltaPct < 0 ? 'lower' : 'higher';
-      if (primarySegment && primarySegment !== 'unknown') {
-        para1 += ` The ${primarySegment} segment is booking at rates ${pctStr}% ${segDir} than last year.`;
-      }
-    }
-    para1 += ` The question is not whether ARI is low. The question is whether this was the plan, and whether it is working.`;
-
-    let para2 = '';
-    if (rgiStr !== null && fairShareGap !== null) {
-      if (avgRGI >= 98) {
-        para2 = `RGI at ${rgiStr} says it is almost working — you are ${fairShareGap} points from fair share on total revenue performance.`;
-      } else if (avgRGI >= 95) {
-        para2 = `RGI at ${rgiStr} says the strategy is partially working but you are still ${fairShareGap} points below fair share.`;
-      } else {
-        para2 = `RGI at ${rgiStr} says the strategy is not yet working — you are ${fairShareGap} points below fair share despite the volume push.`;
-      }
-    }
-
-    let para3 = '';
-    if (paceGapPct !== null) {
-      const paceStr = Math.abs(paceGapPct).toFixed(0);
-      if (paceDirection === 'behind') {
-        para2 += ` But you are behind pace by ${paceStr}% versus last year, which means the volume you bought with that rate discount has not fully materialized yet. You bought the discount. You have not yet received the occupancy.`;
-        para3 = `This is the dangerous position: you have already given up rate, but the demand you expected in return has not arrived. If pace does not close in the next 10 to 14 days, you will finish the period having diluted rate without recovering the volume that justified it. That is not a recovery strategy. That is a margin loss.`;
-      } else {
-        para2 += ` Pace is ${paceStr}% ahead of last year, which means the volume strategy is materializing.`;
-        para3 = `The trade-off is working on the volume side. The question now is how long to run it before rate dilution becomes structural rather than tactical.`;
-      }
-    }
-
-    const decisionLine = avgRGI < 100 && paceDirection === 'behind'
-      ? `The decision is not to fix pricing. The decision is: do you continue buying volume at these rates, or do you stop the bleeding and protect rate integrity on peak dates — accepting that MPI gain this period may come at the cost of RGI.`
-      : avgRGI >= 100
-        ? `The decision is when to begin recovering rate. Volume is performing. Continuing the current discount posture beyond this window risks making a tactical concession structural.`
-        : `The decision is whether the volume recovery justifies the rate cost at this point. The data says it is close — but not there yet.`;
-
-    return [para1, para2, para3, decisionLine].filter(s => s && s.trim()).join('\n\n');
-  }
-
-  if (family === 'pricing_resistance' || (avgARI > 100 && avgMPI < 100)) {
-    const ariStr = avgARI.toFixed(1);
-    const mpiStr = avgMPI.toFixed(1);
-    const rgiStr = avgRGI.toFixed(1);
-    const mpiVarStr = mpiVar !== null ? ` MPI has moved ${fmt1(mpiVar)} points ${dir(mpiVar, 'up', 'down')} versus last year.` : '';
-    const ariVarStr = ariVar !== null ? ` ARI has moved ${fmt1(ariVar)} points ${dir(ariVar, 'up', 'down')} versus last year.` : '';
-
-    let para1 = `The hotel is carrying a rate premium the market is not fully accepting. ARI at ${ariStr} means you are priced above the competitive set, but MPI at ${mpiStr} means you are losing share.${mpiVarStr}${ariVarStr}`;
-
-    let para2 = `RGI at ${rgiStr} tells the combined story: the rate premium is not being offset by enough volume to hold performance at fair share.`;
-    if (rgiVar !== null) {
-      para2 += ` This gap has ${dir(rgiVar, 'narrowed', 'widened')} by ${fmt1(rgiVar)} points versus last year — the trend is ${rgiVar > 0 ? 'moving in the right direction but not fast enough' : 'moving in the wrong direction'}.`;
-    }
-
-    let para3 = '';
-    if (paceGapPct !== null && paceDirection === 'behind') {
-      para3 = `Forward pace is ${Math.abs(paceGapPct).toFixed(0)}% behind last year. The current rate position is not generating enough forward bookings to close that gap. Waiting will not fix this — the window to act is now.`;
-    } else if (paceGapPct !== null && paceDirection === 'ahead') {
-      para3 = `Forward pace is ${Math.abs(paceGapPct).toFixed(0)}% ahead of last year despite the share weakness, which suggests rate is holding but at the cost of volume on specific day types or segments.`;
-    }
-
-    const decisionLine = `The decision is not whether to lower rates broadly. The decision is on which specific dates and segments the current premium is losing bookings it should be winning — and whether a targeted correction on those dates recovers more than it costs in rate integrity.`;
-
-    return [para1, para2, para3, decisionLine].filter(s => s && s.trim()).join('\n\n');
+    if (paceGapPct !== null) pushLine(`Pace is ${pct(paceGapPct)} versus reference, which indicates whether discount cost is producing the expected room-night response.`);
+    pushLine(paceGapPct !== null && paceGapPct >= 0
+      ? `Decide whether to continue this volume-recovery stance for one more cycle or begin rate restoration before discount behavior becomes structural.`
+      : `Decide whether to continue buying volume at this rate cost or stop and restore rate integrity because pace has not closed.`);
+    return lines.slice(0, 5).join('\n\n');
   }
 
   if (family === 'discount_inefficiency') {
-    const ariStr = avgARI.toFixed(1);
-    const mpiStr = avgMPI.toFixed(1);
-    const rgiStr = avgRGI.toFixed(1);
-
-    let para1 = `The hotel is already priced below the competitive set — ARI at ${ariStr} — but share is not responding. MPI at ${mpiStr} means discounting is not converting into occupancy. This is the most expensive position to be in: you have given up rate and you are not getting the volume in return.`;
-
-    let para2 = `RGI at ${rgiStr} reflects both losses simultaneously. Rate is diluted and share is weak.`;
-    if (segAdrDeltaPct !== null && primarySegment) {
-      const pctStr = Math.abs(segAdrDeltaPct).toFixed(0);
-      const segDir = segAdrDeltaPct < 0 ? 'lower' : 'higher';
-      para2 += ` The ${primarySegment} segment is at rates ${pctStr}% ${segDir} than last year and still not generating proportional volume growth.`;
-    }
-
-    const decisionLine = `The decision is not to discount further. Deeper cuts will not fix a conversion problem. The decision is to identify where in the booking path demand is leaking — channel friction, parity issues, content gaps — and fix the path before touching rate again.`;
-
-    return [para1, para2, decisionLine].filter(s => s && s.trim()).join('\n\n');
-  }
-
-  if (avgRGI >= 100) {
-    const rgiStr = avgRGI.toFixed(1);
-    const mpiStr = avgMPI.toFixed(1);
-    const ariStr = avgARI.toFixed(1);
-    const rgiVarStr = rgiVar !== null ? ` RGI has ${dir(rgiVar, 'improved', 'declined')} by ${fmt1(rgiVar)} points versus last year.` : '';
-    const sourceOfStrength = avgARI >= 100 && avgMPI >= 100
-      ? 'both rate and share are above market'
-      : avgARI >= 100
-        ? 'rate is above market but share is softer'
-        : 'share is strong but rate is below market — volume is driving the outperformance';
-
-    let para1 = `RGI at ${rgiStr} means the hotel is outperforming the competitive set on total revenue.${rgiVarStr} The composition matters: ${sourceOfStrength}.`;
-
-    let para2 = '';
-    if (avgARI < 100 && avgMPI >= 100) {
-      para2 = `Outperformance driven by volume at below-market rates is healthy in a recovery phase but carries risk if it continues beyond the window where it was needed. The question is whether the rate discount is still tactical or has become structural.`;
-    } else if (avgARI >= 100 && avgMPI < 100) {
-      para2 = `Rate premium above market is holding RGI strong, but share softness is a leading indicator — if MPI continues to decline, rate will eventually follow. Watch the trend, not just the level.`;
+    pushLine([
+      avgARI !== null ? `ARI is ${avgARI.toFixed(1)}` : null,
+      avgMPI !== null ? `MPI is ${avgMPI.toFixed(1)}` : null,
+      avgRGI !== null ? `RGI is ${avgRGI.toFixed(1)}` : null
+    ].filter(Boolean).join(', ') + '.');
+    if (topGrower && topGrower.adrPct !== null && topGrower.rnPct !== null) {
+      const dispro = Math.abs(topGrower.adrPct) > Math.abs(topGrower.rnPct);
+      pushLine(`${segLabel(topGrower.seg)} is discounting most aggressively (ADR ${pct(topGrower.adrPct)}) while room nights moved ${pct(topGrower.rnPct)}${dispro ? ', which is less than proportional to the rate cut' : ''}.`);
     } else {
-      para2 = `Both rate and share above market is the strongest position. The commercial focus should be on protecting this rather than chasing incremental gains that could destabilize the mix.`;
+      pushLine([topGrowerLine, topDeclinerLine].filter(Boolean).join(' ') || null);
     }
-
-    return [para1, para2].filter(s => s && s.trim()).join('\n\n');
+    if (peakGrowthDates.length) {
+      pushLine(`Discount-led growth appears on peak dates ${fmtPeakDates(peakGrowthDates)} where discount dependence should be minimal.`);
+    } else if (peakDates.length) {
+      pushLine(`Peak-date review on ${fmtPeakDates(peakDates)} does not show material discount-led volume growth.`);
+    }
+    pushLine(`Decide to stop further discount cuts and fix the demand leak location first: upstream demand capture versus booking-path execution.`);
+    return lines.slice(0, 5).join('\n\n');
   }
 
   if (family === 'visibility_gap') {
-    const hasGlobal = avgMPI !== null || avgARI !== null || avgRGI !== null || avgOcc !== null;
-    const mpiText = avgMPI !== null ? `MPI ${avgMPI.toFixed(1)}` : null;
-    const ariText = avgARI !== null ? `ARI ${avgARI.toFixed(1)}` : null;
-    const rgiText = avgRGI !== null ? `RGI ${avgRGI.toFixed(1)}` : null;
-    const metricSummary = [mpiText, ariText, rgiText].filter(Boolean).join(', ');
+    const hasMetrics = avgMPI !== null || avgARI !== null || avgRGI !== null;
+    if (!hasMetrics) {
+      pushLine(`This issue is generated from a lighter signal path and points to demand not reliably reaching the hotel before booking decisions are made.`);
+    } else {
+      pushLine([
+        avgMPI !== null ? `MPI is ${avgMPI.toFixed(1)}` : null,
+        avgARI !== null ? `ARI is ${avgARI.toFixed(1)}` : null,
+        avgRGI !== null ? `RGI is ${avgRGI.toFixed(1)}` : null
+      ].filter(Boolean).join(', ') + (trendStr ? `. ${trendStr}.` : '.'));
+    }
+    const weakestPickup = segStats
+      .filter((s) => s.rnPct !== null)
+      .sort((a, b) => a.rnPct - b.rnPct)[0];
+    if (weakestPickup) {
+      pushLine(`${segLabel(weakestPickup.seg)} shows the weakest pickup versus last year with room nights ${pct(weakestPickup.rnPct)}${weakestPickup.adrPct !== null ? ` and ADR ${pct(weakestPickup.adrPct)}` : ''}.`);
+    }
+    pushLine(`Decide whether the first intervention should be upstream demand generation or booking-path friction removal, and commit to one after identifying which gap is dominant.`);
+    return lines.slice(0, 5).join('\n\n');
+  }
 
-    const para1 = hasGlobal
-      ? `This issue points to upstream demand capture softness before the booking decision stage. Available market indicators (${metricSummary || 'limited index coverage'}) do not show a pure rate-position or conversion-collapse signal as the primary cause.`
-      : `This issue points to upstream demand capture softness before the booking decision stage, but index coverage for this card is limited in the current data path.`;
-    const para2 = hasGlobal
-      ? `The commercial question is reach and relevance: is qualified demand failing to enter the hotel funnel, or entering too late to convert at normal efficiency? This is primarily a demand-arrival problem, not a broad pricing or conversion reset by default.`
-      : `Because this card can be generated from a lighter signal path, treat the diagnosis as directional: the gap is likely in demand reaching the hotel funnel rather than in immediate booking-path execution.`;
-    const decisionLine = `The decision is where to intervene first: upstream demand generation or booking-path friction. Priority is to identify which one is dominant before spending on either.`;
-    return [para1, para2, decisionLine].filter(s => s && s.trim()).join('\n\n');
+  if (avgRGI !== null && avgRGI >= 100) {
+    pushLine(`RGI is ${avgRGI.toFixed(1)}, confirming outperformance versus the competitive set${rgiVar !== null ? ` with RGI ${dirPoints(rgiVar)}` : ''}.`);
+    if (topGrower) {
+      const healthy = topGrower.adrPct === null || topGrower.adrPct >= 0;
+      pushLine(`${segLabel(topGrower.seg)} is the primary performance driver with room nights ${pct(topGrower.rnPct)}${topGrower.adrPct !== null ? ` and ADR ${pct(topGrower.adrPct)}` : ''}, which is ${healthy ? 'quality-accretive' : 'potentially fragile due to rate dilution'}.`);
+    }
+    pushLine(`Decide whether to protect current mix quality and rate integrity or push incremental volume that risks eroding the outperformance base.`);
+    return lines.slice(0, 5).join('\n\n');
   }
 
   return null;
