@@ -2944,11 +2944,234 @@ function rankAndCapExecutiveRetailIssues(consolidatedIssues, maxCount) {
     .slice(0, maxCount);
 }
 
+function buildWeeklyMacroContext(strWeekRows, pmsRows) {
+  const metrics = buildWindowMetricsFromRows(strWeekRows || []);
+  const rgiVar = averageMetric(strWeekRows || [], ['RGI % Change', 'RGI %']);
+  const mpiVar = averageMetric(strWeekRows || [], ['MPI % Change', 'MPI %']);
+  const ariVar = averageMetric(strWeekRows || [], ['ARI % Change', 'ARI %']);
+  return {
+    metrics,
+    variance_vs_ly: {
+      rgi_variance_vs_ly: rgiVar,
+      mpi_variance_vs_ly: mpiVar,
+      ari_variance_vs_ly: ariVar
+    },
+    pms_rows_scanned: Array.isArray(pmsRows) ? pmsRows.length : 0
+  };
+}
+
+function classifyWeeklyPositionAndDirection(context) {
+  const m = context?.metrics || {};
+  const v = context?.variance_vs_ly || {};
+  const rgi = toFiniteNumberOrNull(m.avgRGI);
+  const mpi = toFiniteNumberOrNull(m.avgMPI);
+  const ari = toFiniteNumberOrNull(m.avgARI);
+  const rgiVar = toFiniteNumberOrNull(v.rgi_variance_vs_ly);
+  const mpiVar = toFiniteNumberOrNull(v.mpi_variance_vs_ly);
+  const ariVar = toFiniteNumberOrNull(v.ari_variance_vs_ly);
+
+  const position = rgi !== null && rgi > 100 ? 'outperforming' : rgi !== null ? 'underperforming' : 'unknown';
+  const direction =
+    rgiVar === null
+      ? 'unknown'
+      : rgiVar > 0
+        ? 'improving'
+        : rgiVar < 0
+          ? 'deteriorating'
+          : 'stable';
+
+  let source_of_movement = 'mixed';
+  if (mpiVar !== null || ariVar !== null) {
+    const a = Math.abs(Number(mpiVar || 0));
+    const b = Math.abs(Number(ariVar || 0));
+    if (a > b * 1.2) source_of_movement = 'MPI-led';
+    else if (b > a * 1.2) source_of_movement = 'ARI-led';
+  }
+
+  return { position, direction, source_of_movement, rgi, mpi, ari, rgiVar, mpiVar, ariVar };
+}
+
+function buildWeeklyPerformanceStory(context) {
+  const cls = classifyWeeklyPositionAndDirection(context);
+  let story = 'mixed_or_unclear';
+  if (cls.position === 'outperforming') {
+    if (cls.direction === 'improving') story = 'improving_outperformance';
+    else if (cls.direction === 'deteriorating') story = 'deteriorating_outperformance';
+    else if (cls.source_of_movement === 'MPI-led') story = 'mpi_led_outperformance';
+    else if (cls.source_of_movement === 'ARI-led') story = 'ari_led_outperformance';
+    else story = 'stable_outperformance';
+  } else if (cls.position === 'underperforming') {
+    if (
+      cls.direction === 'improving' &&
+      (cls.mpiVar || 0) > 0 &&
+      (cls.ariVar || 0) < 0
+    ) {
+      story = 'volume_led_recovery';
+    } else if (cls.source_of_movement === 'ARI-led' && (cls.ari || 0) > 100 && (cls.mpi || 0) < 100) {
+      story = 'pricing_resistance_underperformance';
+    } else if ((cls.ari || 0) < 100 && (cls.mpi || 0) <= 100) {
+      story = 'discount_or_conversion_drag';
+    } else {
+      story = 'share_softness_underperformance';
+    }
+  }
+  return { ...cls, performance_story: story };
+}
+
+function attributePrimarySegmentDriver(pmsRows, context) {
+  const list = Array.isArray(pmsRows) ? pmsRows : [];
+  if (!list.length) {
+    return { primary_segment: 'unknown', segment_scores: [], attribution_confidence: 'low' };
+  }
+
+  const bucket = new Map();
+  const mapSeg = (name = '') => {
+    const s = String(name).toLowerCase();
+    if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
+    if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
+    if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
+    if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
+    return 'other';
+  };
+
+  for (const row of list) {
+    const segName =
+      row['market segment name'] ||
+      row['Market Segment Name'] ||
+      row.segment ||
+      row.Segment ||
+      'other';
+    const seg = mapSeg(segName);
+    const rnTy = toFiniteNumberOrNull(
+      row['room nights on books ty'] || row['Room Nights On Books TY'] || row.rn_on_books_ty || row.rn
+    ) || 0;
+    const rnLy = toFiniteNumberOrNull(
+      row['room nights on books ly'] || row['Room Nights On Books LY'] || row.rn_ly_actual
+    ) || 0;
+    const delta = rnTy - rnLy;
+    if (!bucket.has(seg)) bucket.set(seg, { segment: seg, rn_delta: 0, count: 0 });
+    const b = bucket.get(seg);
+    b.rn_delta += delta;
+    b.count += 1;
+  }
+
+  const segmentScores = Array.from(bucket.values()).sort((a, b) => Math.abs(b.rn_delta) - Math.abs(a.rn_delta));
+  const primary = segmentScores[0]?.segment || 'unknown';
+  return {
+    primary_segment: primary,
+    segment_scores: segmentScores.slice(0, 5),
+    attribution_confidence: segmentScores.length > 0 ? 'medium' : 'low'
+  };
+}
+
+function buildDailyValidationLayer(strWeekRows, pmsRows, context, segmentAttribution) {
+  const rows = Array.isArray(strWeekRows) ? strWeekRows : [];
+  if (!rows.length) return { displacement_risk: 'unknown', validation_notes: ['no_daily_rows'] };
+  const dayClass = { peak: 0, shoulder: 0, low_demand: 0 };
+  for (const r of rows) {
+    const occ = toFiniteNumberOrNull(getMetricFromRow(r, ['Occupancy %', 'Hotel Occupancy %']));
+    if (occ === null) continue;
+    if (occ >= 85) dayClass.peak += 1;
+    else if (occ >= 72) dayClass.shoulder += 1;
+    else dayClass.low_demand += 1;
+  }
+
+  const story = context?.performance_story || 'mixed_or_unclear';
+  const seg = segmentAttribution?.primary_segment || 'unknown';
+  let displacementRisk = 'unknown';
+  if (dayClass.peak > 0 && story === 'volume_led_recovery' && (seg === 'retail' || seg === 'ota' || seg === 'other')) {
+    displacementRisk = 'high';
+  } else if (dayClass.peak === 0 && story === 'volume_led_recovery') {
+    displacementRisk = 'low';
+  } else if (dayClass.peak > 0 && story.includes('underperformance')) {
+    displacementRisk = 'medium';
+  } else {
+    displacementRisk = 'low';
+  }
+
+  return {
+    displacement_risk: displacementRisk,
+    day_mix: dayClass,
+    validation_notes: [
+      `daily_peak_days=${dayClass.peak}`,
+      `daily_shoulder_days=${dayClass.shoulder}`,
+      `daily_low_demand_days=${dayClass.low_demand}`
+    ]
+  };
+}
+
+function buildRetailCommercialDecision(context, performanceStory, segmentAttribution, dailyValidation) {
+  const cls = performanceStory || {};
+  const seg = segmentAttribution?.primary_segment || 'unknown';
+  const risk = dailyValidation?.displacement_risk || 'unknown';
+
+  let family = 'visibility_gap';
+  let primary_driver = 'visibility';
+  let rationale = 'Share softness requires closer commercial visibility and capture discipline.';
+
+  if (cls.position === 'outperforming') {
+    if (cls.direction === 'deteriorating') {
+      family = 'visibility_gap';
+      primary_driver = 'visibility';
+      rationale = 'Outperformance is deteriorating; preserve share momentum before slippage compounds.';
+    } else {
+      return { issue_family: null, primary_driver: null, rationale: 'healthy_outperformance_no_issue' };
+    }
+  } else if (cls.performance_story === 'pricing_resistance_underperformance') {
+    family = 'pricing_resistance';
+    primary_driver = 'pricing';
+    rationale = 'ARI premium with MPI weakness indicates pricing friction against demand capture.';
+  } else if (cls.performance_story === 'discount_or_conversion_drag') {
+    family = 'discount_inefficiency';
+    primary_driver = 'conversion';
+    rationale = 'ARI/MPI weakness indicates discount or conversion inefficiency; discounting remains subordinate to core strategy.';
+  } else if (cls.performance_story === 'volume_led_recovery') {
+    family = risk === 'high' ? 'mix_constraint' : 'visibility_gap';
+    primary_driver = risk === 'high' ? 'mix_strategy' : 'visibility';
+    rationale =
+      risk === 'high'
+        ? 'Volume-led recovery is concentrated in potentially displacing day types; protect value on peak windows.'
+        : 'Volume-led recovery appears acceptable in non-peak day types; continue controlled demand capture.';
+  }
+
+  return {
+    issue_family: family,
+    primary_driver,
+    rationale,
+    segment_driver: seg,
+    displacement_risk: risk
+  };
+}
+
+function buildRetailReasoningIssue({ context, performanceStory, segmentAttribution, dailyValidation, finalDecision }) {
+  if (!finalDecision?.issue_family) return null;
+  return {
+    family: finalDecision.issue_family,
+    primary_driver: finalDecision.primary_driver,
+    reasoning: {
+      position: {
+        rgi_current: performanceStory?.rgi ?? null,
+        mpi_current: performanceStory?.mpi ?? null,
+        ari_current: performanceStory?.ari ?? null
+      },
+      variance: {
+        rgi_variance_vs_ly: performanceStory?.rgiVar ?? null,
+        mpi_variance_vs_ly: performanceStory?.mpiVar ?? null,
+        ari_variance_vs_ly: performanceStory?.ariVar ?? null
+      },
+      performance_story: performanceStory?.performance_story || null,
+      segment_attribution: segmentAttribution || null,
+      daily_truth_validation: dailyValidation || null,
+      final_decision: finalDecision || null
+    }
+  };
+}
+
 /**
  * Internal weekly temporal pipeline: windows -> weekly specs -> episodes -> raw issue objects.
  * Returns { rawIssues, temporal_meta } or { rawIssues: [], temporal_meta } if unusable.
  */
-function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver) {
+function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = []) {
   const byWeek = groupStrRowsByCalendarWeek(strRows);
   const sortedWeekKeys = [...byWeek.keys()].sort();
 
@@ -2989,11 +3212,29 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver) {
       trend_status: trend
     });
 
-    const specs = detectRetailIssueSpecs(windowDiagnosis, focus, driver);
-    for (const spec of specs) {
+    const pmsWeekRows = (Array.isArray(pmsRows) ? pmsRows : []).filter((row) => {
+      const ymd = row?._ingestion?.stay_date_ymd || getRowStayDateYmd(row);
+      return ymd && minYmd && maxYmd ? ymd >= minYmd && ymd <= maxYmd : false;
+    });
+    const macroContext = buildWeeklyMacroContext(rows, pmsWeekRows);
+    const perfStory = buildWeeklyPerformanceStory(macroContext);
+    const segAttr = attributePrimarySegmentDriver(pmsWeekRows, perfStory);
+    const dailyValidation = buildDailyValidationLayer(rows, pmsWeekRows, perfStory, segAttr);
+    const finalDecision = buildRetailCommercialDecision(macroContext, perfStory, segAttr, dailyValidation);
+    const reasoningIssue = buildRetailReasoningIssue({
+      context: macroContext,
+      performanceStory: perfStory,
+      segmentAttribution: segAttr,
+      dailyValidation,
+      finalDecision
+    });
+
+    temporal_meta.weekly_windows[temporal_meta.weekly_windows.length - 1].weekly_reasoning = reasoningIssue?.reasoning || null;
+
+    if (reasoningIssue) {
       candidates.push({
-        family: spec.family,
-        primary_driver: spec.primary_driver,
+        family: reasoningIssue.family,
+        primary_driver: reasoningIssue.primary_driver,
         weekKey,
         weekOrdinal: weekOrdinalMap.get(weekKey),
         metrics,
@@ -5325,7 +5566,7 @@ async function handler(req, res) {
     let retailTemporalMeta = null;
 
     if ((focus?.focus_segment || '') === 'retail') {
-      const weekly = buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver);
+      const weekly = buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows);
       retailTemporalMeta = weekly.temporal_meta;
 
       let rawIssues = weekly.rawIssues;
