@@ -5641,9 +5641,31 @@ function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummar
   const arbByKey = new Map(arbRows.map((x) => [x.finding_key, x]));
   const portfolioPrimaryDriver = decisionArbitrationSummary?.portfolio_primary_driver || null;
 
+  // Final arbitration-role correction from the final selected set (post ranking/selection).
+  const finalPricingTruthIssue = list.find((issue) => {
+    if ((issue?.segment || 'retail') !== 'retail') return false;
+    const driver = issue?.primary_driver || issue?.driver;
+    const m = issue?.card_metrics || {};
+    const ari = Number(m.avgARI);
+    const mpi = Number(m.avgMPI);
+    const rgi = Number(m.avgRGI);
+    return driver === 'pricing' && Number.isFinite(ari) && Number.isFinite(mpi) && Number.isFinite(rgi) && ari > 100 && mpi < 100 && rgi < 100;
+  });
+
   return list.map((issue) => {
-    const arb = arbByKey.get(issue.finding_key);
+    let arb = arbByKey.get(issue.finding_key);
     if (!arb || (issue?.segment || 'retail') !== 'retail') return issue;
+
+    if (finalPricingTruthIssue) {
+      const isWinner = issue.finding_key === finalPricingTruthIssue.finding_key;
+      const issueDriver = issue?.primary_driver || issue?.driver;
+      const issueFamily = issue?.issue_family || '';
+      if (isWinner) {
+        arb = { ...arb, arbitration_role: 'primary', primary_driver: 'pricing' };
+      } else if (issueDriver === 'visibility' || issueDriver === 'distribution' || issueFamily === 'visibility_gap') {
+        arb = { ...arb, arbitration_role: 'supporting' };
+      }
+    }
 
     const enforcedDecisionLine = buildEnforcedDecisionLine(issue, arb, portfolioPrimaryDriver);
     const enforcedExecutionActions = buildEnforcedExecutionActions(issue, arb, portfolioPrimaryDriver);
