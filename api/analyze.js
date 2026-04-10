@@ -3327,6 +3327,19 @@ function buildRetailCommercialDecision(context, performanceStory, segmentAttribu
   const seg = segmentAttribution?.primary_segment || 'unknown';
   const risk = dailyValidation?.displacement_risk || 'unknown';
 
+  // Hard commercial KPI override: premium + weak share under market = pricing truth.
+  if (
+    Number(context?.metrics?.avgRGI) < 100 &&
+    Number(context?.metrics?.avgARI) > 100 &&
+    Number(context?.metrics?.avgMPI) < 100
+  ) {
+    return {
+      issue_family: 'pricing_resistance',
+      primary_driver: 'pricing',
+      rationale: 'Rate premium is limiting share capture below fair market level.'
+    };
+  }
+
   let family = 'visibility_gap';
   let primary_driver = 'visibility';
   let rationale = 'Share softness requires closer commercial visibility and capture discipline.';
