@@ -4523,8 +4523,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
   };
   const pct = (v, d = 1) => (v === null || !Number.isFinite(v) ? null : `${v >= 0 ? '+' : ''}${v.toFixed(d)}%`);
   const dirPoints = (v) => (v === null ? null : `${v >= 0 ? 'up' : 'down'} ${Math.abs(v).toFixed(1)} points vs LY`);
-  const parseYmd = (row) =>
-    row?.stay_date_ymd || row?.date_ymd || row?.stayDateYmd || row?.date || row?.Date || row?.['Date'] || null;
+  const parseYmd = (row) => row?.['Date'] || null;
   const toYmd = (raw) => {
     if (!raw) return null;
     const s = String(raw).trim();
@@ -4548,29 +4547,26 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     return null;
   };
   const adrTyFromRow = (row) => {
-    const direct = num(row, ['ADR TY', 'adr ty', 'adr_ty', 'Average Rate TY', 'Avg Rate TY', 'adr_derived_ty_from_rev_rn']);
-    if (direct !== null) return direct;
-    const revTy = num(row, ['Booked Revenue TY', 'booked revenue ty', 'booked_revenue_ty', 'Revenue TY', 'revenue_ty']);
-    const rnTy = num(row, ['Room Nights On Books TY', 'room nights on books ty', 'rn_on_books_ty', 'RN TY', 'rn ty']);
+    const direct = num(row, ['ADR TY']);
+    if (direct !== null && direct !== 0) return direct;
+    const revTy = num(row, ['Revenue TY (Actual / OTB)']);
+    const rnTy = num(row, ['Room Nights TY (Actual / OTB)']);
     return revTy !== null && rnTy !== null && rnTy > 0 ? revTy / rnTy : null;
   };
   const adrLyFromRow = (row) => {
-    const direct = num(row, [
-      'ADR LY', 'adr ly', 'adr_ly', 'Average Rate LY', 'Avg Rate LY',
-      'ADR STLY', 'adr stly', 'adr_stly', 'adr_derived_ly_from_rev_rn'
-    ]);
-    if (direct !== null) return direct;
-    const revLy = num(row, ['Booked Revenue LY', 'booked revenue ly', 'booked_revenue_ly', 'Revenue LY', 'revenue_ly', 'Booked Revenue STLY', 'booked_revenue_stly']);
-    const rnLy = num(row, ['Room Nights On Books LY', 'room nights on books ly', 'rn_ly_actual', 'Room Nights STLY', 'room nights stly', 'rn_stly', 'RN LY', 'rn ly']);
+    const direct = num(row, ['ADR LY']);
+    if (direct !== null && direct !== 0) return direct;
+    const revLy = num(row, ['Revenue LY Actual']);
+    const rnLy = num(row, ['Room Nights LY Actual']);
     return revLy !== null && rnLy !== null && rnLy > 0 ? revLy / rnLy : null;
   };
 
   const segAgg = new Map();
   const segDateAgg = new Map();
   for (const row of rows) {
-    const seg = mapSeg(row?.market_segment_label || row?.['Market Segment Name'] || row?.['market segment name'] || row?.segment || '');
-    const rnTy = num(row, ['Room Nights On Books TY', 'room nights on books ty', 'rn_on_books_ty', 'RN TY', 'rn ty']);
-    const rnLy = num(row, ['Room Nights On Books LY', 'room nights on books ly', 'rn_ly_actual', 'Room Nights STLY', 'room nights stly', 'rn_stly', 'RN LY', 'rn ly']);
+    const seg = mapSeg(row?.['Market Segment Name'] || '');
+    const rnTy = num(row, ['Room Nights TY (Actual / OTB)']);
+    const rnLy = num(row, ['Room Nights LY Actual']);
     const adrTy = adrTyFromRow(row);
     const adrLy = adrLyFromRow(row);
     const revTy = (rnTy !== null && adrTy !== null) ? rnTy * adrTy : null;
@@ -4632,9 +4628,9 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
       .sort();
   }
 
-  const totalRnTy = rows.reduce((s, row) => s + (num(row, ['Room Nights On Books TY', 'room nights on books ty', 'rn_on_books_ty', 'RN TY', 'rn ty']) || 0), 0);
-  const totalRnStly = rows.reduce((s, row) => s + (num(row, ['Room Nights STLY', 'room nights stly', 'rn_stly']) || 0), 0);
-  const totalRnLy = rows.reduce((s, row) => s + (num(row, ['Room Nights On Books LY', 'room nights on books ly', 'rn_ly_actual', 'RN LY', 'rn ly']) || 0), 0);
+  const totalRnTy = rows.reduce((s, row) => s + (num(row, ['Room Nights TY (Actual / OTB)']) || 0), 0);
+  const totalRnStly = rows.reduce((s, row) => s + (num(row, ['Room Nights STLY']) || 0), 0);
+  const totalRnLy = rows.reduce((s, row) => s + (num(row, ['Room Nights LY Actual']) || 0), 0);
   const paceBase = totalRnStly > 0 ? totalRnStly : totalRnLy > 0 ? totalRnLy : null;
   const paceGapPct = paceBase ? ((totalRnTy - paceBase) / paceBase) * 100 : null;
 
