@@ -3840,7 +3840,17 @@ function enrichRetailIssue(issue, ctx) {
   });
 
   const { _library_actions, ...rest } = issue;
-  return { ...rest, actions };
+  issue = { ...rest, actions };
+  const commercialNarrative = buildCommercialNarrative(
+    { issue_family: issue.issue_family },
+    ctx?.diagnosis,
+    issue.segment_attribution_summary,
+    issue.daily_validation_summary,
+    ctx?.pmsRows || [],
+    ctx?.paceSignalSummary || null
+  );
+  issue.commercial_narrative = commercialNarrative || null;
+  return issue;
 }
 
 function issueMaxImpactHigh(issue) {
@@ -5745,7 +5755,19 @@ function buildDecisionArbitrationSummary(
     decisionFramingSummary,
     actionIntelligenceSummary
   );
-  const portfolioPrimaryDriver = selectPrimaryRetailDriver(driverScorecard);
+  let portfolioPrimaryDriver = selectPrimaryRetailDriver(driverScorecard);
+  const pricingTruthExists = retailIssues.some(issue => {
+    const m = issue?.card_metrics || {};
+    const ari = Number(m.avgARI);
+    const mpi = Number(m.avgMPI);
+    const rgi = Number(m.avgRGI);
+    return Number.isFinite(ari) && Number.isFinite(mpi) && Number.isFinite(rgi)
+      && ari > 100 && mpi < 100 && rgi < 100;
+  });
+
+  if (pricingTruthExists && portfolioPrimaryDriver !== 'pricing') {
+    portfolioPrimaryDriver = 'pricing';
+  }
   const issueLevelArbitration = arbitrateRetailIssuesAgainstPrimaryDriver(
     retailIssues,
     portfolioPrimaryDriver,
