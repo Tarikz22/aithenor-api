@@ -3861,6 +3861,11 @@ function enrichRetailIssue(issue, ctx) {
   if (issue.commercial_narrative) {
     const paragraphs = String(issue.commercial_narrative).split('\n\n').map((s) => s.trim()).filter(Boolean);
     const lastParagraph = paragraphs.length ? paragraphs[paragraphs.length - 1] : '';
+    console.log('DEBUG enforced_decision_line extraction', {
+      finding_key: issue.finding_key,
+      extracted_last_paragraph: lastParagraph,
+      char_length: lastParagraph.length
+    });
     if (lastParagraph.length > 40) issue.enforced_decision_line = lastParagraph;
   }
   return issue;
