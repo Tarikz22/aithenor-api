@@ -3557,6 +3557,7 @@ function buildRetailReasoningIssue({ context, performanceStory, segmentAttributi
     },
     final_decision_rationale: finalDecision?.rationale || null,
     commercial_narrative: commercialNarrative || null,
+    enforced_decision_line: narrativeDecisionLine || null,
     narrative_chain: {
       position_summary: positionSummary,
       variance_summary: varianceSummary,
@@ -4279,24 +4280,18 @@ function enrichRetailIssue(issue, ctx) {
       ...((issue && issue.card_metrics) || {})
     }
   };
-  const commercialNarrative = buildCommercialNarrative(
-    { issue_family: issue.issue_family },
-    mergedDiagnosis,
-    issue.segment_attribution_summary,
-    issue.daily_validation_summary,
-    ctx?.pmsRows || [],
-    ctx?.paceSignalSummary || null
-  );
+  const { narrative: commercialNarrative, decisionLine: narrativeDecisionLine } =
+    buildCommercialNarrative(
+      { issue_family: issue.issue_family },
+      mergedDiagnosis,
+      issue.segment_attribution_summary,
+      issue.daily_validation_summary,
+      ctx?.pmsRows || [],
+      ctx?.paceSignalSummary || null
+    ) || {};
   issue.commercial_narrative = commercialNarrative || issue.commercial_narrative || null;
+  issue.enforced_decision_line = narrativeDecisionLine || issue.enforced_decision_line || null;
   if (issue.commercial_narrative) {
-    const paragraphs = String(issue.commercial_narrative).split('\n\n').map((s) => s.trim()).filter(Boolean);
-    const lastParagraph = paragraphs.length ? paragraphs[paragraphs.length - 1] : '';
-    console.log('DEBUG enforced_decision_line extraction', {
-      finding_key: issue.finding_key,
-      extracted_last_paragraph: lastParagraph,
-      char_length: lastParagraph.length
-    });
-    if (lastParagraph.length > 40) issue.enforced_decision_line = lastParagraph;
     issue.enforced_execution_actions = buildNarrativeEnforcedExecutionActions(issue, ctx?.pmsRows || []);
   }
   return issue;
@@ -5993,7 +5988,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
         'Correct rate on the specific dates and segments where share loss is confirmed. Do not apply a blanket reduction — surgical correction preserves positioning while recovering share.';
     }
     pushLine(pricingDirective);
-    return lines.slice(0, 8).join('\n\n');
+    return packNarrative(lines.slice(0, 8).join('\n\n'));
   }
 
   if (
@@ -6056,7 +6051,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
       discDirective = `Discounting is not converting. Do not cut further. Audit the booking path for ${primarySegDisplay} — the block is not price, it is friction.`;
     }
     pushLine(discDirective);
-    return lines.slice(0, 8).join('\n\n');
+    return packNarrative(lines.slice(0, 8).join('\n\n'));
   }
 
   if (family === 'visibility_gap') {
@@ -7363,14 +7358,19 @@ function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummar
       }
     }
 
-    let enforcedDecisionLine = buildEnforcedDecisionLine(issue, arb, portfolioPrimaryDriver);
-    if (
+    let enforcedDecisionLine = null;
+    if (issue.enforced_decision_line && String(issue.enforced_decision_line).trim()) {
+      enforcedDecisionLine = issue.enforced_decision_line;
+    } else if (
       (arb.arbitration_role === 'primary' || arb.arbitration_role === 'supporting') &&
       issue?.commercial_narrative
     ) {
       const paragraphs = String(issue.commercial_narrative).split('\n\n').map((s) => s.trim()).filter(Boolean);
       const lastParagraph = paragraphs.length ? paragraphs[paragraphs.length - 1] : '';
       if (lastParagraph) enforcedDecisionLine = lastParagraph;
+    }
+    if (!enforcedDecisionLine) {
+      enforcedDecisionLine = buildEnforcedDecisionLine(issue, arb, portfolioPrimaryDriver);
     }
     let enforcedExecutionActions = buildEnforcedExecutionActions(issue, arb, portfolioPrimaryDriver);
     if (Array.isArray(issue.enforced_execution_actions) && issue.enforced_execution_actions.length > 0) {
