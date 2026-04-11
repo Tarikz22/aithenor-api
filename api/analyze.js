@@ -3733,6 +3733,28 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
 
   const rankedIssues = rankAndCapExecutiveRetailIssues(consolidated, MAX_RETAIL_ISSUES_PER_RUN);
 
+  for (const issue of rankedIssues) {
+    const episodeKeys = issue?.episode_week_keys;
+    if (!Array.isArray(episodeKeys) || !episodeKeys.length || !issue.card_metrics) continue;
+    const keySet = new Set(episodeKeys);
+    let bestWindow = null;
+    let bestOrdinal = -Infinity;
+    for (const win of temporal_meta.weekly_windows || []) {
+      const wk = win?.week_key;
+      if (wk == null || !keySet.has(wk)) continue;
+      let ord = weekOrdinalMap.get(wk);
+      if (ord === undefined) ord = sortedWeekKeys.indexOf(wk);
+      if (ord < 0) continue;
+      if (ord > bestOrdinal) {
+        bestOrdinal = ord;
+        bestWindow = win;
+      }
+    }
+    if (bestWindow && bestWindow.trend_status != null) {
+      issue.card_metrics.trend_status = bestWindow.trend_status;
+    }
+  }
+
   // FINAL deterministic commercial override (post consolidation/ranking):
   // if pricing truth exists (RGI<100, ARI>100, MPI<100), force it primary and downgrade visibility/distribution narratives.
   const pricingTruthIssue = rankedIssues.find((issue) => {
