@@ -3551,9 +3551,26 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
       trend_status: trend
     });
 
+    const expandYmdByDays = (ymd, delta) => {
+      if (!ymd || !/^\d{4}-\d{2}-\d{2}$/.test(String(ymd))) return null;
+      const [y, m, d] = String(ymd).split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      dt.setUTCDate(dt.getUTCDate() + delta);
+      return formatDateToYMD(dt);
+    };
+    const windowStart = (minYmd && expandYmdByDays(minYmd, -3)) || minYmd;
+    const windowEnd = (maxYmd && expandYmdByDays(maxYmd, 3)) || maxYmd;
+
     const pmsWeekRows = (Array.isArray(pmsRows) ? pmsRows : []).filter((row) => {
-      const ymd = row?._ingestion?.stay_date_ymd || getRowStayDateYmd(row);
-      return ymd && minYmd && maxYmd ? ymd >= minYmd && ymd <= maxYmd : false;
+      let ymd = row?._ingestion?.stay_date_ymd;
+      if (ymd == null || String(ymd).trim() === '') ymd = getRowStayDateYmd(row);
+      return ymd && windowStart && windowEnd ? ymd >= windowStart && ymd <= windowEnd : false;
+    });
+    console.log('DEBUG pmsWeekRows weekly filter', {
+      weekKey,
+      minYmd,
+      maxYmd,
+      'pmsWeekRows.length': pmsWeekRows.length
     });
     const macroContext = buildWeeklyMacroContext(rows, pmsWeekRows);
     const perfStory = buildWeeklyPerformanceStory(macroContext);
