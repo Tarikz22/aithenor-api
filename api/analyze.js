@@ -2814,13 +2814,54 @@ function materializeRetailEpisode(ep, focus) {
   const cappedLib = lib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
   const pri = cappedLib.some((a) => a.priority === 'high') ? 'high' : 'medium';
   const chain = ep.narrative_chain || {};
-  const findingText = [
-    chain.position_summary,
-    chain.variance_summary,
-    chain.source_summary,
-    chain.segment_summary,
-    chain.daily_validation_summary_text
-  ].filter(Boolean).join(' ');
+  const am = aggMetrics;
+  const mpiF = toFiniteNumberOrNull(am?.avgMPI);
+  const ariF = toFiniteNumberOrNull(am?.avgARI);
+  const rgiF = toFiniteNumberOrNull(am?.avgRGI);
+  const occF = toFiniteNumberOrNull(am?.avgOcc);
+  const tailAriMpiRgi = [
+    ariF !== null ? `ARI ${ariF.toFixed(1)}` : null,
+    mpiF !== null ? `MPI ${mpiF.toFixed(1)}` : null,
+    rgiF !== null ? `RGI ${rgiF.toFixed(1)}` : null
+  ]
+    .filter(Boolean)
+    .join(', ');
+  const tailMpiRgi = [mpiF !== null ? `MPI ${mpiF.toFixed(1)}` : null, rgiF !== null ? `RGI ${rgiF.toFixed(1)}` : null]
+    .filter(Boolean)
+    .join(', ');
+  const tailOccAri = [occF !== null ? `Occ ${occF.toFixed(1)}%` : null, ariF !== null ? `ARI ${ariF.toFixed(1)}` : null]
+    .filter(Boolean)
+    .join(', ');
+  const tailAriMpi = [ariF !== null ? `ARI ${ariF.toFixed(1)}` : null, mpiF !== null ? `MPI ${mpiF.toFixed(1)}` : null]
+    .filter(Boolean)
+    .join(', ');
+  let findingFromAgg = '';
+  if (ep.family === 'pricing_resistance') {
+    findingFromAgg = tailAriMpiRgi
+      ? `Rate premium above competitive set with share underperformance — ${tailAriMpiRgi}.`
+      : 'Rate premium above competitive set with share underperformance.';
+  } else if (ep.family === 'discount_inefficiency') {
+    findingFromAgg = tailAriMpiRgi
+      ? `Discounting below competitive set without proportional share recovery — ${tailAriMpiRgi}.`
+      : 'Discounting below competitive set without proportional share recovery.';
+  } else if (ep.family === 'visibility_gap') {
+    findingFromAgg = tailMpiRgi
+      ? `Share underperformance without a clear rate cause — ${tailMpiRgi}.`
+      : 'Share underperformance without a clear rate cause.';
+  } else if (ep.family === 'missed_pricing_opportunity') {
+    findingFromAgg = tailOccAri
+      ? `Occupancy strength not translating into rate capture — ${tailOccAri}.`
+      : 'Occupancy strength not translating into rate capture.';
+  } else if (ep.family === 'mix_constraint') {
+    findingFromAgg = tailAriMpi
+      ? `Segment mix limiting rate and share performance simultaneously — ${tailAriMpi}.`
+      : 'Segment mix limiting rate and share performance simultaneously.';
+  } else {
+    findingFromAgg = tailAriMpiRgi
+      ? `Commercial underperformance detected — ${tailAriMpiRgi}.`
+      : 'Commercial underperformance detected.';
+  }
+  const findingText = findingFromAgg;
   const rootCauseText = [ep.final_decision_rationale, chain.segment_summary].filter(Boolean).join(' ');
   const expectedOutcomeText = [chain.daily_validation_summary_text, ep.final_decision_rationale].filter(Boolean).join(' ');
 
@@ -2848,7 +2889,10 @@ function materializeRetailEpisode(ep, focus) {
     daily_validation_summary: ep.daily_validation_summary || null,
     final_decision_rationale: ep.final_decision_rationale || null,
     narrative_chain: ep.narrative_chain || null,
-    card_metrics: snapshotCardMetricsFromDiagnosisLike(windowDiagnosis)
+    card_metrics: {
+      ...snapshotCardMetricsFromDiagnosisLike(windowDiagnosis),
+      trend_status: lastTrend
+    }
   };
 }
 
@@ -3458,14 +3502,26 @@ function buildRetailReasoningIssue({ context, performanceStory, segmentAttributi
     performanceStory?.rgi != null
       ? `RGI ${Number(performanceStory.rgi).toFixed(1)} (${performanceStory.position || 'unknown'}).`
       : 'RGI position unavailable.';
-  const varianceSummary =
-    performanceStory?.rgiVar != null
-      ? `RGI variance vs LY ${Number(performanceStory.rgiVar).toFixed(1)}; MPI variance ${Number(performanceStory?.mpiVar ?? 0).toFixed(1)}; ARI variance ${Number(performanceStory?.ariVar ?? 0).toFixed(1)}.`
-      : 'Variance vs LY unavailable.';
+  const rgiV = toFiniteNumberOrNull(diagnosis?.rgiVar);
+  const mpiV = toFiniteNumberOrNull(diagnosis?.mpiVar);
+  const ariV = toFiniteNumberOrNull(diagnosis?.ariVar);
+  const fmtVarPt = (v) => (v === null ? null : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`);
+  const varBits = [
+    rgiV !== null ? `RGI ${fmtVarPt(rgiV)} vs LY` : null,
+    mpiV !== null ? `MPI ${fmtVarPt(mpiV)} vs LY` : null,
+    ariV !== null ? `ARI ${fmtVarPt(ariV)} vs LY` : null
+  ].filter(Boolean);
+  const varianceSummary = varBits.length ? `${varBits.join('; ')}.` : null;
   const sourceSummary = `Source of movement: ${performanceStory?.source_of_movement || 'mixed'}.`;
+  const rnDeltaRaw = segmentAttribution?.rn_delta;
+  const adrDeltaRaw = segmentAttribution?.adr_delta;
+  const rnDeltaStr =
+    rnDeltaRaw == null || !Number.isFinite(Number(rnDeltaRaw)) ? 'n/a' : Number(rnDeltaRaw).toFixed(1);
+  const adrDeltaStr =
+    adrDeltaRaw == null || !Number.isFinite(Number(adrDeltaRaw)) ? 'n/a' : Number(adrDeltaRaw).toFixed(1);
   const segmentSummary =
     `Segment driver: ${segmentAttribution?.primary_segment || 'unknown'} ` +
-    `(RN delta ${segmentAttribution?.rn_delta ?? 'n/a'}, ADR delta ${segmentAttribution?.adr_delta ?? 'n/a'}).`;
+    `(RN delta ${rnDeltaStr}, ADR delta ${adrDeltaStr}).`;
   const dailySummary =
     dailyValidation?.displacement_risk === 'high'
       ? 'Daily validation: low-rated growth appeared on peak dates, creating displacement risk.'
@@ -4849,6 +4905,16 @@ function detectRetailCommercialContext(issue, contextData) {
  */
 function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) {
   const capacityFallback = inferHotelCapacityFromContext(strRows, diagnosis);
+  const FORWARD_REV_CAP = 5000000;
+  const forwardSegDisplayName = (segObj) => {
+    if (segObj == null) return null;
+    const dn = segObj.displayName != null ? String(segObj.displayName).trim() : '';
+    if (dn) return dn;
+    const sk = segObj.seg != null ? String(segObj.seg).trim() : '';
+    if (sk) return usaliBucketToDisplayName(sk, segObj.sampleName || '');
+    const sn = segObj.sampleName != null ? String(segObj.sampleName).trim() : '';
+    return sn || null;
+  };
 
   const fwdNum = (row, keys) => {
     for (const k of keys) {
@@ -4959,9 +5025,6 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     const segMap = new Map();
     const dateRn = new Map();
 
-    let leadRnNum = 0;
-    let leadRnDen = 0;
-
     for (const row of rows) {
       const stay = row?._ingestion?.stay_date_ymd || getRowStayDateYmd(row);
       const rnTy = fwdNum(row, ['Room Nights TY (Actual / OTB)']) || 0;
@@ -4977,12 +5040,6 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       totalRevTy += revTy;
       totalRevStly += revStly;
       totalRevLy += revLy;
-
-      const ld = leadDaysToStay(stay);
-      if (ld !== null && rnTy > 0) {
-        leadRnNum += ld * rnTy;
-        leadRnDen += rnTy;
-      }
 
       if (stay) {
         dateRn.set(stay, (dateRn.get(stay) || 0) + rnTy);
@@ -5037,7 +5094,17 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
         adrTyS !== null && adrRefS !== null && adrRefS > 0
           ? ((adrTyS - adrRefS) / adrRefS) * 100
           : null;
-      return { ...s, refRnS, refRevS, adrTyS, adrRefS, rnDelta, rnDeltaPct, adrDeltaPct };
+      return {
+        ...s,
+        refRnS,
+        refRevS,
+        adrTyS,
+        adrRefS,
+        rnDelta,
+        rnDeltaPct,
+        adrDeltaPct,
+        displayName: usaliBucketToDisplayName(s.seg, s.sampleName || '')
+      };
     });
 
     let topGrowthSegment = null;
@@ -5095,9 +5162,17 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       signal = 'pace_ahead_clean';
     }
 
-    const avgLead = leadRnDen > 0 ? leadRnNum / leadRnDen : (b.lo + (b.hi || b.endLead || 120)) / 2;
-    const daysElapsedInWindow = Math.max(14, Math.min(150, Math.round(130 - avgLead)));
-    const remainingDays = b.endLead != null ? Math.max(1, b.endLead) : Math.max(1, Math.round(avgLead));
+    const snapD = parseYmdToUtcDate(snapshotYmd);
+    const winStartD = parseYmdToUtcDate(startYmd);
+    const winEndD = parseYmdToUtcDate(endYmd);
+    let daysElapsedInWindow = 0;
+    if (snapD && winStartD) {
+      daysElapsedInWindow = Math.round((winStartD.getTime() - snapD.getTime()) / 86400000);
+    }
+    let remainingDays = 0;
+    if (snapD && winEndD) {
+      remainingDays = Math.max(0, Math.round((winEndD.getTime() - snapD.getTime()) / 86400000));
+    }
 
     const dilutionRnOnPeakDates = (() => {
       if (!adrDilutionSegment) return 0;
@@ -5141,7 +5216,7 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       dilutionRnOnPeakDates,
       capacityIsEstimate,
       cap,
-      avgLead,
+      avgLead: daysElapsedInWindow,
       segStats
     };
   };
@@ -5257,15 +5332,12 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
   for (const m of picked) {
     const sig = m.signal;
     const winLab = m.window_label;
-    const segDil = m.adrDilutionSegment
-      ? usaliBucketToDisplayName(m.adrDilutionSegment?.seg ?? 'other', m.adrDilutionSegment?.sampleName || '')
-      : 'the dilution segment';
-    const growLab = m.topGrowthSegment
-      ? usaliBucketToDisplayName(m.topGrowthSegment?.seg ?? 'other', m.topGrowthSegment?.sampleName || '')
-      : 'the strongest segment';
-    const declLab = m.topDeclineSegment
-      ? usaliBucketToDisplayName(m.topDeclineSegment?.seg ?? 'other', m.topDeclineSegment?.sampleName || '')
-      : 'the weakest segment';
+    const segDil = forwardSegDisplayName(m.adrDilutionSegment);
+    const growLab = forwardSegDisplayName(m.topGrowthSegment);
+    const declLab = forwardSegDisplayName(m.topDeclineSegment);
+    const growLabBullet = growLab || 'the leading segment';
+    const declLabBullet = declLab || 'the lagging segment';
+    const segDilBullet = segDil || 'discount-led segments';
 
     let title = 'Forward commercial signal';
     let narrative = '';
@@ -5282,24 +5354,42 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
         : '';
       const dilAdrDeltaPct = m.adrDilutionSegment?.adrDeltaPct ?? null;
       const dilAdrTyS = m.adrDilutionSegment?.adrTyS ?? null;
-      const peakP1Suffix =
-        dilAdrDeltaPct !== null && Number.isFinite(dilAdrDeltaPct)
-          ? `${segDil} holds the largest share of inventory at ADR ${Math.abs(dilAdrDeltaPct).toFixed(1)}% below last year.`
-          : `${segDil} holds the largest share of compressed inventory in this window.`;
+      let peakP1Suffix = 'Forward nights on the books show peak-level compression with rate dilution risk in this window.';
+      if (segDil) {
+        peakP1Suffix =
+          dilAdrDeltaPct !== null && Number.isFinite(dilAdrDeltaPct)
+            ? `${segDil} holds the largest share of inventory at ADR ${Math.abs(dilAdrDeltaPct).toFixed(1)}% below last year.`
+            : `${segDil} holds the largest share of compressed inventory in this window.`;
+      }
       const estRn = Math.max(0, Math.round(m.dilutionRnOnPeakDates));
-      const revRec =
+      let revRec =
         m.adrDilutionSegment != null &&
         dilAdrTyS !== null &&
         m.referenceAdr !== null &&
         estRn > 0
           ? estRn * Math.max(0, m.referenceAdr - dilAdrTyS)
           : null;
-      const revRecTxt = fmtMoney0(revRec) || '0';
-      narrative = [
-        `${winLab} is tracking above 80% occupancy on books${occNote}. ${peakP1Suffix}`,
-        `Replacing an estimated ${estRn} room nights of ${segDil} allocation with transient retail at BAR would recover an estimated ${revRecTxt} in that window. The window to act is ${m.remainingDays} days.`,
-        `Close ${segDil} availability on dates above 80% OTB immediately. Reopen only if occupancy drops below 70% in the 10 days before arrival.`
-      ].join('\n\n');
+      let peakRevCapped = false;
+      if (revRec !== null && Number.isFinite(revRec) && Math.abs(revRec) > FORWARD_REV_CAP) {
+        revRec = null;
+        peakRevCapped = true;
+      }
+      const revRecTxt = revRec !== null && Number.isFinite(revRec) ? fmtMoney0(revRec) : null;
+      let peakP2 = null;
+      if (peakRevCapped) {
+        peakP2 =
+          'Revenue impact not quantified — data coverage across this window is insufficient for a reliable estimate.';
+      } else if (estRn > 0 && segDil && revRecTxt) {
+        peakP2 = `Replacing an estimated ${estRn} room nights of ${segDil} allocation with transient retail at BAR would recover an estimated ${revRecTxt} in that window. The window to act is ${m.remainingDays} days.`;
+      } else if (estRn > 0 && segDil) {
+        peakP2 = `Replacing an estimated ${estRn} room nights of ${segDil} allocation with transient retail at BAR could recover revenue; timing to act is ${m.remainingDays} days.`;
+      }
+      const peakP3 = segDil
+        ? `Close ${segDil} availability on dates above 80% OTB immediately. Reopen only if occupancy drops below 70% in the 10 days before arrival.`
+        : 'Close dilutive segment availability on dates above 80% OTB immediately. Reopen only if occupancy drops below 70% in the 10 days before arrival.';
+      narrative = [`${winLab} is tracking above 80% occupancy on books${occNote}. ${peakP1Suffix}`, peakP2, peakP3]
+        .filter(Boolean)
+        .join('\n\n');
     } else if (sig === 'adr_erosion') {
       title = 'Forward ADR erosion despite pace strength';
       const revPos = m.revenueGapPct !== null && m.revenueGapPct > 0;
@@ -5314,14 +5404,15 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
         m.revenueGapPct !== null && m.adrGapPct !== null
           ? (m.revenueGapPct - Math.abs(m.adrGapPct)).toFixed(1)
           : '0';
+      const dilNm = segDil || 'discount-led segments';
       let adrErosionSegLine = '';
       if (dil) {
         const drv = [];
         if (dilRn) drv.push(`room nights ${dilRn} ahead versus last year`);
         if (dilAdr) drv.push(`ADR ${dilAdr} versus last year`);
         adrErosionSegLine = drv.length
-          ? `${segDil} is the primary driver — ${drv.join(' but ')}. Net revenue impact versus last year: ${revGp || 'unavailable'}.`
-          : `${segDil} is the primary driver of the blended ADR gap. Net revenue impact versus last year: ${revGp || 'unavailable'}.`;
+          ? `${dilNm} is the primary driver — ${drv.join(' but ')}. Net revenue impact versus last year: ${revGp || 'unavailable'}.`
+          : `${dilNm} is the primary driver of the blended ADR gap. Net revenue impact versus last year: ${revGp || 'unavailable'}.`;
       } else {
         adrErosionSegLine = `Segment-level dilution is mixed; net revenue impact versus last year: ${revGp || 'unavailable'}.`;
       }
@@ -5334,30 +5425,46 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
           ? `Despite the ADR dilution, total revenue is ahead of last year. The volume gain is currently outweighing the rate cost — but the net pricing margin is only ${marginTxt} percentage points. Any further ADR erosion will turn this negative.`
           : `Total revenue is behind last year despite volume growth. The rate cost is already outweighing the volume gain. This window is losing money versus last year in revenue terms.`,
         revPos
-          ? `Hold current volume strategy but set a rate floor for ${segDil} at ${refAdrTxt} to prevent further dilution.`
-          : `Stop accepting ${segDil} at current rates for this window. The revenue arithmetic does not support the discount.`
+          ? `Hold current volume strategy but set a rate floor for ${dilNm} at ${refAdrTxt} to prevent further dilution.`
+          : `Stop accepting ${dilNm} at current rates for this window. The revenue arithmetic does not support the discount.`
       ].join('\n\n');
     } else if (sig === 'pace_gap') {
       title = 'Forward pace shortfall versus last year';
       priority = 'medium';
-      const currentPickupRate = m.totalRnTy / Math.max(1, m.daysElapsedInWindow);
-      const projectedFinalRn = m.totalRnTy + currentPickupRate * m.remainingDays;
-      const projectedGapVsReference = projectedFinalRn - m.referenceRn;
-      const projectedRevenueGap = projectedGapVsReference * (m.blendedAdrTy || 0);
+
+      let projectedFinalRn = null;
+      let projectedGapVsReference = null;
+      let projectedRevenueGap = null;
+      const trajectoryActive = m.daysElapsedInWindow > 0;
+      if (trajectoryActive) {
+        const pickupRate = m.totalRnTy / m.daysElapsedInWindow;
+        projectedFinalRn = m.totalRnTy + pickupRate * m.remainingDays;
+        projectedGapVsReference = projectedFinalRn - m.referenceRn;
+        projectedRevenueGap = projectedGapVsReference * (m.blendedAdrTy || 0);
+        if (
+          projectedRevenueGap !== null &&
+          Number.isFinite(projectedRevenueGap) &&
+          Math.abs(projectedRevenueGap) > FORWARD_REV_CAP
+        ) {
+          projectedRevenueGap = null;
+        }
+      }
 
       const growRnDelta = m.topGrowthSegment?.rnDelta ?? null;
       const gVel =
         growRnDelta !== null && m.daysElapsedInWindow > 0 ? growRnDelta / m.daysElapsedInWindow : 0;
-      const projectedGrowthSegmentContribution = gVel * m.remainingDays;
+      const projectedGrowthSegmentContribution = trajectoryActive ? gVel * m.remainingDays : 0;
       const gapRecoverable =
-        projectedGapVsReference >= 0 ||
-        Boolean(
-          m.topGrowthSegment != null &&
-            projectedGrowthSegmentContribution >= Math.abs(projectedGapVsReference)
-        );
+        trajectoryActive &&
+        projectedGapVsReference !== null &&
+        (projectedGapVsReference >= 0 ||
+          Boolean(
+            m.topGrowthSegment != null &&
+              projectedGrowthSegmentContribution >= Math.abs(projectedGapVsReference)
+          ));
 
       const shortfall =
-        projectedGapVsReference < 0
+        trajectoryActive && projectedGapVsReference !== null && projectedGapVsReference < 0
           ? Math.max(0, Math.abs(projectedGapVsReference) - projectedGrowthSegmentContribution)
           : 0;
 
@@ -5365,41 +5472,71 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       const growRnDeltaPct = m.topGrowthSegment?.rnDeltaPct ?? null;
       const declPct = fmtPct1(declRnDeltaPct);
       const growPct = fmtPct1(growRnDeltaPct);
-      const gapRoomsRounded = Math.round(projectedGapVsReference);
-      const paceCloseTxt =
-        gapRoomsRounded < 0
-          ? `${Math.abs(gapRoomsRounded)} room nights short of last year`
-          : gapRoomsRounded > 0
-            ? `${gapRoomsRounded} room nights ahead of last year's pace`
-            : 'aligned with last year on room nights';
-      const revGapTxt = fmtMoney0(Math.abs(projectedRevenueGap)) || '0';
+
+      let paceCloseTxt;
+      if (!trajectoryActive || projectedGapVsReference === null) {
+        paceCloseTxt =
+          'pickup-based finish versus last year cannot be projected — elapsed timing from the window start to snapshot is not available';
+      } else if (projectedGapVsReference < 0) {
+        paceCloseTxt = `is projected to finish ${Math.abs(Math.round(projectedGapVsReference))} room nights short of last year's reference`;
+      } else if (projectedGapVsReference > 0) {
+        paceCloseTxt = `is projected to finish ${Math.round(projectedGapVsReference)} room nights ahead of last year's reference`;
+      } else {
+        paceCloseTxt = 'is projected to finish aligned with last year on room nights';
+      }
+
+      let revClause;
+      if (!trajectoryActive || projectedGapVsReference === null) {
+        revClause = 'Revenue impact from pickup trajectory cannot be estimated for this window';
+      } else if (projectedRevenueGap === null) {
+        revClause =
+          'Revenue impact not quantified — data coverage across this window is insufficient for a reliable estimate';
+      } else {
+        revClause = `a projected revenue gap of ${fmtMoney0(Math.abs(projectedRevenueGap)) || '0'}`;
+      }
 
       const paceSegParts = [];
-      if (declPct) {
+      if (declPct && declLab) {
         paceSegParts.push(`${declLab} is the largest drag — ${declPct} behind last year.`);
-      } else {
+      } else if (declPct) {
+        paceSegParts.push(`The largest segment drag shows room nights ${declPct} behind last year.`);
+      } else if (declLab) {
         paceSegParts.push(`${declLab} is the largest drag versus last year's reference pace.`);
+      } else {
+        paceSegParts.push("Room nights trail last year's reference pace across this window.");
       }
-      if (growPct) {
+      const trackTail = `${gapRecoverable ? 'is' : 'is not'} on track to close the full gap.`;
+      if (growPct && growLab) {
+        paceSegParts.push(`${growLab} is the strongest performer at ${growPct} ahead but ${trackTail}`);
+      } else if (growPct) {
         paceSegParts.push(
-          `${growLab} is the strongest performer at ${growPct} ahead but ${gapRecoverable ? 'is' : 'is not'} on track to close the full gap.`
+          `The leading segment is outperforming its reference pace for this window at ${growPct} ahead but ${trackTail}`
         );
+      } else if (growLab) {
+        paceSegParts.push(`${growLab} is the strongest performer in this window but ${trackTail}`);
       } else {
         paceSegParts.push(
-          `${growLab} is the strongest performer in this window but ${gapRecoverable ? 'is' : 'is not'} on track to close the full gap.`
+          `The leading segment is outperforming its reference pace for this window but ${trackTail}`
         );
       }
       const paceSegLine = paceSegParts.join(' ');
 
+      const growRef = growLab || 'The leading segment';
+      const declRef = declLab || 'the lagging segment';
+
+      const paceOpen =
+        trajectoryActive && projectedGapVsReference !== null
+          ? 'At current pickup velocity the window '
+          : '';
       narrative = [
-        `${winLab} is ${Math.abs(m.paceGapPct || 0).toFixed(1)}% behind last year on room nights. At current pickup velocity the window will close approximately ${paceCloseTxt} — a projected revenue gap of ${revGapTxt}.`,
+        `${winLab} is ${Math.abs(m.paceGapPct || 0).toFixed(1)}% behind last year on room nights. ${paceOpen}${paceCloseTxt} — ${revClause}.`,
         paceSegLine,
         gapRecoverable
-          ? `If ${growLab} maintains current pickup velocity it can close the gap before the window closes. No emergency action required — monitor weekly.`
-          : `${growLab} cannot close the gap at current velocity. An additional ${Math.round(shortfall)} room nights are needed from other segments. Activate demand generation for ${declLab} now — the window is ${m.remainingDays} days.`,
+          ? `If ${growRef} maintains current pickup velocity it can close the gap before the window closes. No emergency action required — monitor weekly.`
+          : `${growRef} cannot close the gap at current velocity. An additional ${Math.round(shortfall)} room nights are needed from other segments. Activate demand generation for ${declRef} now — the window is ${m.remainingDays} days.`,
         gapRecoverable
-          ? `Maintain pickup plays for ${growLab}; review OTB weekly and avoid panic discounting that would erode ADR.`
-          : `Escalate demand generation and sales intervention for ${declLab}; set weekly pickup targets until the window closes.`
+          ? `Maintain pickup plays for ${growRef}; review OTB weekly and avoid panic discounting that would erode ADR.`
+          : `Escalate demand generation and sales intervention for ${declRef}; set weekly pickup targets until the window closes.`
       ].join('\n\n');
     } else if (sig === 'pace_ahead_clean') {
       title = 'Forward pace and rate confirmation';
@@ -5409,13 +5546,14 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       const leadAdrPct = leadSeg?.adrDeltaPct ?? null;
       const leadRnFmt = fmtPct1(leadRnPct);
       const leadAdrFmt = fmtPct1(leadAdrPct);
-      let leadTxt = `${growLab} leads contribution in this window on a volume basis.`;
+      const leadNm = growLab || 'The leading segment';
+      let leadTxt = `${leadNm} leads contribution in this window on a volume basis.`;
       if (leadSeg != null && leadRnFmt && leadAdrFmt) {
-        leadTxt = `${growLab} leads the window with room nights ${leadRnFmt} ahead versus last year at ADR ${leadAdrFmt}.`;
+        leadTxt = `${leadNm} leads the window with room nights ${leadRnFmt} ahead versus last year at ADR ${leadAdrFmt}.`;
       } else if (leadSeg != null && leadRnFmt) {
-        leadTxt = `${growLab} leads the window with room nights ${leadRnFmt} ahead versus last year.`;
+        leadTxt = `${leadNm} leads the window with room nights ${leadRnFmt} ahead versus last year.`;
       } else if (leadSeg != null && leadAdrFmt) {
-        leadTxt = `${growLab} leads the window with ADR ${leadAdrFmt} versus last year.`;
+        leadTxt = `${leadNm} leads the window with ADR ${leadAdrFmt} versus last year.`;
       }
       narrative = [
         `${winLab} is ${fmtPct1(m.paceGapPct)} ahead on room nights with ADR ${fmtPct1(m.adrGapPct)} above last year. Both volume and rate are outperforming.`,
@@ -5429,27 +5567,34 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
 
     let gapRecoverablePace = false;
     if (sig === 'pace_gap') {
-      const currentPickupRate = m.totalRnTy / Math.max(1, m.daysElapsedInWindow);
-      const projectedFinalRn = m.totalRnTy + currentPickupRate * m.remainingDays;
-      const projectedGapVsReference = projectedFinalRn - m.referenceRn;
-      const growRnDeltaPace = m.topGrowthSegment?.rnDelta ?? null;
-      const gVelPace =
-        growRnDeltaPace !== null && m.daysElapsedInWindow > 0
-          ? growRnDeltaPace / m.daysElapsedInWindow
-          : 0;
-      const projectedGrowthSegmentContribution = gVelPace * m.remainingDays;
+      const trajectoryActiveP = m.daysElapsedInWindow > 0;
+      let projectedGapVsReferenceP = null;
+      let projectedGrowthSegmentContributionP = 0;
+      if (trajectoryActiveP) {
+        const currentPickupRateP = m.totalRnTy / m.daysElapsedInWindow;
+        const projectedFinalRnP = m.totalRnTy + currentPickupRateP * m.remainingDays;
+        projectedGapVsReferenceP = projectedFinalRnP - m.referenceRn;
+        const growRnDeltaPace = m.topGrowthSegment?.rnDelta ?? null;
+        const gVelPace =
+          growRnDeltaPace !== null && m.daysElapsedInWindow > 0
+            ? growRnDeltaPace / m.daysElapsedInWindow
+            : 0;
+        projectedGrowthSegmentContributionP = gVelPace * m.remainingDays;
+      }
       gapRecoverablePace =
-        projectedGapVsReference >= 0 ||
-        Boolean(
-          m.topGrowthSegment != null &&
-            projectedGrowthSegmentContribution >= Math.abs(projectedGapVsReference)
-        );
+        trajectoryActiveP &&
+        projectedGapVsReferenceP !== null &&
+        (projectedGapVsReferenceP >= 0 ||
+          Boolean(
+            m.topGrowthSegment != null &&
+              projectedGrowthSegmentContributionP >= Math.abs(projectedGapVsReferenceP)
+          ));
     }
 
     const bulletCtx = {
-      segLabel: segDil,
-      growLabel: growLab,
-      declLabel: declLab,
+      segLabel: segDilBullet,
+      growLabel: growLabBullet,
+      declLabel: declLabBullet,
       revenueGapPct: m.revenueGapPct ?? 0,
       refAdrTxt,
       gapRecoverable: gapRecoverablePace,
