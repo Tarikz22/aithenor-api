@@ -3033,8 +3033,63 @@ function consolidateRetailEpisodesToExecutiveIssues(episodes, focus, temporalCon
     const rankBonus = temporalRankBonusByRecurrenceType(recurrenceType);
 
     const materialized = materializeRetailEpisode(rep, focus);
+    const weeklySorted = Array.isArray(temporalContext?.weekly_windows)
+      ? [...temporalContext.weekly_windows].sort((a, b) =>
+          String(b.week_key || '').localeCompare(String(a.week_key || ''))
+        )
+      : [];
+    const latestWin = weeklySorted[0];
+    const wr = latestWin?.weekly_reasoning;
+    const fdRecent = wr?.final_decision;
+    const recentFam = fdRecent?.issue_family || null;
+    const recentConf = wr?.segment_attribution?.attribution_confidence || null;
+    const recentPriDriver = fdRecent?.primary_driver || null;
+    let execIssue = { ...materialized };
+    if (
+      recentFam &&
+      recentFam !== family &&
+      recentConf === 'high' &&
+      recentFam !== 'unknown'
+    ) {
+      const mappedDriver =
+        recentPriDriver ||
+        mapRetailIssueFamilyToDriver(recentFam, null, []);
+      const ivrTitle =
+        'Retail volume strategy is rebuilding share while ADR runs below last year — monitor rate dilution risk';
+      const ivrRoot =
+        'Recent weeks show deliberate volume-led recovery: MPI and pickup are improving versus last year while ARI is discounted; the priority is to protect margin as pace closes.';
+      const ivrOutcome =
+        'Maintain the volume trajectory while tightening rate floors on forward peak dates so share gains are not funded by uncapped ADR erosion.';
+      execIssue = {
+        ...execIssue,
+        issue_family: recentFam,
+        driver: mappedDriver,
+        primary_driver: mappedDriver,
+        title:
+          RETAIL_ISSUE_TITLES[recentFam] ||
+          (recentFam === 'intentional_volume_recovery' ? ivrTitle : RETAIL_ISSUE_TITLES.share_loss_fallback),
+        root_cause:
+          RETAIL_ISSUE_ROOT_CAUSES[recentFam] ||
+          (recentFam === 'intentional_volume_recovery' ? ivrRoot : RETAIL_ISSUE_ROOT_CAUSES.share_loss_fallback),
+        expected_outcome:
+          RETAIL_ISSUE_EXPECTED_OUTCOMES[recentFam] ||
+          (recentFam === 'intentional_volume_recovery'
+            ? ivrOutcome
+            : RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback),
+        finding:
+          retailIssueFindingText(
+            recentFam,
+            {
+              metrics: execIssue.card_metrics || {},
+              trend_status: execIssue.card_metrics?.trend_status || null
+            },
+            focus
+          ) || execIssue.finding,
+        rule_triggered: recentFam
+      };
+    }
     out.push({
-      ...materialized,
+      ...execIssue,
       finding_key: retailIssueFindingKey(family),
       window_label: `${minStart} → ${maxEnd}`,
       episode_week_start: minStart,
@@ -3729,7 +3784,8 @@ function buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows = [
   }));
 
   const consolidated = consolidateRetailEpisodesToExecutiveIssues(episodes, focus, {
-    observed_week_count: temporal_meta.weekly_windows.length
+    observed_week_count: temporal_meta.weekly_windows.length,
+    weekly_windows: temporal_meta.weekly_windows
   });
   temporal_meta.executive_family_count = consolidated.length;
 
@@ -4068,6 +4124,22 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
 
   const bySeg = aggregateSegmentRollupsFromPms(pmsRows);
   const primAgg = primarySeg ? bySeg.get(primarySeg) : null;
+  const adrLyFromSummary = toFiniteNumberOrNull(attr?.adr_ly ?? attr?.adrLY ?? attr?.adr_ly_actual);
+  const adrLyPrimarySegment =
+    adrLyFromSummary !== null && Number.isFinite(adrLyFromSummary)
+      ? adrLyFromSummary
+      : primAgg && primAgg.rnLy > 0 && primAgg.seenRLy && Number.isFinite(primAgg.revLy / primAgg.rnLy)
+        ? primAgg.revLy / primAgg.rnLy
+        : null;
+  const fmtEur0 = (v) =>
+    v === null || !Number.isFinite(v)
+      ? null
+      : new Intl.NumberFormat('en-IE', {
+          style: 'currency',
+          currency: 'EUR',
+          maximumFractionDigits: 0
+        }).format(Math.round(v));
+  const adrLyFormatted = fmtEur0(adrLyPrimarySegment);
   let sampleForPrimary = primAgg?.sampleName ? String(primAgg.sampleName).trim() : '';
   if (!sampleForPrimary && primarySeg) {
     const rows = Array.isArray(pmsRows) ? pmsRows : [];
@@ -4114,8 +4186,17 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
   const peakDates = Array.isArray(daily?.validated_peak_growth_dates)
     ? daily.validated_peak_growth_dates.filter(Boolean)
     : [];
+  const shoulderDates = Array.isArray(daily?.validated_shoulder_growth_dates)
+    ? daily.validated_shoulder_growth_dates.filter(Boolean)
+    : [];
+  const peakShoulderYmds = [...new Set([...shoulderDates, ...peakDates].map((d) => String(d).trim()))].filter(Boolean).sort();
   const peakNamed = peakDates.map((d) => fmtYmdForExecutionBullet(d)).filter(Boolean).slice(0, 10);
   const peakJoin = peakNamed.length ? peakNamed.join(', ') : null;
+  const volGrowthDayMonth = peakShoulderYmds
+    .map((d) => fmtYmdForExecutionBullet(d))
+    .filter(Boolean)
+    .slice(0, 2);
+  const volGrowthJoin = volGrowthDayMonth.length ? volGrowthDayMonth.join(', ') : null;
 
   const pushSafe = (arr, s) => {
     if (isSafeExecutionBulletText(s)) arr.push(s.trim());
@@ -4201,14 +4282,30 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
           `${primaryDisplay} drove ${fmtRN} room night growth at ADR ${fmtADR} vs LY — the volume strategy is delivering. Do not disrupt it.`
         );
       }
-      pushSafe(
-        bullets,
-        'Begin rate restoration selectively — raise BAR on the highest-occupancy forward dates first while maintaining current rates on need periods.'
-      );
-      if (xAdrRecover != null && Number.isFinite(xAdrRecover)) {
+      const occThreshold = 80;
+      let rateRestoreBullet = null;
+      if (adrLyFormatted && primaryDisplay) {
+        rateRestoreBullet = `Begin rate restoration toward ${adrLyFormatted} — last year's achieved rate on ${primaryDisplay} — on forward peak dates first, not across all inventory.`;
+      }
+      if (volGrowthJoin && primaryDisplay) {
+        const dateTail = `${volGrowthJoin} showed ${primaryDisplay} volume growth on days above ${occThreshold}% occupancy — these are the confirmed dates where rate correction applies without displacement risk.`;
+        rateRestoreBullet = rateRestoreBullet ? `${rateRestoreBullet} ${dateTail}` : dateTail;
+      }
+      if (!rateRestoreBullet) {
+        rateRestoreBullet =
+          'Begin rate restoration selectively — raise BAR on the highest-occupancy forward dates first while maintaining current rates on need periods.';
+      }
+      pushSafe(bullets, rateRestoreBullet);
+      if (
+        xAdrRecover != null &&
+        Number.isFinite(xAdrRecover) &&
+        primaryDisplay &&
+        adrPct != null &&
+        Number.isFinite(adrPct)
+      ) {
         pushSafe(
           bullets,
-          `Target ADR recovery of ${xAdrRecover}% over the next 30 days without sacrificing the MPI gains achieved.`
+          `Target ADR recovery of ${xAdrRecover}% — the exact rate concession made versus last year on ${primaryDisplay} — progressively over the next booking cycle. This is not an arbitrary target: it is the precise gap between this year's ADR and last year's on the segment driving the current strategy.`
         );
       }
     }
@@ -5412,12 +5509,25 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       return acc;
     })();
 
+    const highOccStayDates = [...dateRn.entries()]
+      .filter(([, tot]) => cap > 0 && Number.isFinite(tot) && tot / cap > 0.8)
+      .map(([ymd]) => ymd)
+      .filter(Boolean)
+      .sort();
+    const peakHighOccLabels = highOccStayDates
+      .slice(0, 3)
+      .map((ymd) => fmtYmdForExecutionBullet(ymd))
+      .filter(Boolean);
+
     const winLab =
       startYmd && endYmd ? windowLabelFromBounds(b.lo, b.hi || b.endLead || 91, startYmd, endYmd) : `Window ${win}`;
 
     return {
       forward_window: win,
       window_label: winLab,
+      window_start_ymd: startYmd || null,
+      window_end_ymd: endYmd || null,
+      peak_high_occ_labels: peakHighOccLabels,
       rows,
       totalRnTy,
       referenceRn,
@@ -5476,36 +5586,128 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       if (isSafeExecutionBulletText(s)) out.push(s.trim());
     };
     if (signal === 'peak_exposure') {
-      push(
-        `Close ${payload.segLabel} inventory on dates above 80% on-the-books occupancy immediately; treat capacity as ${
-          payload.capacityIsEstimate ? 'an estimated 100-room proxy' : 'reported capacity'
-        } until validated.`
-      );
+      const lbls = Array.isArray(payload.peakHighOccLabels) ? payload.peakHighOccLabels.filter(Boolean) : [];
+      const adrDil = payload.dilAdrDeltaPctRaw;
+      const adrDilAbs =
+        adrDil !== null && Number.isFinite(adrDil) ? Math.abs(adrDil) : null;
+      if (lbls.length && payload.segLabel && adrDilAbs !== null) {
+        const open =
+          lbls.length === 1
+            ? `${lbls[0]} is already above 80% on books`
+            : `${lbls.slice(0, 3).join(', ')} are already above 80% on books`;
+        push(
+          `${open} — ${payload.segLabel} holds disproportionate inventory at ADR ${adrDilAbs.toFixed(
+            1
+          )}% below last year. Close ${payload.segLabel} availability on these specific dates now.`
+        );
+      } else {
+        push(
+          `Close ${payload.segLabel} inventory on dates above 80% on-the-books occupancy immediately; treat capacity as ${
+            payload.capacityIsEstimate ? 'an estimated 100-room proxy' : 'reported capacity'
+          } until validated.`
+        );
+      }
       push(
         `Reopen ${payload.segLabel} only if occupancy on those stay dates falls below 70% inside the 10 days before arrival.`
       );
       push('Shift freed peak nights toward transient retail BAR in the RMS before accepting new discounted blocks.');
     } else if (signal === 'adr_erosion') {
-      if (payload.revenueGapPct > 0) {
+      const revGp = payload.revenueGapPctRaw;
+      const rnD = payload.dilRnDeltaPctRaw;
+      const adrD = payload.dilAdrDeltaPctRaw;
+      const rnTxt = fmtPct1(rnD);
+      const adrTxt = fmtPct1(adrD);
+      const revTxt = fmtPct1(revGp);
+      const seg = payload.segLabel;
+      const volOk = rnTxt && adrTxt && revTxt && seg;
+      if (volOk && revGp !== null && Number.isFinite(revGp)) {
+        const tail =
+          revGp > 0
+            ? 'The volume gain is currently offsetting the rate cost — set a rate floor to protect the margin.'
+            : 'The volume gain is not offsetting the rate cost — the arithmetic is negative and requires immediate rate correction.';
         push(
-          `Hold the current volume posture for this forward window but institute a hard ADR floor for ${payload.segLabel} at last year blended ADR (${payload.refAdrTxt}).`
+          `${seg} volume is ${rnTxt} ahead but ADR is ${adrTxt} below last year. Net revenue versus last year: ${revTxt}. ${tail}`
         );
+      }
+      if (payload.revenueGapPctRaw !== null && Number.isFinite(payload.revenueGapPctRaw) && payload.revenueGapPctRaw > 0) {
+        if (!volOk || revGp === null || !Number.isFinite(revGp)) {
+          push(
+            `Hold the current volume posture for this forward window but institute a hard ADR floor for ${payload.segLabel} at last year blended ADR (${payload.refAdrTxt}).`
+          );
+        }
         push('Review BAR ladders daily — any further erosion beyond the floor triggers an immediate yield meeting.');
       } else {
-        push(`Stop accepting ${payload.segLabel} at dilutive rates for this window; the revenue arithmetic is negative versus last year.`);
+        if (!volOk || revGp === null || !Number.isFinite(revGp)) {
+          push(
+            `Stop accepting ${payload.segLabel} at dilutive rates for this window; the revenue arithmetic is negative versus last year.`
+          );
+        }
         push('Redirect availability to segments holding rate integrity before adding promotional depth.');
       }
       push('Reconcile segment-level OTB daily with finance to confirm net ADR after overrides.');
     } else if (signal === 'pace_gap') {
-      if (payload.gapRecoverable) {
-        push(`Let ${payload.growLabel} run without incremental discount; monitor pickup weekly on the same dashboard cut.`);
-        push('Hold group and OTA releases steady — avoid last-minute panic cuts that collapse ADR.');
-      } else {
+      const drag = payload.declLabel;
+      const rnDeltaPct = payload.declRnDeltaPct;
+      const segRnDelta = payload.declRnDelta;
+      const totalRnGap = payload.totalRnGap;
+      const winEnd = payload.windowEndReadable;
+      const remDays = payload.remainingDays;
+      const pctBehind =
+        rnDeltaPct !== null && Number.isFinite(rnDeltaPct) ? Math.abs(rnDeltaPct) : null;
+      const absSegRn = segRnDelta !== null && Number.isFinite(segRnDelta) ? Math.round(Math.abs(segRnDelta)) : null;
+      const absTotalGap =
+        totalRnGap !== null && Number.isFinite(totalRnGap) ? Math.abs(totalRnGap) : null;
+      const shareOfGap =
+        absSegRn !== null &&
+        absTotalGap !== null &&
+        absTotalGap > 0 &&
+        Number.isFinite(absSegRn / absTotalGap)
+          ? Math.round((absSegRn / absTotalGap) * 100)
+          : null;
+      const paceOpenOk =
+        drag &&
+        pctBehind !== null &&
+        absSegRn !== null &&
+        shareOfGap !== null &&
+        winEnd &&
+        segRnDelta !== null &&
+        Number.isFinite(segRnDelta) &&
+        totalRnGap !== null &&
+        Number.isFinite(totalRnGap) &&
+        totalRnGap < 0;
+      if (paceOpenOk) {
         push(
-          `Launch targeted demand generation for ${payload.declLabel} now with explicit pickup targets; ${payload.growLabel} cannot close the RN gap alone.`
+          `${drag} is ${pctBehind.toFixed(1)}% behind last year — ${absSegRn} room nights short, representing ${shareOfGap}% of the total window shortfall. This segment needs ${absSegRn} additional room nights by ${winEnd} to close the gap.`
         );
+      }
+      const weeksChunk = remDays !== null && Number.isFinite(remDays) ? Math.max(1, Math.round(remDays / 7)) : null;
+      const perWeekRn =
+        absSegRn !== null && weeksChunk !== null && weeksChunk > 0
+          ? Math.round(absSegRn / weeksChunk)
+          : null;
+      const weeklyOk = drag && perWeekRn !== null && winEnd;
+      if (weeklyOk) {
+        push(
+          `Weekly OTB checkpoint threshold: if ${drag} does not recover at least ${perWeekRn} room nights per week, escalate to direct sales intervention before ${winEnd}.`
+        );
+      }
+      if (payload.gapRecoverable) {
+        if (!paceOpenOk) {
+          push(`Let ${payload.growLabel} run without incremental discount; monitor pickup weekly on the same dashboard cut.`);
+        }
+        if (!weeklyOk) {
+          push('Hold group and OTA releases steady — avoid last-minute panic cuts that collapse ADR.');
+        }
+      } else {
+        if (!paceOpenOk) {
+          push(
+            `Launch targeted demand generation for ${payload.declLabel} now with explicit pickup targets; ${payload.growLabel} cannot close the RN gap alone.`
+          );
+        }
         push('Brief sales on deficit dates inside this window with minimum acceptable rate floors.');
-        push('Weekly steering meeting until OTB materially improves versus reference or the window is formally written off.');
+        if (!weeklyOk) {
+          push('Weekly steering meeting until OTB materially improves versus reference or the window is formally written off.');
+        }
       }
     } else if (signal === 'pace_ahead_clean') {
       push('Freeze promotional rate plans for this window unless occupancy on a stay date drops below 65% inside 14 days of arrival.');
@@ -5752,7 +5954,16 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       revenueGapPct: m.revenueGapPct ?? 0,
       refAdrTxt,
       gapRecoverable: gapRecoverablePace,
-      capacityIsEstimate: m.capacityIsEstimate
+      capacityIsEstimate: m.capacityIsEstimate,
+      declRnDeltaPct: m.topDeclineSegment?.rnDeltaPct ?? null,
+      declRnDelta: m.topDeclineSegment?.rnDelta ?? null,
+      totalRnGap: m.totalRnTy - m.referenceRn,
+      remainingDays: m.remainingDays ?? null,
+      windowEndReadable: fmtDayMonthYear(m.window_end_ymd),
+      peakHighOccLabels: Array.isArray(m.peak_high_occ_labels) ? m.peak_high_occ_labels : [],
+      dilAdrDeltaPctRaw: m.adrDilutionSegment?.adrDeltaPct ?? null,
+      dilRnDeltaPctRaw: m.adrDilutionSegment?.rnDeltaPct ?? null,
+      revenueGapPctRaw: m.revenueGapPct
     };
 
     const enforced_execution_actions = bulletsFor(sig, bulletCtx);
