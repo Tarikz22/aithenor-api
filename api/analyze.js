@@ -414,6 +414,80 @@ function getRowStayDateYmd(row) {
   return d ? formatDateToYMD(d) : null;
 }
 
+function mapMarketSegmentNameToUsaliBucket(name = '') {
+  const raw = String(name || '').trim();
+  if (!raw) return 'other';
+  const s = raw.toLowerCase();
+
+  if (/(group\s+corporate|corporate\s+group|corporate\s+meeting|group\s+meeting)/.test(s)) return 'group_corporate';
+  if (/(association|convention|conference|trade\s+show|tradeshow)/.test(s)) return 'group_association';
+  if (/(group\s+government|government\s+group|military\s+group)/.test(s)) return 'group_government';
+  if (/(smerf|social|wedding|reunion|religious|fraternal|educational\s+group)/.test(s)) return 'group_smerf';
+  if (/(group\s+wholesale|wholesale\s+group|tour\s+group|(^|\s)series(\s|$))/.test(s)) return 'group_wholesale';
+
+  if (/(^|\s)(contract|crew|airline|permanent|long\s*term|long-term|extended\s+stay)(\s|$)/.test(s)) return 'contract';
+
+  if (
+    /(negotiated|lnr|consortia|consortium|government\s+negotiated|gov\s+negotiated)/.test(s) ||
+    (/\bcorporate\b/.test(s) && !/\bgroup\b/.test(s))
+  ) {
+    return 'transient_negotiated';
+  }
+
+  if (/(wholesale|tour\s+operator|wholesaler)/.test(s)) return 'transient_wholesale';
+
+  if (/(qualified|loyalty|member|\baaa\b|senior|government\s+rate|gov\s+rate|military\s+rate)/.test(s)) {
+    return 'transient_qualified';
+  }
+
+  if (
+    /(best\s+available|bar|rack|standard\s+rate|website\s+rate|\bretail\b|walk\s*-?in|direct)/.test(s)
+  ) {
+    return 'transient_retail';
+  }
+
+  if (
+    /(discount|promotional|promo|opaque|\bota\b|online\s+travel|travel\s+agency|expedia|booking\.com|packages|\bpackage\b)/.test(s)
+  ) {
+    return 'transient_discount';
+  }
+
+  if (/\bgroup\b/.test(s)) return 'group_other';
+
+  if (/\btransient\b/.test(s)) return 'transient_retail';
+
+  return 'other';
+}
+
+function usaliBucketToDisplayName(bucket, originalMarketSegmentName = '') {
+  const o = String(originalMarketSegmentName || '').trim();
+  const m = {
+    transient_retail: 'Retail Transient',
+    transient_discount: 'Discount / OTA',
+    transient_qualified: 'Qualified Rate',
+    transient_negotiated: 'Negotiated',
+    transient_wholesale: 'Wholesale Transient',
+    group_corporate: 'Corporate Groups',
+    group_association: 'Association & Convention',
+    group_government: 'Government Groups',
+    group_smerf: 'SMERF',
+    group_wholesale: 'Wholesale Groups',
+    group_other: 'Groups',
+    contract: 'Contract / Crew'
+  };
+  if (bucket === 'other') return o || 'Unclassified';
+  return m[bucket] || o || 'Unclassified';
+}
+
+function usaliBucketToLegacyFocusSegment(bucket) {
+  if (!bucket || bucket === 'none') return 'retail';
+  if (String(bucket).startsWith('group_')) return 'groups';
+  if (bucket === 'transient_negotiated' || bucket === 'contract') return 'negotiated';
+  if (bucket === 'other') return 'retail';
+  if (String(bucket).startsWith('transient_')) return 'retail';
+  return 'retail';
+}
+
 /** snapshotYmd: UTC calendar date of analysis run (upload / server time). */
 function classifyRowAgainstSnapshot(stayYmd, snapshotYmd) {
   if (!snapshotYmd) return 'undated';
@@ -955,45 +1029,16 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     };
   }
 
-  function mapSegment(name = '') {
-    const n = name.toLowerCase();
-
-    if (
-      n.includes('transient') ||
-      n.includes('retail') ||
-      n.includes('ota') ||
-      n.includes('booking') ||
-      n.includes('expedia') ||
-      n.includes('direct')
-    ) return 'retail';
-
-    if (
-      n.includes('corporate') ||
-      n.includes('negotiated') ||
-      n.includes('lnr') ||
-      n.includes('company')
-    ) return 'negotiated';
-
-    if (
-      n.includes('group') ||
-      n.includes('mice') ||
-      n.includes('event') ||
-      n.includes('conference')
-    ) return 'groups';
-
-    return 'other';
-  }
-
   const segmentData = {};
 
   pmsRows.forEach((row) => {
     const name = row['market segment name'] || row['Market Segment Name'] || '';
-    const segment = mapSegment(name);
+    const segment = mapMarketSegmentNameToUsaliBucket(name);
 
-    const rnTY = Number(row['room nights on books ty'] || row['Room Nights On Books TY'] || 0);
-    const rnLY = Number(row['room nights on books ly'] || row['Room Nights On Books LY'] || 0);
-    const revTY = Number(row['booked revenue ty'] || row['Booked Revenue TY'] || 0);
-    const revLY = Number(row['booked revenue ly'] || row['Booked Revenue LY'] || 0);
+    const rnTY = Number(row['Room Nights TY (Actual / OTB)'] || 0);
+    const rnLY = Number(row['Room Nights LY Actual'] || 0);
+    const revTY = Number(row['Revenue TY (Actual / OTB)'] || 0);
+    const revLY = Number(row['Revenue LY Actual'] || 0);
 
     if (!segmentData[segment]) {
       segmentData[segment] = { rnTY: 0, rnLY: 0, revTY: 0, revLY: 0 };
@@ -1027,7 +1072,7 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
 
   const worstSegment = [...segmentAnalysis].sort((a, b) => a.rnGrowth - b.rnGrowth)[0];
   if (worstSegment && worstSegment.rnGrowth < -0.1) {
-    focus_segment = worstSegment.segment;
+    focus_segment = usaliBucketToLegacyFocusSegment(worstSegment.segment);
   }
 
   return {
@@ -1053,41 +1098,27 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
     return Number.isFinite(n) ? n : 0;
   }
 
-  function normalizeSegmentName(name = '') {
-    const s = String(name).toLowerCase().trim();
-
-    if (
-      s.includes('retail') ||
-      s.includes('transient') ||
-      s.includes('ota') ||
-      s.includes('online') ||
-      s.includes('bar') ||
-      s.includes('rack') ||
-      s.includes('promo') ||
-      s.includes('discount')
-    ) return 'retail';
-
-    if (
-      s.includes('negotiated') ||
-      s.includes('corporate') ||
-      s.includes('corp') ||
-      s.includes('local corporate') ||
-      s.includes('qualified')
-    ) return 'negotiated';
-
-    if (
-      s.includes('group') ||
-      s.includes('wholesale') ||
-      s.includes('crew') ||
-      s.includes('mice') ||
-      s.includes('conference')
-    ) return 'groups';
-
-    return 'other';
-  }
+  const USALI_BUCKETS_FOR_ADR = [
+    'transient_retail',
+    'transient_discount',
+    'transient_qualified',
+    'transient_negotiated',
+    'transient_wholesale',
+    'group_corporate',
+    'group_association',
+    'group_government',
+    'group_smerf',
+    'group_wholesale',
+    'group_other',
+    'contract',
+    'other'
+  ];
+  const segmentBuckets = Object.fromEntries(USALI_BUCKETS_FOR_ADR.map((k) => [k, []]));
 
   function getSegmentName(row = {}) {
     return (
+      row['Market Segment Name'] ||
+      row['market segment name'] ||
       row.segment ||
       row.Segment ||
       row['Market Segment'] ||
@@ -1110,17 +1141,10 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
     );
   }
 
-  const segmentBuckets = {
-    retail: [],
-    negotiated: [],
-    groups: [],
-    other: []
-  };
-
   for (const row of pmsRows) {
-    const segment = normalizeSegmentName(getSegmentName(row));
+    const segment = mapMarketSegmentNameToUsaliBucket(getSegmentName(row));
     const adr = getSegmentADR(row);
-    if (adr > 0) segmentBuckets[segment].push(adr);
+    if (adr > 0 && segmentBuckets[segment]) segmentBuckets[segment].push(adr);
   }
 
   function avg(arr) {
@@ -1135,11 +1159,27 @@ function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) 
     return Math.sqrt(variance);
   }
 
+  const transientRetailMixKeys = [
+    'transient_retail',
+    'transient_discount',
+    'transient_qualified',
+    'transient_wholesale'
+  ];
+  const groupKeys = [
+    'group_corporate',
+    'group_association',
+    'group_government',
+    'group_smerf',
+    'group_wholesale',
+    'group_other'
+  ];
+  const flatAdrs = (keys) => keys.flatMap((k) => segmentBuckets[k] || []);
+
   const segmentAvgADR = {
-    retail: avg(segmentBuckets.retail),
-    negotiated: avg(segmentBuckets.negotiated),
-    groups: avg(segmentBuckets.groups),
-    other: avg(segmentBuckets.other)
+    retail: avg(flatAdrs(transientRetailMixKeys)),
+    negotiated: avg(segmentBuckets.transient_negotiated),
+    groups: avg(flatAdrs(groupKeys)),
+    other: avg([...(segmentBuckets.contract || []), ...(segmentBuckets.other || [])])
   };
 
   const allMajorSegmentADRs = Object.entries(segmentAvgADR)
@@ -3147,14 +3187,6 @@ function attributePrimarySegmentDriver(pmsRows, context) {
   }
 
   const bucket = new Map();
-  const mapSeg = (name = '') => {
-    const s = String(name).toLowerCase();
-    if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
-    if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
-    if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
-    if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
-    return 'other';
-  };
 
   for (const row of list) {
     const segName =
@@ -3162,20 +3194,12 @@ function attributePrimarySegmentDriver(pmsRows, context) {
       row['Market Segment Name'] ||
       row.segment ||
       row.Segment ||
-      'other';
-    const seg = mapSeg(segName);
-    const rnTy = toFiniteNumberOrNull(
-      row['room nights on books ty'] || row['Room Nights On Books TY'] || row.rn_on_books_ty || row.rn
-    ) || 0;
-    const rnLy = toFiniteNumberOrNull(
-      row['room nights on books ly'] || row['Room Nights On Books LY'] || row.rn_ly_actual
-    ) || 0;
-    const revTy = toFiniteNumberOrNull(
-      row['booked revenue ty'] || row['Booked Revenue TY'] || row.booked_revenue_ty
-    );
-    const revLy = toFiniteNumberOrNull(
-      row['booked revenue ly'] || row['Booked Revenue LY'] || row.booked_revenue_ly_actual
-    );
+      '';
+    const seg = mapMarketSegmentNameToUsaliBucket(segName);
+    const rnTy = toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)'] || row.rn) || 0;
+    const rnLy = toFiniteNumberOrNull(row['Room Nights LY Actual']) || 0;
+    const revTy = toFiniteNumberOrNull(row['Revenue TY (Actual / OTB)']);
+    const revLy = toFiniteNumberOrNull(row['Revenue LY Actual']);
     const adrTy = toFiniteNumberOrNull(
       row.adr_ty || row['ADR TY'] || row.adr || row.ADR || row['Average Rate']
     );
@@ -3300,14 +3324,6 @@ function buildDailyValidationLayer(strWeekRows, pmsRows, context, segmentAttribu
   }
 
   const seg = segmentAttribution?.primary_segment || 'unknown';
-  const mapSeg = (name = '') => {
-    const s = String(name).toLowerCase();
-    if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
-    if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
-    if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
-    if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
-    return 'other';
-  };
 
   const validatedPeak = [];
   const validatedShoulder = [];
@@ -3318,19 +3334,15 @@ function buildDailyValidationLayer(strWeekRows, pmsRows, context, segmentAttribu
       row['Market Segment Name'] ||
       row.segment ||
       row.Segment ||
-      'other';
-    return mapSeg(segName) === seg;
+      '';
+    return mapMarketSegmentNameToUsaliBucket(segName) === seg;
   });
 
   for (const row of primaryRows) {
     const ymd = row?._ingestion?.stay_date_ymd || getRowStayDateYmd(row);
     if (!ymd) continue;
-    const rnTy = toFiniteNumberOrNull(
-      row['room nights on books ty'] || row['Room Nights On Books TY'] || row.rn_on_books_ty || row.rn
-    );
-    const rnLy = toFiniteNumberOrNull(
-      row['room nights on books ly'] || row['Room Nights On Books LY'] || row.rn_ly_actual
-    );
+    const rnTy = toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)'] || row.rn);
+    const rnLy = toFiniteNumberOrNull(row['Room Nights LY Actual']);
     if (rnTy === null || rnLy === null) continue;
     const delta = rnTy - rnLy;
     if (delta <= 0) continue;
@@ -4183,9 +4195,7 @@ function estimateRetailIssueImpact(issue, contextData) {
           row.roomNights ??
           row.rn ??
           row.RN ??
-          row['room nights on books ty'] ??
-          row['Room Nights On Books TY'] ??
-          row.rn_on_books_ty
+          row['Room Nights TY (Actual / OTB)']
       )
     )
     .filter((v) => v !== null && v > 0);
@@ -4194,9 +4204,7 @@ function estimateRetailIssueImpact(issue, contextData) {
       toFiniteNumberOrNull(
         row.revenue ??
           row.Revenue ??
-          row['booked revenue ty'] ??
-          row['Booked Revenue TY'] ??
-          row.booked_revenue_ty
+          row['Revenue TY (Actual / OTB)']
       )
     )
     .filter((v) => v !== null && v > 0);
@@ -4553,21 +4561,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
   const family = (issue?.issue_family || '').toString();
   const rows = Array.isArray(pmsRows) ? pmsRows : [];
 
-  const mapSeg = (name = '') => {
-    const s = String(name).toLowerCase();
-    if (s.includes('corporate') || s.includes('negotiated') || s.includes('lnr')) return 'negotiated';
-    if (s.includes('group') || s.includes('mice') || s.includes('conference')) return 'groups';
-    if (s.includes('ota') || s.includes('booking') || s.includes('expedia')) return 'ota';
-    if (s.includes('retail') || s.includes('transient') || s.includes('direct')) return 'retail';
-    return 'other';
-  };
-  const segLabel = (seg) => {
-    if (seg === 'negotiated') return 'Negotiated';
-    if (seg === 'groups') return 'Groups';
-    if (seg === 'retail') return 'Retail';
-    if (seg === 'ota') return 'OTA';
-    return 'Other';
-  };
+  const segLabel = (bucket, sampleOriginalName = '') => usaliBucketToDisplayName(bucket, sampleOriginalName);
   const pct = (v, d = 1) => (v === null || !Number.isFinite(v) ? null : `${v >= 0 ? '+' : ''}${v.toFixed(d)}%`);
   const dirPoints = (v) => (v === null ? null : `${v >= 0 ? 'up' : 'down'} ${Math.abs(v).toFixed(1)} points vs LY`);
   const parseYmd = (row) => row?.['Date'] || null;
@@ -4611,7 +4605,8 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
   const segAgg = new Map();
   const segDateAgg = new Map();
   for (const row of rows) {
-    const seg = mapSeg(row?.['Market Segment Name'] || '');
+    const rawSegName = String(row?.['Market Segment Name'] || '').trim();
+    const seg = mapMarketSegmentNameToUsaliBucket(rawSegName);
     const rnTy = num(row, ['Room Nights TY (Actual / OTB)']);
     const rnLy = num(row, ['Room Nights LY Actual']);
     const adrTy = adrTyFromRow(row);
@@ -4620,7 +4615,23 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     const revLy = (rnLy !== null && adrLy !== null) ? rnLy * adrLy : null;
     const ymd = toYmd(parseYmd(row));
 
-    if (!segAgg.has(seg)) segAgg.set(seg, { seg, rnTy: 0, rnLy: 0, revTy: 0, revLy: 0, rnTySeen: false, rnLySeen: false, revTySeen: false, revLySeen: false });
+    if (!segAgg.has(seg)) {
+      segAgg.set(seg, {
+        seg,
+        sampleName: rawSegName || null,
+        rnTy: 0,
+        rnLy: 0,
+        revTy: 0,
+        revLy: 0,
+        rnTySeen: false,
+        rnLySeen: false,
+        revTySeen: false,
+        revLySeen: false
+      });
+    } else {
+      const ex = segAgg.get(seg);
+      if (!ex.sampleName && rawSegName) ex.sampleName = rawSegName;
+    }
     const a = segAgg.get(seg);
     if (rnTy !== null) { a.rnTy += rnTy; a.rnTySeen = true; }
     if (rnLy !== null) { a.rnLy += rnLy; a.rnLySeen = true; }
@@ -4683,10 +4694,10 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
 
   const fmtPeakDates = (dates) => dates.map((d) => fmtDate(d)).filter(Boolean).slice(0, 5).join(', ');
   const topGrowerLine = topGrower && (topGrower.rnPct !== null || topGrower.adrPct !== null)
-    ? `${segLabel(topGrower.seg)} grew room nights ${pct(topGrower.rnPct) || ''}${topGrower.adrPct !== null ? ` with ADR ${pct(topGrower.adrPct)}` : ''}.`.replace(/\s+/g, ' ').trim()
+    ? `${segLabel(topGrower.seg, topGrower.sampleName)} grew room nights ${pct(topGrower.rnPct) || ''}${topGrower.adrPct !== null ? ` with ADR ${pct(topGrower.adrPct)}` : ''}.`.replace(/\s+/g, ' ').trim()
     : null;
   const topDeclinerLine = topDecliner && (topDecliner.rnPct !== null || topDecliner.adrPct !== null)
-    ? `${segLabel(topDecliner.seg)} declined room nights ${pct(topDecliner.rnPct) || ''}${topDecliner.adrPct !== null ? ` with ADR ${pct(topDecliner.adrPct)}` : ''}.`.replace(/\s+/g, ' ').trim()
+    ? `${segLabel(topDecliner.seg, topDecliner.sampleName)} declined room nights ${pct(topDecliner.rnPct) || ''}${topDecliner.adrPct !== null ? ` with ADR ${pct(topDecliner.adrPct)}` : ''}.`.replace(/\s+/g, ' ').trim()
     : null;
 
   const lines = [];
@@ -4705,7 +4716,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     ].filter(Boolean).join(', ') + (trendStr ? `. ${trendStr}.` : '.'));
     pushLine([topGrowerLine, topDeclinerLine].filter(Boolean).join(' ') || null);
     if (confirmedDisplacementDates.length) {
-      pushLine(`On ${fmtPeakDates(confirmedDisplacementDates)} the ${segLabel(topGrower.seg)} segment grew volume at below-last-year ADR on peak occupancy days above 85%, confirming displacement risk.`);
+      pushLine(`On ${fmtPeakDates(confirmedDisplacementDates)} the ${segLabel(topGrower.seg, topGrower.sampleName)} segment grew volume at below-last-year ADR on peak occupancy days above 85%, confirming displacement risk.`);
     } else if (peakGrowthDates.length) {
       pushLine(`Peak-date checks on ${fmtPeakDates(peakGrowthDates)} show growth on high-occupancy days without confirmed below-last-year ADR displacement.`);
     } else if (peakDates.length) {
@@ -4727,7 +4738,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     } else if (peakGrowthDates.length) {
       pushLine(`Growth dates on peaks are ${fmtPeakDates(peakGrowthDates)} and do not show confirmed below-last-year ADR displacement.`);
     } else if (topGrower) {
-      pushLine(`Current growth in ${segLabel(topGrower.seg)} is concentrated away from confirmed peak-displacement signals, consistent with need-period filling.`);
+      pushLine(`Current growth in ${segLabel(topGrower.seg, topGrower.sampleName)} is concentrated away from confirmed peak-displacement signals, consistent with need-period filling.`);
     }
     if (paceGapPct !== null) pushLine(`Pace is ${pct(paceGapPct)} versus reference, which indicates whether discount cost is producing the expected room-night response.`);
     pushLine(paceGapPct !== null && paceGapPct >= 0
@@ -4744,7 +4755,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     ].filter(Boolean).join(', ') + '.');
     if (topGrower && topGrower.adrPct !== null && topGrower.rnPct !== null) {
       const dispro = Math.abs(topGrower.adrPct) > Math.abs(topGrower.rnPct);
-      pushLine(`${segLabel(topGrower.seg)} is discounting most aggressively (ADR ${pct(topGrower.adrPct)}) while room nights moved ${pct(topGrower.rnPct)}${dispro ? ', which is less than proportional to the rate cut' : ''}.`);
+      pushLine(`${segLabel(topGrower.seg, topGrower.sampleName)} is discounting most aggressively (ADR ${pct(topGrower.adrPct)}) while room nights moved ${pct(topGrower.rnPct)}${dispro ? ', which is less than proportional to the rate cut' : ''}.`);
     } else {
       pushLine([topGrowerLine, topDeclinerLine].filter(Boolean).join(' ') || null);
     }
@@ -4772,7 +4783,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
       .filter((s) => s.rnPct !== null)
       .sort((a, b) => a.rnPct - b.rnPct)[0];
     if (weakestPickup) {
-      pushLine(`${segLabel(weakestPickup.seg)} shows the weakest pickup versus last year with room nights ${pct(weakestPickup.rnPct)}${weakestPickup.adrPct !== null ? ` and ADR ${pct(weakestPickup.adrPct)}` : ''}.`);
+      pushLine(`${segLabel(weakestPickup.seg, weakestPickup.sampleName)} shows the weakest pickup versus last year with room nights ${pct(weakestPickup.rnPct)}${weakestPickup.adrPct !== null ? ` and ADR ${pct(weakestPickup.adrPct)}` : ''}.`);
     }
     pushLine(`Decide whether the first intervention should be upstream demand generation or booking-path friction removal, and commit to one after identifying which gap is dominant.`);
     return lines.slice(0, 5).join('\n\n');
@@ -4782,7 +4793,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     pushLine(`RGI is ${avgRGI.toFixed(1)}, confirming outperformance versus the competitive set${rgiVar !== null ? ` with RGI ${dirPoints(rgiVar)}` : ''}.`);
     if (topGrower) {
       const healthy = topGrower.adrPct === null || topGrower.adrPct >= 0;
-      pushLine(`${segLabel(topGrower.seg)} is the primary performance driver with room nights ${pct(topGrower.rnPct)}${topGrower.adrPct !== null ? ` and ADR ${pct(topGrower.adrPct)}` : ''}, which is ${healthy ? 'quality-accretive' : 'potentially fragile due to rate dilution'}.`);
+      pushLine(`${segLabel(topGrower.seg, topGrower.sampleName)} is the primary performance driver with room nights ${pct(topGrower.rnPct)}${topGrower.adrPct !== null ? ` and ADR ${pct(topGrower.adrPct)}` : ''}, which is ${healthy ? 'quality-accretive' : 'potentially fragile due to rate dilution'}.`);
     }
     pushLine(`Decide whether to protect current mix quality and rate integrity or push incremental volume that risks eroding the outperformance base.`);
     return lines.slice(0, 5).join('\n\n');
