@@ -4910,6 +4910,10 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     if (segObj == null) return null;
     const dn = segObj.displayName != null ? String(segObj.displayName).trim() : '';
     if (dn) return dn;
+    const nm = segObj.name != null ? String(segObj.name).trim() : '';
+    if (nm) return nm;
+    const segKey = segObj.segmentKey != null ? String(segObj.segmentKey).trim() : '';
+    if (segKey) return usaliBucketToDisplayName(segKey, segObj.sampleName || '');
     const sk = segObj.seg != null ? String(segObj.seg).trim() : '';
     if (sk) return usaliBucketToDisplayName(sk, segObj.sampleName || '');
     const sn = segObj.sampleName != null ? String(segObj.sampleName).trim() : '';
@@ -4997,6 +5001,35 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     else if (lead <= 90) byWindow[2].push(row);
     else byWindow[3].push(row);
   }
+
+  console.log('DEBUG forward window rows', {
+    window: 1,
+    startDays: 1,
+    endDays: 30,
+    rowCount: byWindow[0].length,
+    snapshotYmd
+  });
+  console.log('DEBUG forward window rows', {
+    window: 2,
+    startDays: 31,
+    endDays: 60,
+    rowCount: byWindow[1].length,
+    snapshotYmd
+  });
+  console.log('DEBUG forward window rows', {
+    window: 3,
+    startDays: 61,
+    endDays: 90,
+    rowCount: byWindow[2].length,
+    snapshotYmd
+  });
+  console.log('DEBUG forward window rows', {
+    window: 4,
+    startDays: 91,
+    endDays: null,
+    rowCount: byWindow[3].length,
+    snapshotYmd
+  });
 
   const buildWindowMetrics = (rows, win) => {
     const b = windowBounds(win);
@@ -5103,6 +5136,7 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
         rnDelta,
         rnDeltaPct,
         adrDeltaPct,
+        segmentKey: s.seg,
         displayName: usaliBucketToDisplayName(s.seg, s.sampleName || '')
       };
     });
@@ -5151,12 +5185,20 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       (adrDilutionSegment?.adrRefS ?? null) != null &&
       (adrDilutionSegment?.adrTyS ?? 0) < (adrDilutionSegment?.adrRefS ?? 0);
 
+    const paceGapThreshold = win === 1 ? -2 : win === 2 ? -3 : -5;
+    const adrErosionAdrThreshold = win === 1 ? -1.5 : win === 2 ? -2 : -3;
+
     let signal = null;
     if (hasHighOccDate && dilutionMeetsPeak) {
       signal = 'peak_exposure';
-    } else if (paceGapPct !== null && adrGapPct !== null && paceGapPct > 0 && adrGapPct < -3) {
+    } else if (
+      paceGapPct !== null &&
+      adrGapPct !== null &&
+      paceGapPct > 0 &&
+      adrGapPct < adrErosionAdrThreshold
+    ) {
       signal = 'adr_erosion';
-    } else if (paceGapPct !== null && paceGapPct < -5) {
+    } else if (paceGapPct !== null && paceGapPct < paceGapThreshold) {
       signal = 'pace_gap';
     } else if (paceGapPct !== null && adrGapPct !== null && paceGapPct > 5 && adrGapPct > 0) {
       signal = 'pace_ahead_clean';
@@ -5335,8 +5377,8 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     const segDil = forwardSegDisplayName(m.adrDilutionSegment);
     const growLab = forwardSegDisplayName(m.topGrowthSegment);
     const declLab = forwardSegDisplayName(m.topDeclineSegment);
-    const growLabBullet = growLab || 'the leading segment';
-    const declLabBullet = declLab || 'the lagging segment';
+    const growLabBullet = growLab || 'segments outpacing reference pace';
+    const declLabBullet = declLab || 'segments trailing reference pace';
     const segDilBullet = segDil || 'discount-led segments';
 
     let title = 'Forward commercial signal';
@@ -5473,26 +5515,43 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       const declPct = fmtPct1(declRnDeltaPct);
       const growPct = fmtPct1(growRnDeltaPct);
 
-      let paceCloseTxt;
+      const pcg = m.paceGapPct;
+      const paceIntro =
+        pcg !== null && pcg < 0
+          ? `${winLab} is ${Math.abs(pcg).toFixed(1)}% behind last year on room nights.`
+          : pcg !== null && pcg > 0
+            ? `${winLab} is ${pcg.toFixed(1)}% ahead of last year on room nights.`
+            : `${winLab} is in line with last year on room nights.`;
+
+      let trajectoryPart = '';
       if (!trajectoryActive || projectedGapVsReference === null) {
-        paceCloseTxt =
-          'pickup-based finish versus last year cannot be projected — elapsed timing from the window start to snapshot is not available';
-      } else if (projectedGapVsReference < 0) {
-        paceCloseTxt = `is projected to finish ${Math.abs(Math.round(projectedGapVsReference))} room nights short of last year's reference`;
-      } else if (projectedGapVsReference > 0) {
-        paceCloseTxt = `is projected to finish ${Math.round(projectedGapVsReference)} room nights ahead of last year's reference`;
+        trajectoryPart =
+          'Pickup-based finish versus last year cannot be projected — elapsed timing from the window start to snapshot is not available.';
       } else {
-        paceCloseTxt = 'is projected to finish aligned with last year on room nights';
+        const x = Math.round(projectedGapVsReference);
+        const ax = Math.abs(x);
+        if (projectedGapVsReference > 0) {
+          if (pcg !== null && pcg < 0) {
+            trajectoryPart = `At current pickup velocity the window is on track to close the gap and finish approximately ${x} room nights ahead of reference — the shortfall is self-correcting.`;
+          } else {
+            trajectoryPart = `At current pickup velocity the window is projected to finish approximately ${x} room nights ahead of reference.`;
+          }
+        } else if (projectedGapVsReference < 0) {
+          trajectoryPart = `At current pickup velocity the window will finish approximately ${ax} room nights short of reference.`;
+        } else {
+          trajectoryPart =
+            "At current pickup velocity the window is projected to finish aligned with last year's reference.";
+        }
       }
 
-      let revClause;
+      let revSuffix = '';
       if (!trajectoryActive || projectedGapVsReference === null) {
-        revClause = 'Revenue impact from pickup trajectory cannot be estimated for this window';
+        revSuffix = ' Revenue impact from pickup trajectory cannot be estimated for this window.';
       } else if (projectedRevenueGap === null) {
-        revClause =
-          'Revenue impact not quantified — data coverage across this window is insufficient for a reliable estimate';
+        revSuffix =
+          ' Revenue impact not quantified — data coverage across this window is insufficient for a reliable estimate.';
       } else {
-        revClause = `a projected revenue gap of ${fmtMoney0(Math.abs(projectedRevenueGap)) || '0'}`;
+        revSuffix = ` Projected revenue delta at current blended ADR: ${fmtMoney0(Math.abs(projectedRevenueGap)) || '0'}.`;
       }
 
       const paceSegParts = [];
@@ -5510,34 +5569,30 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
         paceSegParts.push(`${growLab} is the strongest performer at ${growPct} ahead but ${trackTail}`);
       } else if (growPct) {
         paceSegParts.push(
-          `The leading segment is outperforming its reference pace for this window at ${growPct} ahead but ${trackTail}`
+          `Fastest-recovering segment mix is ${growPct} ahead of reference on room nights but ${trackTail}`
         );
       } else if (growLab) {
         paceSegParts.push(`${growLab} is the strongest performer in this window but ${trackTail}`);
-      } else {
-        paceSegParts.push(
-          `The leading segment is outperforming its reference pace for this window but ${trackTail}`
-        );
       }
       const paceSegLine = paceSegParts.join(' ');
 
-      const growRef = growLab || 'The leading segment';
-      const declRef = declLab || 'the lagging segment';
+      const para3 = gapRecoverable
+        ? growLab
+          ? `If ${growLab} maintains current pickup velocity it can close the gap before the window closes. No emergency action required — monitor weekly.`
+          : 'If current pickup velocity holds, the gap can close before the window ends — no emergency action required; monitor weekly.'
+        : growLab
+          ? `${growLab} cannot close the gap at current velocity. An additional ${Math.round(shortfall)} room nights are needed from other segments. Activate demand generation${declLab ? ` for ${declLab}` : ''} now — the window is ${m.remainingDays} days.`
+          : `Pickup at current velocity cannot close the gap. An additional ${Math.round(shortfall)} room nights are needed from other segments. Activate demand generation${declLab ? ` for ${declLab}` : ''} now — the window is ${m.remainingDays} days.`;
 
-      const paceOpen =
-        trajectoryActive && projectedGapVsReference !== null
-          ? 'At current pickup velocity the window '
-          : '';
-      narrative = [
-        `${winLab} is ${Math.abs(m.paceGapPct || 0).toFixed(1)}% behind last year on room nights. ${paceOpen}${paceCloseTxt} — ${revClause}.`,
-        paceSegLine,
-        gapRecoverable
-          ? `If ${growRef} maintains current pickup velocity it can close the gap before the window closes. No emergency action required — monitor weekly.`
-          : `${growRef} cannot close the gap at current velocity. An additional ${Math.round(shortfall)} room nights are needed from other segments. Activate demand generation for ${declRef} now — the window is ${m.remainingDays} days.`,
-        gapRecoverable
-          ? `Maintain pickup plays for ${growRef}; review OTB weekly and avoid panic discounting that would erode ADR.`
-          : `Escalate demand generation and sales intervention for ${declRef}; set weekly pickup targets until the window closes.`
-      ].join('\n\n');
+      const para4 = gapRecoverable
+        ? growLab
+          ? `Maintain pickup plays for ${growLab}; review OTB weekly and avoid panic discounting that would erode ADR.`
+          : 'Maintain current pickup plays; review OTB weekly and avoid panic discounting that would erode ADR.'
+        : declLab
+          ? `Escalate demand generation and sales intervention for ${declLab}; set weekly pickup targets until the window closes.`
+          : 'Escalate demand generation and sales intervention; set weekly pickup targets until the window closes.';
+
+      narrative = [`${paceIntro} ${trajectoryPart}${revSuffix}`, paceSegLine, para3, para4].join('\n\n');
     } else if (sig === 'pace_ahead_clean') {
       title = 'Forward pace and rate confirmation';
       priority = 'low';
@@ -5546,14 +5601,16 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       const leadAdrPct = leadSeg?.adrDeltaPct ?? null;
       const leadRnFmt = fmtPct1(leadRnPct);
       const leadAdrFmt = fmtPct1(leadAdrPct);
-      const leadNm = growLab || 'The leading segment';
-      let leadTxt = `${leadNm} leads contribution in this window on a volume basis.`;
-      if (leadSeg != null && leadRnFmt && leadAdrFmt) {
-        leadTxt = `${leadNm} leads the window with room nights ${leadRnFmt} ahead versus last year at ADR ${leadAdrFmt}.`;
-      } else if (leadSeg != null && leadRnFmt) {
-        leadTxt = `${leadNm} leads the window with room nights ${leadRnFmt} ahead versus last year.`;
-      } else if (leadSeg != null && leadAdrFmt) {
-        leadTxt = `${leadNm} leads the window with ADR ${leadAdrFmt} versus last year.`;
+      let leadTxt = 'Pickup for this window is outperforming reference pace on a volume basis.';
+      if (growLab) {
+        leadTxt = `${growLab} leads contribution in this window on a volume basis.`;
+      }
+      if (growLab && leadSeg != null && leadRnFmt && leadAdrFmt) {
+        leadTxt = `${growLab} leads the window with room nights ${leadRnFmt} ahead versus last year at ADR ${leadAdrFmt}.`;
+      } else if (growLab && leadSeg != null && leadRnFmt) {
+        leadTxt = `${growLab} leads the window with room nights ${leadRnFmt} ahead versus last year.`;
+      } else if (growLab && leadSeg != null && leadAdrFmt) {
+        leadTxt = `${growLab} leads the window with ADR ${leadAdrFmt} versus last year.`;
       }
       narrative = [
         `${winLab} is ${fmtPct1(m.paceGapPct)} ahead on room nights with ADR ${fmtPct1(m.adrGapPct)} above last year. Both volume and rate are outperforming.`,
