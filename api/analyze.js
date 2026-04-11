@@ -4538,6 +4538,10 @@ function estimateRetailIssueImpact(issue, contextData) {
   const issueFamily = (issue?.issue_family || '').toString();
   const diagnosis = contextData?.diagnosis || {};
   const pmsRows = Array.isArray(contextData?.pmsRows) ? contextData.pmsRows : [];
+  const actualizedPmsRows = pmsRows.filter((row) => {
+    const ph = row?._ingestion?.row_phase;
+    return ph === 'actualized' || ph === 'undated';
+  });
   const pmsPaceRows = Array.isArray(contextData?.pmsPaceRows) ? contextData.pmsPaceRows : [];
 
   const cardMetrics = issue?.card_metrics || {};
@@ -4546,7 +4550,6 @@ function estimateRetailIssueImpact(issue, contextData) {
   const avgRGI = toFiniteNumberOrNull(cardMetrics.avgRGI ?? diagnosis?.metrics?.avgRGI);
   const avgOcc = toFiniteNumberOrNull(cardMetrics.avgOcc ?? diagnosis?.metrics?.avgOcc);
 
-  const rows = Array.isArray(pmsRows) ? pmsRows : [];
   const adrFromRow = (row) => {
     let adr = toFiniteNumberOrNull(row['ADR TY']);
     if (adr === null || adr === 0) {
@@ -4556,11 +4559,11 @@ function estimateRetailIssueImpact(issue, contextData) {
     }
     return adr;
   };
-  const adrValuesRaw = rows.map((row) => adrFromRow(row)).filter((v) => v !== null && v > 0);
-  const rnValuesRaw = rows
+  const adrValuesRaw = actualizedPmsRows.map((row) => adrFromRow(row)).filter((v) => v !== null && v > 0);
+  const rnValuesRaw = actualizedPmsRows
     .map((row) => toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)']))
     .filter((v) => v !== null && v > 0);
-  const revenueValuesRaw = rows
+  const revenueValuesRaw = actualizedPmsRows
     .map((row) => toFiniteNumberOrNull(row['Revenue TY (Actual / OTB)']))
     .filter((v) => v !== null && v > 0);
 
@@ -4572,7 +4575,7 @@ function estimateRetailIssueImpact(issue, contextData) {
   const actualizedEffectiveADR = actualizedAdrValues.length
     ? actualizedAdrValues.reduce((a, b) => a + b, 0) / actualizedAdrValues.length
     : null;
-  const adrLyVals = rows
+  const adrLyVals = actualizedPmsRows
     .map((row) => {
       const ly = toFiniteNumberOrNull(row['ADR LY']);
       if (ly !== null) return ly;
