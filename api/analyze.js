@@ -3528,14 +3528,15 @@ function buildRetailReasoningIssue({ context, performanceStory, segmentAttributi
       : dailyValidation?.displacement_risk === 'low'
         ? 'Daily validation: growth concentrated on shoulder/low-demand dates, limiting displacement risk.'
         : 'Daily validation inconclusive; maintain caution before escalation.';
-  const commercialNarrative = buildCommercialNarrative(
-    { issue_family: finalDecision?.issue_family },
-    diagnosis,
-    segmentAttribution,
-    dailyValidation,
-    pmsRows,
-    paceSignalSummary
-  );
+  const { narrative: commercialNarrative, decisionLine: narrativeDecisionLine } =
+    buildCommercialNarrative(
+      { issue_family: finalDecision?.issue_family },
+      diagnosis,
+      segmentAttribution,
+      dailyValidation,
+      pmsRows,
+      paceSignalSummary
+    ) || {};
   return {
     family: finalDecision.issue_family,
     primary_driver: finalDecision.primary_driver,
@@ -5835,6 +5836,22 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
 
   const lines = [];
   const pushLine = (t) => { if (t && t.trim()) lines.push(t.trim()); };
+  const packNarrative = (fullText) => {
+    if (fullText == null || String(fullText).trim() === '') {
+      return { narrative: null, decisionLine: null };
+    }
+    const paragraphs = String(fullText)
+      .split('\n\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!paragraphs.length) return { narrative: null, decisionLine: null };
+    const lastParagraph = paragraphs[paragraphs.length - 1];
+    const paragraphsExceptLast = paragraphs.slice(0, -1);
+    return {
+      narrative: paragraphsExceptLast.length ? paragraphsExceptLast.join('\n\n') : null,
+      decisionLine: lastParagraph
+    };
+  };
   const trendStr = [
     mpiVar !== null ? `MPI ${dirPoints(mpiVar)}` : null,
     ariVar !== null ? `ARI ${dirPoints(ariVar)}` : null,
@@ -6004,7 +6021,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
         'Volume strategy is working. Begin selective rate restoration on peak dates to recover ADR without losing the share gains. Do not unwind the full discount — taper it.';
     }
     pushLine(volDirective);
-    return lines.slice(0, 8).join('\n\n');
+    return packNarrative(lines.slice(0, 8).join('\n\n'));
   }
 
   if (family === 'discount_inefficiency') {
@@ -6068,7 +6085,7 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
         'Demand is not reaching the hotel before booking decisions are made. Prioritise top-of-funnel activation over rate or conversion changes — fixing downstream friction will not help if upstream demand is absent.';
     }
     pushLine(visDirective);
-    return lines.slice(0, 8).join('\n\n');
+    return packNarrative(lines.slice(0, 8).join('\n\n'));
   }
 
   if (avgRGI !== null && avgRGI >= 100) {
@@ -6081,10 +6098,10 @@ function buildCommercialNarrative(issue, diagnosis, segmentAttribution, dailyVal
     pushLine(
       'Hold outperformance discipline: protect mix quality and rate integrity on compression peaks; add volume only where demand is truly incremental and dilution risk is low.'
     );
-    return lines.slice(0, 8).join('\n\n');
+    return packNarrative(lines.slice(0, 8).join('\n\n'));
   }
 
-  return null;
+  return { narrative: null, decisionLine: null };
 }
 
 function buildRetailIssueNarrative(issue, quantification, commercialContext) {
