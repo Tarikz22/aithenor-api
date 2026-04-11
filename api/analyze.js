@@ -4053,8 +4053,7 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
     dl.includes('Volume strategy is working') ||
     dl.includes('Give it ') ||
     dl.includes('Do not unwind the full discount') ||
-    dl.includes('taper it') ||
-    dl.includes('below-STLY rates on');
+    dl.includes('taper it');
 
   if (fam === 'pricing_resistance') {
     if (isPricingHold) {
