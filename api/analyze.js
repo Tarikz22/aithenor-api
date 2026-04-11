@@ -4254,7 +4254,7 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
 }
 
 function enrichRetailIssue(issue, ctx) {
-  const { diagnosis, focus, detection, pmsRows, strRows } = ctx;
+  const { diagnosis, focus, detection, pmsRows, strRows, period_start, period_end } = ctx;
   const proxy = issueProxyDriver(issue);
   const actions = (issue._library_actions || []).map((row) => {
     const base = row.action_id ? mapLibraryRowToActionShape(row) : { ...row };
@@ -4266,7 +4266,9 @@ function enrichRetailIssue(issue, ctx) {
         action: base,
         detection,
         pmsRows,
-        strRows
+        strRows,
+        period_start,
+        period_end
       })
     };
   });
@@ -4377,8 +4379,26 @@ function buildActionsFromIssues({ hotelCode, periodMeta, focus, issues }) {
   return rows;
 }
 
-function buildFinancialImpact({ driver, diagnosis, action, detection, pmsRows = [], strRows = [] }) {
-  const rows = Array.isArray(pmsRows) ? pmsRows : [];
+function buildFinancialImpact({
+  driver,
+  diagnosis,
+  action,
+  detection,
+  pmsRows = [],
+  strRows = [],
+  period_start = null,
+  period_end = null
+}) {
+  const periodStart = period_start || null;
+  const periodEnd = period_end || null;
+  const rows = (Array.isArray(pmsRows) ? pmsRows : []).filter((row) => {
+    if (periodStart && periodEnd) {
+      const ymd = row?._ingestion?.stay_date_ymd;
+      if (!ymd) return true;
+      return ymd >= periodStart && ymd <= periodEnd;
+    }
+    return true;
+  });
   const str = Array.isArray(strRows) ? strRows : [];
 
   const adrValues = rows
@@ -4538,9 +4558,18 @@ function estimateRetailIssueImpact(issue, contextData) {
   const issueFamily = (issue?.issue_family || '').toString();
   const diagnosis = contextData?.diagnosis || {};
   const pmsRows = Array.isArray(contextData?.pmsRows) ? contextData.pmsRows : [];
+  const periodStart = contextData?.period_start || null;
+  const periodEnd = contextData?.period_end || null;
+
   const actualizedPmsRows = pmsRows.filter((row) => {
-    const ph = row?._ingestion?.row_phase;
-    return ph === 'actualized' || ph === 'undated';
+    const phase = row?._ingestion?.row_phase;
+    if (phase !== 'actualized' && phase !== 'undated') return false;
+    if (periodStart && periodEnd) {
+      const ymd = row?._ingestion?.stay_date_ymd;
+      if (!ymd) return true;
+      return ymd >= periodStart && ymd <= periodEnd;
+    }
+    return true;
   });
   const pmsPaceRows = Array.isArray(contextData?.pmsPaceRows) ? contextData.pmsPaceRows : [];
 
@@ -7700,6 +7729,7 @@ async function handler(req, res) {
     const diagnosis = buildDiagnosisFromSTR(strRows);
     const focus = buildFocusFromPMS(pmsRows, diagnosis);
     const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
+    const periodMeta = extractPeriodMetadata(strRows, snapshotYmd);
 
     let enrichedIssues = [];
     let enrichedActions;
@@ -7726,7 +7756,15 @@ async function handler(req, res) {
         retailTemporalMeta.fallback_used = false;
       }
 
-      const enrichCtx = { diagnosis, focus, detection, pmsRows, strRows };
+      const enrichCtx = {
+        diagnosis,
+        focus,
+        detection,
+        pmsRows,
+        strRows,
+        period_start: periodMeta.period_start,
+        period_end: periodMeta.period_end
+      };
       enrichedIssues = rawIssues.map((issue) => enrichRetailIssue(issue, enrichCtx));
       enrichedActions = flattenIssuesToLegacyActions(enrichedIssues);
     } else {
@@ -7739,13 +7777,14 @@ async function handler(req, res) {
           action,
           detection,
           pmsRows,
-          strRows
+          strRows,
+          period_start: periodMeta.period_start,
+          period_end: periodMeta.period_end
         })
       }));
     }
 
     const totalOpportunity = buildTotalOpportunity(enrichedActions);
-    const periodMeta = extractPeriodMetadata(strRows, snapshotYmd);
     const pmsPaceSnapshotRowsForAnalysis = buildPmsPaceSnapshotRowsForPersistence({
       hotelCode,
       snapshotDateYmd: periodMeta.snapshot_date,
@@ -7772,7 +7811,9 @@ async function handler(req, res) {
       detection,
       pmsRows,
       pmsPaceRows: pmsPaceSnapshotRowsForAnalysis,
-      strRows
+      strRows,
+      period_start: periodMeta.period_start,
+      period_end: periodMeta.period_end
     });
     const commercialContextSummary = buildCommercialContextSummary(
       enrichedIssues,
