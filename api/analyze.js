@@ -4991,21 +4991,51 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
   });
   if (!forwardRows.length) return [];
 
+  const window1Start = addDaysYmd(snapshotYmd, 1);
+  const window1End = addDaysYmd(snapshotYmd, 30);
+  const window2Start = addDaysYmd(snapshotYmd, 31);
+  const window2End = addDaysYmd(snapshotYmd, 60);
+  const window3Start = addDaysYmd(snapshotYmd, 61);
+  const window3End = addDaysYmd(snapshotYmd, 90);
+  const window4Start = addDaysYmd(snapshotYmd, 91);
+
   const byWindow = [[], [], [], []];
   for (const row of forwardRows) {
-    const stay = row?._ingestion?.stay_date_ymd || getRowStayDateYmd(row);
-    const lead = leadDaysToStay(stay);
-    if (lead === null || lead < 1) continue;
-    if (lead <= 30) byWindow[0].push(row);
-    else if (lead <= 60) byWindow[1].push(row);
-    else if (lead <= 90) byWindow[2].push(row);
-    else byWindow[3].push(row);
+    const rawStay = row?._ingestion?.stay_date_ymd;
+    const stay = rawStay != null ? String(rawStay).trim() : '';
+    if (!stay || !/^\d{4}-\d{2}-\d{2}$/.test(stay)) continue;
+    if (
+      window1Start &&
+      window1End &&
+      stay >= window1Start &&
+      stay <= window1End
+    ) {
+      byWindow[0].push(row);
+    } else if (
+      window2Start &&
+      window2End &&
+      stay >= window2Start &&
+      stay <= window2End
+    ) {
+      byWindow[1].push(row);
+    } else if (
+      window3Start &&
+      window3End &&
+      stay >= window3Start &&
+      stay <= window3End
+    ) {
+      byWindow[2].push(row);
+    } else if (window4Start && stay >= window4Start) {
+      byWindow[3].push(row);
+    }
   }
 
   console.log('DEBUG forward window rows', {
     window: 1,
     startDays: 1,
     endDays: 30,
+    windowStartDate: window1Start,
+    windowEndDate: window1End,
     rowCount: byWindow[0].length,
     snapshotYmd
   });
@@ -5013,6 +5043,8 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     window: 2,
     startDays: 31,
     endDays: 60,
+    windowStartDate: window2Start,
+    windowEndDate: window2End,
     rowCount: byWindow[1].length,
     snapshotYmd
   });
@@ -5020,6 +5052,8 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     window: 3,
     startDays: 61,
     endDays: 90,
+    windowStartDate: window3Start,
+    windowEndDate: window3End,
     rowCount: byWindow[2].length,
     snapshotYmd
   });
@@ -5027,6 +5061,8 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     window: 4,
     startDays: 91,
     endDays: null,
+    windowStartDate: window4Start,
+    windowEndDate: null,
     rowCount: byWindow[3].length,
     snapshotYmd
   });
