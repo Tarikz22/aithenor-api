@@ -4378,17 +4378,26 @@ function buildActionsFromIssues({ hotelCode, periodMeta, focus, issues }) {
 }
 
 function buildFinancialImpact({ driver, diagnosis, action, detection, pmsRows = [], strRows = [] }) {
-  const adrValues = pmsRows
-    .map((row) => Number(row.adr ?? row.ADR ?? 0))
-    .filter((value) => !Number.isNaN(value) && value > 0);
+  const rows = Array.isArray(pmsRows) ? pmsRows : [];
+  const str = Array.isArray(strRows) ? strRows : [];
 
-  const rnValues = pmsRows
-    .map((row) => Number(row.room_nights ?? row.roomNights ?? row.rn ?? row.RN ?? 0))
-    .filter((value) => !Number.isNaN(value) && value > 0);
+  const adrValues = rows
+    .map((row) => {
+      let adr = toFiniteNumberOrNull(row['ADR TY']);
+      if (adr === null || adr === 0) {
+        const rev = toFiniteNumberOrNull(row['Revenue TY (Actual / OTB)']);
+        const rn = toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)']);
+        if (rev !== null && rn !== null && rn > 0) adr = rev / rn;
+      }
+      return adr;
+    })
+    .filter((v) => v !== null && v > 0);
 
-  const mpiValues = strRows
-    .map((row) => Number(row.mpi ?? row.MPI ?? 0))
-    .filter((value) => !Number.isNaN(value) && value > 0);
+  const rnValues = rows
+    .map((row) => toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)']))
+    .filter((v) => v !== null && v > 0);
+
+  const avgMPI = averageMetric(str, ['MPI', 'MPI (Index)', 'Occupancy Index']);
 
   const avgADR =
     adrValues.length > 0
@@ -4400,12 +4409,7 @@ function buildFinancialImpact({ driver, diagnosis, action, detection, pmsRows = 
       ? rnValues.reduce((a, b) => a + b, 0)
       : null;
 
-  const avgMPI =
-    mpiValues.length > 0
-      ? mpiValues.reduce((a, b) => a + b, 0) / mpiValues.length
-      : null;
-
-  if (!avgADR || !totalRN || !avgMPI) {
+  if (avgADR == null || totalRN == null || totalRN <= 0 || avgMPI == null) {
     return {
       impact_type: 'revenue_uplift',
       impact_range: { low: null, high: null },
@@ -4542,39 +4546,41 @@ function estimateRetailIssueImpact(issue, contextData) {
   const avgRGI = toFiniteNumberOrNull(cardMetrics.avgRGI ?? diagnosis?.metrics?.avgRGI);
   const avgOcc = toFiniteNumberOrNull(cardMetrics.avgOcc ?? diagnosis?.metrics?.avgOcc);
 
-  const adrValuesRaw = pmsRows
-    .map((row) =>
-      toFiniteNumberOrNull(
-        row.adr ??
-          row.ADR ??
-          row['Average Rate'] ??
-          row['Avg Rate'] ??
-          row['Average ADR'] ??
-          row.adr_ty ??
-          row['ADR TY']
-      )
-    )
+  const rows = Array.isArray(pmsRows) ? pmsRows : [];
+  const adrFromRow = (row) => {
+    let adr = toFiniteNumberOrNull(row['ADR TY']);
+    if (adr === null || adr === 0) {
+      const rev = toFiniteNumberOrNull(row['Revenue TY (Actual / OTB)']);
+      const rn = toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)']);
+      if (rev !== null && rn !== null && rn > 0) adr = rev / rn;
+    }
+    return adr;
+  };
+  const adrValuesRaw = rows.map((row) => adrFromRow(row)).filter((v) => v !== null && v > 0);
+  const rnValuesRaw = rows
+    .map((row) => toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)']))
     .filter((v) => v !== null && v > 0);
-  const rnValuesRaw = pmsRows
-    .map((row) =>
-      toFiniteNumberOrNull(
-        row.room_nights ??
-          row.roomNights ??
-          row.rn ??
-          row.RN ??
-          row['Room Nights TY (Actual / OTB)']
-      )
-    )
+  const revenueValuesRaw = rows
+    .map((row) => toFiniteNumberOrNull(row['Revenue TY (Actual / OTB)']))
     .filter((v) => v !== null && v > 0);
-  const revenueValuesRaw = pmsRows
-    .map((row) =>
-      toFiniteNumberOrNull(
-        row.revenue ??
-          row.Revenue ??
-          row['Revenue TY (Actual / OTB)']
-      )
-    )
-    .filter((v) => v !== null && v > 0);
+
+  const actualizedAdrValues = adrValuesRaw;
+  const actualizedRnValues = rnValuesRaw;
+  const actualizedTotalRN = actualizedRnValues.length
+    ? actualizedRnValues.reduce((a, b) => a + b, 0)
+    : null;
+  const actualizedEffectiveADR = actualizedAdrValues.length
+    ? actualizedAdrValues.reduce((a, b) => a + b, 0) / actualizedAdrValues.length
+    : null;
+  const adrLyVals = rows
+    .map((row) => {
+      const ly = toFiniteNumberOrNull(row['ADR LY']);
+      if (ly !== null) return ly;
+      return toFiniteNumberOrNull(row['ADR STLY']);
+    })
+    .filter((v) => v !== null && Number.isFinite(v));
+  const adrLY =
+    adrLyVals.length > 0 ? adrLyVals.reduce((a, b) => a + b, 0) / adrLyVals.length : null;
 
   const paceRowsFuture = pmsPaceRows.filter((r) => (r?.future_window_class || '') === 'future_forward');
   const paceRowsForQuant = paceRowsFuture.length ? paceRowsFuture : pmsPaceRows;
@@ -4633,45 +4639,121 @@ function estimateRetailIssueImpact(issue, contextData) {
       ? Math.max(0, 80 - avgOcc)
       : null;
 
-  let issueWeight = 0.08;
-  if (issueFamily === 'visibility_gap') issueWeight = 0.10;
-  if (issueFamily === 'discount_inefficiency') issueWeight = 0.09;
-  if (issueFamily === 'pricing_resistance') issueWeight = 0.07;
-  if (issueFamily === 'mix_constraint') issueWeight = 0.06;
-  if (issueFamily === 'missed_pricing_opportunity') issueWeight = 0.05;
-
-  const gapAmplifier =
-    indexGap !== null
-      ? Math.max(0.6, Math.min(1.6, indexGap / 8))
-      : adrGap !== null
-        ? Math.max(0.6, Math.min(1.4, adrGap / 10))
-        : 1;
-
-  let roomNightsAtRisk =
-    totalRN !== null
-      ? Math.round(totalRN * issueWeight * gapAmplifier)
-      : null;
-  if (roomNightsAtRisk === null && effectiveADR !== null && maxActionImpact > 0) {
-    roomNightsAtRisk = Math.max(1, Math.round((maxActionImpact * 0.55) / effectiveADR));
-  }
-
+  let roomNightsAtRisk = null;
   let revenueRange = null;
-  if (roomNightsAtRisk !== null && roomNightsAtRisk > 0 && effectiveADR !== null) {
-    // Conservative range: wide enough to avoid fake precision.
-    const min = Math.round(roomNightsAtRisk * effectiveADR * 0.55);
-    const max = Math.round(roomNightsAtRisk * effectiveADR * 0.95);
-    revenueRange = { min, max };
-  } else if (maxActionImpact > 0) {
+  let confidence = 'low';
+
+  if (
+    issueFamily === 'pricing_resistance' &&
+    actualizedTotalRN !== null &&
+    actualizedEffectiveADR !== null &&
+    avgMPI !== null &&
+    avgMPI > 0
+  ) {
+    const fairShareRN = actualizedTotalRN * (100 / avgMPI);
+    const lostRN = Math.max(0, fairShareRN - actualizedTotalRN);
+    const revenueAtRisk = lostRN * actualizedEffectiveADR;
+    roomNightsAtRisk = Math.round(lostRN);
     revenueRange = {
-      min: Math.round(maxActionImpact * 0.45),
-      max: Math.round(maxActionImpact * 0.75)
+      min: Math.round(revenueAtRisk * 0.6),
+      max: Math.round(revenueAtRisk * 0.9)
     };
+    confidence = avgMPI !== null && actualizedEffectiveADR !== null ? 'high' : 'medium';
+  } else if (
+    issueFamily === 'discount_inefficiency' &&
+    actualizedTotalRN !== null &&
+    actualizedEffectiveADR !== null &&
+    avgARI !== null &&
+    avgARI > 0
+  ) {
+    const fairShareADR = actualizedEffectiveADR * (100 / avgARI);
+    const adrShortfall = Math.max(0, fairShareADR - actualizedEffectiveADR);
+    const revenueAtRisk = actualizedTotalRN * adrShortfall;
+    roomNightsAtRisk = Math.round(actualizedTotalRN);
+    revenueRange = {
+      min: Math.round(revenueAtRisk * 0.6),
+      max: Math.round(revenueAtRisk * 0.9)
+    };
+    confidence = avgARI !== null && actualizedEffectiveADR !== null ? 'high' : 'medium';
+  } else if (issueFamily === 'intentional_volume_recovery' && actualizedTotalRN !== null && actualizedEffectiveADR !== null) {
+    roomNightsAtRisk = Math.round(actualizedTotalRN);
+    if (adrLY === null) {
+      revenueRange = null;
+      confidence = 'medium';
+    } else {
+      const rateConcession = Math.max(0, adrLY - actualizedEffectiveADR);
+      const revenueAtRisk = actualizedTotalRN * rateConcession;
+      revenueRange = {
+        min: Math.round(revenueAtRisk * 0.6),
+        max: Math.round(revenueAtRisk * 0.9)
+      };
+      if (rateConcession <= 0) {
+        confidence = 'low';
+      } else {
+        confidence = 'high';
+      }
+    }
+  } else if (
+    issueFamily === 'missed_pricing_opportunity' &&
+    actualizedTotalRN !== null &&
+    actualizedEffectiveADR !== null &&
+    avgARI !== null &&
+    avgARI > 0
+  ) {
+    const impliedFairADR = actualizedEffectiveADR * (100 / avgARI);
+    const upliftPerRoom = Math.max(0, impliedFairADR - actualizedEffectiveADR);
+    const revenueAtRisk = actualizedTotalRN * upliftPerRoom;
+    roomNightsAtRisk = Math.round(actualizedTotalRN * 0.3);
+    revenueRange = {
+      min: Math.round(revenueAtRisk * 0.3),
+      max: Math.round(revenueAtRisk * 0.6)
+    };
+    confidence = 'medium';
+  } else {
+    let issueWeight = 0.08;
+    if (issueFamily === 'visibility_gap') issueWeight = 0.10;
+    if (issueFamily === 'discount_inefficiency') issueWeight = 0.09;
+    if (issueFamily === 'pricing_resistance') issueWeight = 0.07;
+    if (issueFamily === 'mix_constraint') issueWeight = 0.06;
+    if (issueFamily === 'missed_pricing_opportunity') issueWeight = 0.05;
+
+    const gapAmplifier =
+      indexGap !== null
+        ? Math.max(0.6, Math.min(1.6, indexGap / 8))
+        : adrGap !== null
+          ? Math.max(0.6, Math.min(1.4, adrGap / 10))
+          : 1;
+
+    roomNightsAtRisk =
+      totalRN !== null
+        ? Math.round(totalRN * issueWeight * gapAmplifier)
+        : null;
+    if (roomNightsAtRisk === null && effectiveADR !== null && maxActionImpact > 0) {
+      roomNightsAtRisk = Math.max(1, Math.round((maxActionImpact * 0.55) / effectiveADR));
+    }
+
+    revenueRange = null;
+    if (roomNightsAtRisk !== null && roomNightsAtRisk > 0 && effectiveADR !== null) {
+      const min = Math.round(roomNightsAtRisk * effectiveADR * 0.55);
+      const max = Math.round(roomNightsAtRisk * effectiveADR * 0.95);
+      revenueRange = { min, max };
+    } else if (maxActionImpact > 0) {
+      revenueRange = {
+        min: Math.round(maxActionImpact * 0.45),
+        max: Math.round(maxActionImpact * 0.75)
+      };
+    }
+
+    const dataPoints = [avgMPI, avgARI, avgRGI, avgOcc, effectiveADR, totalRN].filter((v) => v !== null).length;
+    confidence = 'low';
+    if (dataPoints >= 5 && revenueRange) confidence = 'high';
+    else if (dataPoints >= 3) confidence = 'medium';
   }
 
-  const dataPoints = [avgMPI, avgARI, avgRGI, avgOcc, effectiveADR, totalRN].filter((v) => v !== null).length;
-  let confidence = 'low';
-  if (dataPoints >= 5 && revenueRange) confidence = 'high';
-  else if (dataPoints >= 3) confidence = 'medium';
+  if (revenueRange !== null && revenueRange.max > 2000000) {
+    revenueRange = null;
+    confidence = 'low';
+  }
 
   let impactBand = 'low';
   const maxRevenue = revenueRange?.max ?? 0;
