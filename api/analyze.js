@@ -5229,8 +5229,8 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       (adrDilutionSegment?.adrRefS ?? null) != null &&
       (adrDilutionSegment?.adrTyS ?? 0) < (adrDilutionSegment?.adrRefS ?? 0);
 
-    const paceGapThreshold = win === 1 ? -2 : win === 2 ? -3 : -5;
-    const adrErosionAdrThreshold = win === 1 ? -1.5 : win === 2 ? -2 : -3;
+    const paceGapThreshold = win === 1 ? -1 : win === 2 ? -2 : win === 3 ? -3 : -5;
+    const adrErosionAdrThreshold = win === 1 ? -0.5 : win === 2 ? -1 : win === 3 ? -2 : -3;
 
     let signal = null;
     if (hasHighOccDate && dilutionMeetsPeak) {
