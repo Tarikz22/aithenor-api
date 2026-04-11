@@ -5140,6 +5140,14 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
     }
 
     const referenceRn = totalRnStly > 0 ? totalRnStly : totalRnLy;
+    console.log('DEBUG window signal inputs', {
+      win,
+      totalRnTy,
+      totalRnStly,
+      totalRnLy,
+      referenceRn,
+      paceGapPct: referenceRn > 0 ? ((totalRnTy - referenceRn) / referenceRn) * 100 : null
+    });
     const referenceRev = totalRevStly > 0 ? totalRevStly : totalRevLy;
     const paceGapPct =
       referenceRn > 0 ? ((totalRnTy - referenceRn) / referenceRn) * 100 : null;
