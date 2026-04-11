@@ -3432,6 +3432,14 @@ function buildRetailCommercialDecision(context, performanceStory, segmentAttribu
     rationale = 'Below-fair-share performance with ARI premium and MPI weakness indicates pricing-led share rejection.';
   }
 
+  if (family === 'visibility_gap' && Number(context?.metrics?.avgRGI) >= 100) {
+    return {
+      issue_family: null,
+      primary_driver: null,
+      rationale: 'RGI_above_fair_share_visibility_gap_suppressed'
+    };
+  }
+
   return {
     issue_family: family,
     primary_driver,
@@ -3742,7 +3750,11 @@ function detectRetailIssueSpecs(diagnosis, focus, driver) {
     raw.push({ family: 'discount_inefficiency', rank: 30, primary_driver: 'conversion' });
   }
 
-  if (Number.isFinite(avgMPI) && ((avgMPI < 95 && trend === 'worsening') || avgMPI < 92)) {
+  if (
+    Number.isFinite(avgMPI) &&
+    ((avgMPI < 95 && trend === 'worsening') || avgMPI < 92) &&
+    !(Number.isFinite(avgRGI) && avgRGI >= 100)
+  ) {
     raw.push({ family: 'visibility_gap', rank: 40, primary_driver: 'visibility' });
   }
 
@@ -3905,129 +3917,261 @@ function fmtYmdForExecutionBullet(ymd) {
   return `${d} ${mn}`;
 }
 
-function isGenericAdaptedActionPosture(text) {
-  const s = (text || '').toString().trim().toLowerCase();
-  if (!s) return true;
-  const genericPhrases = [
-    'monitor this issue',
-    'while primary strategy',
-    'while strategy hierarchy',
-    'align execution to pricing-first',
-    'hold broad rate moves',
-    'hold broad pricing moves',
-    'prioritize discount discipline',
-    'prioritize conversion repair',
-    'prioritize mix/distribution',
-    'keep other levers secondary',
-    'keep pricing tactical',
-    'support discount discipline first',
-    'prioritize discount discipline and keep other levers secondary'
-  ];
-  return genericPhrases.some((p) => s.includes(p));
+function isSafeExecutionBulletText(s) {
+  if (!s || typeof s !== 'string') return false;
+  const t = s.trim();
+  if (!t) return false;
+  if (/\bnull\b|\bundefined\b|\bn\/a\b/i.test(t)) return false;
+  return true;
+}
+
+function fmtPctSignedForExecution(v) {
+  if (v === null || !Number.isFinite(v)) return null;
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+}
+
+function aggregateSegmentRollupsFromPms(pmsRows) {
+  const rows = Array.isArray(pmsRows) ? pmsRows : [];
+  const bySeg = new Map();
+  for (const row of rows) {
+    const raw = String(row?.['Market Segment Name'] || '').trim();
+    const seg = mapMarketSegmentNameToUsaliBucket(raw);
+    if (!bySeg.has(seg)) {
+      bySeg.set(seg, {
+        seg,
+        sampleName: raw,
+        rnTy: 0,
+        rnLy: 0,
+        revTy: 0,
+        revLy: 0,
+        seenTy: false,
+        seenLy: false,
+        seenRTy: false,
+        seenRLy: false
+      });
+    }
+    const a = bySeg.get(seg);
+    if (raw && !a.sampleName) a.sampleName = raw;
+    const nt = toFiniteNumberOrNull(row['Room Nights TY (Actual / OTB)'] || row.rn);
+    const nl = toFiniteNumberOrNull(row['Room Nights LY Actual']);
+    const rt = toFiniteNumberOrNull(row['Revenue TY (Actual / OTB)']);
+    const rl = toFiniteNumberOrNull(row['Revenue LY Actual']);
+    if (nt !== null) {
+      a.rnTy += nt;
+      a.seenTy = true;
+    }
+    if (nl !== null) {
+      a.rnLy += nl;
+      a.seenLy = true;
+    }
+    if (rt !== null) {
+      a.revTy += rt;
+      a.seenRTy = true;
+    }
+    if (rl !== null) {
+      a.revLy += rl;
+      a.seenRLy = true;
+    }
+  }
+  return bySeg;
 }
 
 function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
-  const bullets = [];
-  const attr = issue.segment_attribution_summary;
-  const primarySeg = attr?.primary_segment;
-  const daily = issue.daily_validation_summary;
+  const dl = (issue.enforced_decision_line || '').toString();
   const fam = (issue.issue_family || '').toString();
+  const attr = issue.segment_attribution_summary;
+  const daily = issue.daily_validation_summary;
+  const primarySeg =
+    attr?.primary_segment != null && attr.primary_segment !== '' && attr.primary_segment !== 'unknown'
+      ? attr.primary_segment
+      : null;
 
-  const sampleForPrimary = (() => {
+  const bySeg = aggregateSegmentRollupsFromPms(pmsRows);
+  const primAgg = primarySeg ? bySeg.get(primarySeg) : null;
+  let sampleForPrimary = primAgg?.sampleName ? String(primAgg.sampleName).trim() : '';
+  if (!sampleForPrimary && primarySeg) {
     const rows = Array.isArray(pmsRows) ? pmsRows : [];
-    if (!primarySeg || primarySeg === 'unknown') return '';
     for (const row of rows) {
       const raw = String(row?.['Market Segment Name'] || '').trim();
       if (!raw) continue;
-      if (mapMarketSegmentNameToUsaliBucket(raw) === primarySeg) return raw;
-    }
-    return '';
-  })();
-
-  const consequenceMap = {
-    pricing_resistance: 'rate premium costing share',
-    intentional_volume_recovery: 'volume recovery at rate cost',
-    discount_inefficiency: 'discounting not converting to volume',
-    visibility_gap: 'weakest pickup segment'
-  };
-  const consequence = consequenceMap[fam];
-
-  if (
-    primarySeg != null &&
-    primarySeg !== '' &&
-    primarySeg !== 'unknown' &&
-    consequence != null
-  ) {
-    const scores = attr?.segment_scores || [];
-    const pr = scores.find((s) => s.segment === primarySeg) || null;
-    const rnPct =
-      pr && pr.rn_ly > 0 ? ((pr.rn_ty - pr.rn_ly) / pr.rn_ly) * 100 : null;
-    let adrPct = null;
-    if (
-      pr &&
-      pr.rn_ty > 0 &&
-      pr.rn_ly > 0 &&
-      pr.rev_ty != null &&
-      pr.rev_ly != null &&
-      pr.rev_ly > 0
-    ) {
-      const adrTyEff = pr.rev_ty / pr.rn_ty;
-      const adrLyEff = pr.rev_ly / pr.rn_ly;
-      adrPct = ((adrTyEff - adrLyEff) / adrLyEff) * 100;
-    }
-    if (
-      rnPct !== null &&
-      adrPct !== null &&
-      Number.isFinite(rnPct) &&
-      Number.isFinite(adrPct)
-    ) {
-      const fmtPct = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
-      const display = usaliBucketToDisplayName(primarySeg, sampleForPrimary);
-      bullets.push(
-        `${display}: room nights ${fmtPct(rnPct)} vs last year, ADR ${fmtPct(adrPct)} vs last year — ${consequence}.`
-      );
+      if (mapMarketSegmentNameToUsaliBucket(raw) === primarySeg) {
+        sampleForPrimary = raw;
+        break;
+      }
     }
   }
+  const primaryDisplay = primarySeg ? usaliBucketToDisplayName(primarySeg, sampleForPrimary) : null;
+
+  let rnPct = null;
+  let adrPct = null;
+  if (primAgg && primAgg.seenLy && primAgg.rnLy > 0) {
+    rnPct = ((primAgg.rnTy - primAgg.rnLy) / primAgg.rnLy) * 100;
+  }
+  if (
+    primAgg &&
+    primAgg.rnTy > 0 &&
+    primAgg.rnLy > 0 &&
+    primAgg.seenRTy &&
+    primAgg.seenRLy &&
+    primAgg.revLy > 0
+  ) {
+    const adrTy = primAgg.revTy / primAgg.rnTy;
+    const adrLy = primAgg.revLy / primAgg.rnLy;
+    adrPct = ((adrTy - adrLy) / adrLy) * 100;
+  }
+  const fmtRN = fmtPctSignedForExecution(rnPct);
+  const fmtADR = fmtPctSignedForExecution(adrPct);
+  const xAdrRecover =
+    adrPct != null && Number.isFinite(adrPct) ? Math.round(Math.abs(adrPct)) : null;
+
+  const secondVol = [...bySeg.values()]
+    .filter((a) => a.seg !== primarySeg && a.rnTy > 0)
+    .sort((a, b) => b.rnTy - a.rnTy)[0];
+  const secondVolLabel = secondVol
+    ? usaliBucketToDisplayName(secondVol.seg, secondVol.sampleName || '')
+    : null;
 
   const peakDates = Array.isArray(daily?.validated_peak_growth_dates)
     ? daily.validated_peak_growth_dates.filter(Boolean)
     : [];
-  const segAllocName =
-    primarySeg && primarySeg !== 'unknown'
-      ? usaliBucketToDisplayName(primarySeg, sampleForPrimary)
-      : null;
+  const peakNamed = peakDates.map((d) => fmtYmdForExecutionBullet(d)).filter(Boolean).slice(0, 10);
+  const peakJoin = peakNamed.length ? peakNamed.join(', ') : null;
 
-  if (peakDates.length && segAllocName) {
-    const formatted = peakDates
-      .map((d) => fmtYmdForExecutionBullet(d))
-      .filter(Boolean)
-      .slice(0, 10);
-    if (formatted.length) {
-      bullets.push(
-        `Peak dates with confirmed low-rated volume: ${formatted.join(', ')} — protect these dates from further ${segAllocName} allocation.`
+  const pushSafe = (arr, s) => {
+    if (isSafeExecutionBulletText(s)) arr.push(s.trim());
+  };
+
+  const bullets = [];
+
+  const isPricingHold =
+    fam === 'pricing_resistance' &&
+    (dl.includes('Hold current rate positioning') || dl.includes('narrowing on its own'));
+
+  const isIvrStop = dl.includes('Stop accepting');
+  const isIvrByLine =
+    isIvrStop ||
+    dl.includes('Volume strategy is working') ||
+    dl.includes('Give it ') ||
+    dl.includes('Do not unwind the full discount') ||
+    dl.includes('taper it') ||
+    dl.includes('below-STLY rates on');
+
+  if (fam === 'pricing_resistance') {
+    if (isPricingHold) {
+      if (primaryDisplay && fmtRN && fmtADR) {
+        pushSafe(
+          bullets,
+          `${primaryDisplay} room nights ${fmtRN} vs LY at ADR ${fmtADR} vs LY — monitor this segment's pickup weekly before reconsidering rate.`
+        );
+      }
+      pushSafe(
+        bullets,
+        'Do not apply BAR reductions — the current trend is self-correcting. Any intervention risks resetting the recovery trajectory.'
+      );
+      if (peakJoin && primaryDisplay) {
+        pushSafe(
+          bullets,
+          `Exception: review allocation on ${peakJoin} where ${primaryDisplay} grew at below-LY rates on peak occupancy days.`
+        );
+      }
+    } else {
+      if (primaryDisplay && fmtRN && fmtADR) {
+        pushSafe(
+          bullets,
+          `${primaryDisplay} is the share-loss driver — ${fmtRN} room nights vs LY despite ADR ${fmtADR} vs LY. This segment is rejecting the current rate.`
+        );
+      }
+      if (peakJoin) {
+        pushSafe(
+          bullets,
+          `Apply targeted BAR correction on ${peakJoin} only. Hold rate on all other dates.`
+        );
+      } else {
+        const weakRef = primaryDisplay || 'the primary segment';
+        pushSafe(
+          bullets,
+          `Apply targeted BAR correction on shoulder dates where ${weakRef} conversion is weakest. Hold rate on peak dates.`
+        );
+      }
+      pushSafe(
+        bullets,
+        'Measure MPI response within 10 days. If share does not recover, escalate correction to a second tier of dates.'
       );
     }
-  } else if (daily?.displacement_risk === 'high') {
-    bullets.push(
-      'Displacement risk confirmed on peak days — review segment allocation on high-occupancy dates before the window closes.'
-    );
+  } else if (fam === 'intentional_volume_recovery' || (fam !== 'pricing_resistance' && isIvrByLine)) {
+    if (isIvrStop) {
+      if (primaryDisplay && peakJoin) {
+        pushSafe(
+          bullets,
+          `${primaryDisplay} is growing on peak dates at below-LY rates — this is value destruction, not recovery. Stop accepting this segment at current rates on ${peakJoin}.`
+        );
+      }
+      if (primaryDisplay) {
+        pushSafe(
+          bullets,
+          `Restore minimum rate floor for ${primaryDisplay} on peak dates to ADR LY level immediately.`
+        );
+      }
+      if (secondVolLabel) {
+        pushSafe(bullets, `Redirect inventory on those dates toward ${secondVolLabel} at BAR.`);
+      }
+    } else {
+      if (primaryDisplay && fmtRN && fmtADR && rnPct !== null && rnPct > 0) {
+        pushSafe(
+          bullets,
+          `${primaryDisplay} drove ${fmtRN} room night growth at ADR ${fmtADR} vs LY — the volume strategy is delivering. Do not disrupt it.`
+        );
+      }
+      pushSafe(
+        bullets,
+        'Begin rate restoration selectively — raise BAR on the highest-occupancy forward dates first while maintaining current rates on need periods.'
+      );
+      if (xAdrRecover != null && Number.isFinite(xAdrRecover)) {
+        pushSafe(
+          bullets,
+          `Target ADR recovery of ${xAdrRecover}% over the next 30 days without sacrificing the MPI gains achieved.`
+        );
+      }
+    }
+  } else if (fam === 'discount_inefficiency') {
+    if (primaryDisplay && fmtRN && fmtADR) {
+      pushSafe(
+        bullets,
+        `${primaryDisplay} room nights ${fmtRN} vs LY at ADR ${fmtADR} vs LY — discounting is not generating proportional volume. The problem is not price.`
+      );
+    }
+    if (primaryDisplay) {
+      pushSafe(
+        bullets,
+        `Audit the booking path for ${primaryDisplay} — check OTA content quality, rate parity, and booking friction before adjusting rate further.`
+      );
+      pushSafe(
+        bullets,
+        `Freeze further rate reductions for ${primaryDisplay} for 14 days and measure whether conversion improves without additional price movement.`
+      );
+    }
+  } else if (fam === 'visibility_gap') {
+    if (primaryDisplay && fmtRN) {
+      pushSafe(
+        bullets,
+        `${primaryDisplay} shows the weakest pickup — ${fmtRN} room nights vs LY. This segment is not reaching the booking stage.`
+      );
+    }
+    if (primaryDisplay) {
+      pushSafe(
+        bullets,
+        `Activate demand generation targeting ${primaryDisplay} specifically — paid search, metasearch visibility, and direct campaign exposure.`
+      );
+    }
+    if (primaryDisplay) {
+      pushSafe(
+        bullets,
+        'Do not adjust rate for this segment. The block is upstream awareness, not price sensitivity.'
+      );
+    }
   }
 
-  const adapted = issue.adapted_action_posture;
-  const primaryDisplayForReassess =
-    primarySeg && primarySeg !== 'unknown'
-      ? usaliBucketToDisplayName(primarySeg, sampleForPrimary)
-      : null;
-  let third = null;
-  if (adapted && !isGenericAdaptedActionPosture(adapted)) {
-    const t = adapted.toString().trim();
-    third = /[.!?]$/.test(t) ? t : `${t}.`;
-  } else if (primaryDisplayForReassess) {
-    third = `Reassess ${primaryDisplayForReassess} rate positioning for the next booking cycle based on pickup response over the next 10 days.`;
-  }
-  if (third) bullets.push(third);
-
-  return bullets;
+  return bullets.filter(isSafeExecutionBulletText).slice(0, 3);
 }
 
 function enrichRetailIssue(issue, ctx) {
