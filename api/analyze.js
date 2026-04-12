@@ -127,6 +127,466 @@ const FORECAST_WINDOWS = [
   { label: 'Days 61–90', minLead: 61, maxLead: 90 }
 ];
 
+// Phase 2: Segment mix shift detection — pattern thresholds.
+
+// Pattern 1 — Displacement: premium segment loses share to discount segment.
+// Both conditions must be met simultaneously.
+const MIX_DISPLACEMENT_RN_SHIFT_PCT   = 0.05; // segment shifts ≥5% of total RN
+const MIX_DISPLACEMENT_ADR_SPREAD_PCT = 0.10; // losing segment ADR ≥10% above gaining
+
+// Pattern 2 — Concentration: one segment dominates total RN.
+// Both conditions must be met simultaneously.
+const MIX_CONCENTRATION_THRESHOLD     = 0.45; // single segment >45% of total RN
+const MIX_CONCENTRATION_GROWTH_PCT    = 0.05; // AND grew ≥5% RN share vs LY
+
+// Pattern 3 — Rate dilution: ADR erodes within a segment without volume loss.
+const MIX_RATE_DILUTION_ADR_DROP_PCT  = 0.05; // ADR down ≥5% YoY for segment
+const MIX_RATE_DILUTION_MIN_SHARE     = 0.10; // segment must be ≥10% of total RN
+
+// Minimum dataset requirements — suppress below these floors.
+const MIX_MIN_TOTAL_RN               = 100;  // total actualized RN
+const MIX_MIN_PERIOD_DAYS            = 30;   // actualized period in days
+
+/**
+ * Phase 2: Returns rating tier 1–4 for a USALI segment bucket.
+ * Tier 1 = highest value, Tier 4 = lowest value.
+ * Used to determine whether a displacement is value-destructive.
+ * Only tier 1/2 losing to tier 3/4 produces a displacement card.
+ */
+function getSegmentRatingTier(bucket) {
+  if (!bucket) return 4;
+  const b = String(bucket).toLowerCase();
+  // Tier 1: highest ADR segments — direct, best available, negotiated
+  if (b === 'transient_retail' || b === 'transient_negotiated') return 1;
+  // Tier 2: qualified and corporate group — strong ADR, reliable
+  if (b === 'transient_qualified' || b === 'group_corporate') return 2;
+  // Tier 3: wholesale and association — lower ADR, higher volume
+  if (b === 'transient_wholesale' || b === 'group_association' ||
+      b === 'group_government') return 3;
+  // Tier 4: discount, contract, SMERF, other — lowest ADR
+  if (b === 'transient_discount' || b === 'contract' ||
+      b === 'group_smerf' || b === 'group_wholesale' ||
+      b === 'group_other' || b === 'other') return 4;
+  return 4;
+}
+
+/**
+ * Phase 2: Segment mix shift detection.
+ * Detects three patterns in actualized PMS data:
+ *   Pattern 1 — Displacement: premium segment losing share to discount
+ *   Pattern 2 — Concentration: single segment dominance risk
+ *   Pattern 3 — Rate dilution: ADR erosion without volume loss
+ *
+ * Returns array of mix_shift issue cards. Empty array if data
+ * is insufficient or no patterns detected. Never throws.
+ *
+ * @param {object[]} pmsRows     - actualized PMS rows (rowsForEngine)
+ * @param {string}   snapshotYmd - current snapshot date YYYY-MM-DD
+ * @param {string}   periodStart - period start YYYY-MM-DD (from periodMeta)
+ * @param {string}   periodEnd   - period end YYYY-MM-DD (from periodMeta)
+ */
+function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
+
+  // --- Guard: need actualized PMS rows ---
+  const rows = (pmsRows || []).filter(r =>
+    r?._ingestion?.row_phase === 'actualized' ||
+    r?._ingestion?.row_phase === 'undated'
+  );
+  if (!rows.length) return [];
+
+  // --- Guard: check period length ---
+  // Suppress on very short periods — mix reads are noisy on <30 days
+  let periodDays = 0;
+  if (periodStart && periodEnd) {
+    const s = parseYmdToUtcDate(periodStart);
+    const e = parseYmdToUtcDate(periodEnd);
+    if (s && e) periodDays = Math.round((e - s) / 86400000) + 1;
+  }
+  if (periodDays > 0 && periodDays < MIX_MIN_PERIOD_DAYS) return [];
+
+  // --- Helper: safe number from row with multiple key fallbacks ---
+  const safeGet = (row, ...keys) => {
+    for (const k of keys) {
+      const v = toNumber(row[k]);
+      if (v !== null) return v;
+    }
+    return null;
+  };
+
+  // --- Build per-segment aggregates ---
+  // Key: USALI bucket string
+  // Value: { displayName, bucket, rnTY, rnLY, revTY, revLY,
+  //          adrTY (derived), adrLY (derived), tier }
+  const segMap = {};
+
+  for (const row of rows) {
+    const segName   = row['Market Segment Name'] || row['market segment name'] || '';
+    const bucket    = mapMarketSegmentNameToUsaliBucket(segName);
+    const dispName  = usaliBucketToDisplayName(bucket, segName);
+
+    const rnTY  = safeGet(row,
+      'Room Nights TY (Actual / OTB)', 'Room Nights TY') || 0;
+    const rnLY  = safeGet(row,
+      'Room Nights LY Actual', 'Room Nights LY') || 0;
+    const revTY = safeGet(row,
+      'Revenue TY (Actual / OTB)', 'Revenue TY') || 0;
+    const revLY = safeGet(row,
+      'Revenue LY Actual', 'Revenue LY') || 0;
+
+    if (!segMap[bucket]) {
+      segMap[bucket] = {
+        bucket,
+        displayName: dispName,
+        tier: getSegmentRatingTier(bucket),
+        rnTY:  0, rnLY:  0,
+        revTY: 0, revLY: 0
+      };
+    }
+    segMap[bucket].rnTY  += rnTY;
+    segMap[bucket].rnLY  += rnLY;
+    segMap[bucket].revTY += revTY;
+    segMap[bucket].revLY += revLY;
+  }
+
+  const segments = Object.values(segMap);
+
+  // --- Compute totals ---
+  const totalRNTY = segments.reduce((s, x) => s + x.rnTY, 0);
+  const totalRNLY = segments.reduce((s, x) => s + x.rnLY, 0);
+
+  // --- Guard: minimum total RN ---
+  if (totalRNTY < MIX_MIN_TOTAL_RN) return [];
+
+  // --- Guard: LY data present ---
+  // If total LY is zero, all YoY comparisons are meaningless
+  const hasLY = totalRNLY > 0;
+
+  // --- Derive ADR per segment (revenue / room nights) ---
+  for (const seg of segments) {
+    seg.adrTY = seg.rnTY > 0 ? seg.revTY / seg.rnTY : null;
+    seg.adrLY = seg.rnLY > 0 ? seg.revLY / seg.rnLY : null;
+    // Share of total TY room nights
+    seg.shareTY = totalRNTY > 0 ? seg.rnTY / totalRNTY : 0;
+    // Share of total LY room nights
+    seg.shareLY = totalRNLY > 0 ? seg.rnLY / totalRNLY : 0;
+    // Share change (positive = grew, negative = shrank)
+    seg.shareShift = seg.shareTY - seg.shareLY;
+  }
+
+  const results = [];
+
+  // ─────────────────────────────────────────────────
+  // PATTERN 1 — DISPLACEMENT
+  // Premium segment (tier 1-2) loses share to discount (tier 3-4)
+  // ─────────────────────────────────────────────────
+  if (hasLY) {
+    // Find segments that lost share (negative shift ≥ threshold)
+    const losers = segments.filter(s =>
+      s.shareShift <= -MIX_DISPLACEMENT_RN_SHIFT_PCT &&
+      s.tier <= 2 // must be premium tier to be a value-destructive loss
+    );
+
+    // Find segments that gained share (positive shift ≥ threshold)
+    const gainers = segments.filter(s =>
+      s.shareShift >= MIX_DISPLACEMENT_RN_SHIFT_PCT &&
+      s.tier >= 3 // must be discount tier — premium gaining is positive
+    );
+
+    // For each loser-gainer pair, check ADR spread
+    for (const loser of losers) {
+      for (const gainer of gainers) {
+        if (loser.adrTY === null || gainer.adrTY === null) continue;
+
+        // ADR spread: loser must be materially higher rated than gainer
+        const adrSpread = loser.adrTY > 0
+          ? (loser.adrTY - gainer.adrTY) / loser.adrTY : 0;
+
+        if (adrSpread < MIX_DISPLACEMENT_ADR_SPREAD_PCT) continue;
+        // Spread too small — not commercially meaningful
+
+        // --- Quantify the revenue cost of displacement ---
+        // Room nights shifted from loser to gainer (approximate)
+        const shiftedRN = Math.abs(loser.shareShift) * totalRNTY;
+        // Revenue destroyed = shifted RN × ADR difference
+        const revenueCost = Math.round(shiftedRN * (loser.adrTY - gainer.adrTY));
+
+        // --- Build narrative ---
+        const loserSharePctTY = (loser.shareTY * 100).toFixed(1);
+        const loserSharePctLY = (loser.shareLY * 100).toFixed(1);
+        const gainerSharePctTY = (gainer.shareTY * 100).toFixed(1);
+        const gainerSharePctLY = (gainer.shareLY * 100).toFixed(1);
+        const adrSpreadPct = (adrSpread * 100).toFixed(1);
+        const revFmt = v => new Intl.NumberFormat('en-GB',
+          { maximumFractionDigits: 0 }).format(Math.round(v));
+
+        const signalPara =
+          `${loser.displayName} lost ${Math.abs(loser.shareShift * 100).toFixed(1)} ` +
+          `percentage points of mix share (${loserSharePctLY}% LY → ${loserSharePctTY}% TY). ` +
+          `${gainer.displayName} gained ${(gainer.shareShift * 100).toFixed(1)} ` +
+          `percentage points (${gainerSharePctLY}% LY → ${gainerSharePctTY}% TY). ` +
+          `ADR spread between segments: ${adrSpreadPct}%.`;
+
+        const analysisPara =
+          `${loser.displayName} ADR: ${loser.adrTY != null ? revFmt(loser.adrTY) : 'n/a'} ` +
+          `vs ${gainer.displayName} ADR: ${gainer.adrTY != null ? revFmt(gainer.adrTY) : 'n/a'}. ` +
+          `Occupancy is preserved but the rate base is being eroded — ` +
+          `volume held at the cost of quality.`;
+
+        const impactPara =
+          `Estimated revenue cost of displacement: £${revFmt(revenueCost)} ` +
+          `(${Math.round(shiftedRN)} room nights × ` +
+          `${loser.adrTY != null && gainer.adrTY != null ?
+            revFmt(loser.adrTY - gainer.adrTY) : 'n/a'} ADR differential).`;
+
+        const decisionLine =
+          `Defend ${loser.displayName} share — the ADR differential makes every ` +
+          `displaced room night a compounding revenue loss. ` +
+          `Do not allow ${gainer.displayName} to permanently replace ` +
+          `${loser.displayName} in the mix.`;
+
+        const executionActions = [
+          `Audit why ${loser.displayName} is losing share — pricing, availability, ` +
+          `or channel positioning are the likely causes.`,
+          `Set a minimum share floor for ${loser.displayName} at ` +
+          `${Math.max(loser.shareTY * 100, loser.shareLY * 100 * 0.9).toFixed(0)}% ` +
+          `of room nights and enforce it in rate strategy meetings.`,
+          `Review ${gainer.displayName} rate floors — if this segment is filling ` +
+          `at the expense of ${loser.displayName}, the rate floor may be too accessible.`
+        ];
+
+        const confidence = hasLY && periodDays >= 60 ? 'high'
+                         : hasLY && periodDays >= 30 ? 'medium' : 'low';
+
+        results.push({
+          finding_key:   `MIX_DISPLACEMENT_${loser.bucket}_${gainer.bucket}`,
+          granularity:   'mix_shift',
+          pattern:       'displacement',
+          title: `Mix shift — ${loser.displayName} losing share to ${gainer.displayName}`,
+          issue_family:  'mix_displacement',
+          primary_driver: 'mix_strategy',
+          priority: Math.abs(loser.shareShift) >= 0.10 ? 'high' : 'medium',
+          confidence,
+          commercial_narrative: [signalPara, analysisPara, impactPara]
+            .join('\n\n'),
+          enforced_decision_line: decisionLine,
+          enforced_execution_actions: executionActions,
+          card_metrics: {
+            avgMPI: null,
+            avgARI: null,
+            avgRGI: null,
+            avgOcc: null
+          },
+          quantification: {
+            loser_segment:      loser.displayName,
+            gainer_segment:     gainer.displayName,
+            loser_share_ty:     Math.round(loser.shareTY * 1000) / 10,
+            loser_share_ly:     Math.round(loser.shareLY * 1000) / 10,
+            gainer_share_ty:    Math.round(gainer.shareTY * 1000) / 10,
+            gainer_share_ly:    Math.round(gainer.shareLY * 1000) / 10,
+            share_shift_pts:    Math.round(Math.abs(loser.shareShift) * 1000) / 10,
+            adr_spread_pct:     Math.round(adrSpread * 1000) / 10,
+            shifted_rn:         Math.round(shiftedRN),
+            revenue_cost:       revenueCost,
+            loser_adr_ty:       loser.adrTY !== null ? Math.round(loser.adrTY) : null,
+            gainer_adr_ty:      gainer.adrTY !== null ? Math.round(gainer.adrTY) : null
+          }
+        });
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────
+  // PATTERN 2 — CONCENTRATION RISK
+  // Single segment >45% of TY room nights AND grew vs LY
+  // ─────────────────────────────────────────────────
+  for (const seg of segments) {
+    if (seg.shareTY < MIX_CONCENTRATION_THRESHOLD) continue;
+
+    // Must also have grown vs LY (not just historically dominant)
+    const shareGrowth = seg.shareTY - seg.shareLY;
+    if (hasLY && shareGrowth < MIX_CONCENTRATION_GROWTH_PCT) continue;
+
+    const revFmt = v => new Intl.NumberFormat('en-GB',
+      { maximumFractionDigits: 0 }).format(Math.round(v));
+    const revShare = totalRNTY > 0 && seg.revTY > 0
+      ? ((seg.revTY / segments.reduce((s, x) => s + x.revTY, 0)) * 100).toFixed(1)
+      : null;
+
+    const signalPara =
+      `${seg.displayName} now represents ${(seg.shareTY * 100).toFixed(1)}% ` +
+      `of room nights` +
+      (hasLY ? `, up from ${(seg.shareLY * 100).toFixed(1)}% last year` : '') +
+      `. ` +
+      (revShare ? `This segment accounts for ${revShare}% of total revenue. ` : '') +
+      `Single-segment dependency above 45% creates material commercial fragility.`;
+
+    const analysisPara =
+      `If ${seg.displayName} softens by 20%, the hotel faces a ` +
+      `${Math.round(seg.rnTY * 0.20)}-room-night exposure with no immediate ` +
+      `fallback segment at equivalent scale. ` +
+      `The current mix does not have a second segment capable of absorbing ` +
+      `a withdrawal of this magnitude.`;
+
+    const decisionLine =
+      `Actively develop at least one alternative segment to reduce ` +
+      `${seg.displayName} dependency below 40% within two booking cycles.`;
+
+    const executionActions = [
+      `Identify the two segments with the strongest growth trajectory ` +
+      `in the current mix and invest in their development as alternatives ` +
+      `to ${seg.displayName}.`,
+      `Set a maximum allocation policy for ${seg.displayName} — ` +
+      `cap this segment at ${Math.min(Math.round(seg.shareTY * 100) - 5, 44)}% ` +
+      `of inventory in the next rate strategy cycle.`,
+      `Review rate positioning for the underperforming segments ` +
+      `to assess whether pricing or availability is suppressing their growth.`
+    ];
+
+    const confidence = hasLY ? 'high' : 'medium';
+
+    results.push({
+      finding_key:   `MIX_CONCENTRATION_${seg.bucket}`,
+      granularity:   'mix_shift',
+      pattern:       'concentration',
+      title: `Concentration risk — ${seg.displayName} represents ` +
+             `${(seg.shareTY * 100).toFixed(0)}% of room nights`,
+      issue_family:  'mix_concentration',
+      primary_driver: 'mix_strategy',
+      priority:      seg.shareTY > 0.55 ? 'high' : 'medium',
+      confidence,
+      commercial_narrative: [signalPara, analysisPara].join('\n\n'),
+      enforced_decision_line: decisionLine,
+      enforced_execution_actions: executionActions,
+      card_metrics: {
+        avgMPI: null, avgARI: null, avgRGI: null, avgOcc: null
+      },
+      quantification: {
+        dominant_segment:   seg.displayName,
+        share_ty:           Math.round(seg.shareTY * 1000) / 10,
+        share_ly:           hasLY ? Math.round(seg.shareLY * 1000) / 10 : null,
+        share_growth_pts:   hasLY ? Math.round(shareGrowth * 1000) / 10 : null,
+        rn_ty:              Math.round(seg.rnTY),
+        rev_share_pct:      revShare !== null ? parseFloat(revShare) : null
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────────────
+  // PATTERN 3 — RATE DILUTION
+  // Segment ADR drops ≥5% YoY while share holds flat or grows
+  // ─────────────────────────────────────────────────
+  if (hasLY) {
+    for (const seg of segments) {
+      // Must be meaningful share of total RN
+      if (seg.shareTY < MIX_RATE_DILUTION_MIN_SHARE) continue;
+      // Must have LY ADR to compare
+      if (seg.adrTY === null || seg.adrLY === null || seg.adrLY === 0) continue;
+
+      const adrDropPct = (seg.adrLY - seg.adrTY) / seg.adrLY;
+      if (adrDropPct < MIX_RATE_DILUTION_ADR_DROP_PCT) continue;
+
+      // Volume must not have dropped materially — if volume fell,
+      // ADR drop may be a mix/length-of-stay artefact, not pure dilution
+      const rnChangePct = seg.rnLY > 0
+        ? (seg.rnTY - seg.rnLY) / seg.rnLY : 0;
+      // Suppress if volume dropped >15% — ADR change is then ambiguous
+      if (rnChangePct < -0.15) continue;
+
+      // --- Quantify revenue destruction ---
+      const revenueLost = Math.round(seg.rnTY * (seg.adrLY - seg.adrTY));
+      const revFmt = v => new Intl.NumberFormat('en-GB',
+        { maximumFractionDigits: 0 }).format(Math.round(v));
+
+      const signalPara =
+        `${seg.displayName} ADR declined ${(adrDropPct * 100).toFixed(1)}% ` +
+        `year-on-year (${revFmt(seg.adrLY)} LY → ${revFmt(seg.adrTY)} TY) ` +
+        `while room night share held at ${(seg.shareTY * 100).toFixed(1)}%. ` +
+        `Rate was reduced without a corresponding volume justification.`;
+
+      const analysisPara =
+        `${seg.rnTY.toFixed(0)} room nights at ${revFmt(seg.adrLY - seg.adrTY)} ` +
+        `lower ADR = £${revFmt(revenueLost)} in destroyed revenue this period. ` +
+        `The rate concession was not purchased back in volume — ` +
+        `room nights ${rnChangePct >= 0 ? 'grew' : 'fell'} ` +
+        `${Math.abs(rnChangePct * 100).toFixed(1)}% vs LY. ` +
+        `This is pure margin erosion.`;
+
+      const decisionLine =
+        `Restore ${seg.displayName} ADR toward last year's level — ` +
+        `the rate concession is not being compensated by volume. ` +
+        `Set a rate floor at ${revFmt(seg.adrLY * 0.97)} (3% below LY) ` +
+        `and enforce it in the next rate review.`;
+
+      const executionActions = [
+        `Audit the rate events that caused ${seg.displayName} ADR to fall ` +
+        `${(adrDropPct * 100).toFixed(1)}% — identify whether this was a ` +
+        `deliberate strategy or an unmanaged drift.`,
+        `Set a rate floor for ${seg.displayName} at ` +
+        `${revFmt(seg.adrLY * 0.97)} and apply it immediately in ` +
+        `all rate-loading tools.`,
+        `Monitor ${seg.displayName} ADR weekly — if it does not recover ` +
+        `by at least 3% within four weeks, escalate to a full segment ` +
+        `rate strategy review.`
+      ];
+
+      const confidence = periodDays >= 60 ? 'high'
+                       : periodDays >= 30 ? 'medium' : 'low';
+
+      results.push({
+        finding_key:   `MIX_RATE_DILUTION_${seg.bucket}`,
+        granularity:   'mix_shift',
+        pattern:       'rate_dilution',
+        title: `Rate dilution — ${seg.displayName} ADR down ` +
+               `${(adrDropPct * 100).toFixed(1)}% with flat volume`,
+        issue_family:  'mix_rate_dilution',
+        primary_driver: 'pricing',
+        priority:      adrDropPct >= 0.10 ? 'high' : 'medium',
+        confidence,
+        commercial_narrative: [signalPara, analysisPara].join('\n\n'),
+        enforced_decision_line: decisionLine,
+        enforced_execution_actions: executionActions,
+        card_metrics: {
+          avgMPI: null, avgARI: null, avgRGI: null, avgOcc: null
+        },
+        quantification: {
+          segment:          seg.displayName,
+          adr_ty:           Math.round(seg.adrTY),
+          adr_ly:           Math.round(seg.adrLY),
+          adr_drop_pct:     Math.round(adrDropPct * 1000) / 10,
+          adr_drop_abs:     Math.round(seg.adrLY - seg.adrTY),
+          rn_ty:            Math.round(seg.rnTY),
+          rn_change_pct:    Math.round(rnChangePct * 1000) / 10,
+          revenue_lost:     revenueLost,
+          share_ty:         Math.round(seg.shareTY * 1000) / 10
+        }
+      });
+    }
+  }
+
+  // --- Sort results: pattern order, then priority, then revenue impact ---
+  // Sort: displacement first, then concentration, then rate dilution.
+  // Within each pattern: highest priority first, then highest revenue impact.
+  const patternOrder = {
+    displacement: 0, concentration: 1, rate_dilution: 2
+  };
+  const priorityOrder = { high: 0, medium: 1, low: 2 };
+
+  results.sort((a, b) => {
+    const po = (patternOrder[a.pattern] || 0) - (patternOrder[b.pattern] || 0);
+    if (po !== 0) return po;
+    const pr = (priorityOrder[a.priority] || 1) - (priorityOrder[b.priority] || 1);
+    if (pr !== 0) return pr;
+    const ra = Number(a.quantification?.revenue_cost ||
+                      a.quantification?.revenue_lost || 0);
+    const rb = Number(b.quantification?.revenue_cost ||
+                      b.quantification?.revenue_lost || 0);
+    return rb - ra;
+  });
+
+  return results;
+}
+
+
 /** Adjacent ISO weeks merge if MPI and ARI are within these index points (episode same regime). */
 const EPISODE_MERGE_MPI_ARI_MAX_DELTA = 4;
 
@@ -8921,6 +9381,15 @@ async function handler(req, res) {
       snapshotYmd
     );
 
+    // Phase 2: Segment mix shift detection — runs after forecast gap.
+    // Uses actualized pmsRows only. Does not modify any existing output.
+    const mixShiftIssues = buildMixShiftIssues(
+      pmsRows,
+      snapshotYmd,
+      periodMeta.period_start,
+      periodMeta.period_end
+    );
+
     // Phase 2: Monthly granularity — run after the main weekly pipeline is complete.
     // Uses the same strRows and pmsRows already in scope. Does not modify any existing output.
     const monthlyIssues = buildMonthlyIssues(strRows, pmsNormalized.rowsForEngine, diagnosis);
@@ -8934,6 +9403,7 @@ async function handler(req, res) {
       issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
       forward_issues: forwardIssues,
       forecast_gap_issues: forecastGapIssues,
+      mix_shift_issues: mixShiftIssues,
       monthly_issues: monthlyIssues,
       retail_temporal:
         (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
