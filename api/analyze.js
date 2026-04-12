@@ -2687,11 +2687,9 @@ function buildMonthlyIssues(strRows, pmsRows, diagnosis) {
   if (sortedMonthKeys.length < 2) return [];
 
   // --- Compute period-level weighted averages for comparison baseline ---
-  // Weighted by room nights (day count proxy) for rate metrics; simple average for indices.
+  // Occ weighted by STR day count; simple average for MPI/ARI/RGI per qualifying month.
   let totalDays = 0;
   let sumOcc = 0;
-  let sumADR = 0;
-  let sumRevPAR = 0;
   let sumMPI = 0;
   let sumARI = 0;
   let sumRGI = 0;
@@ -2704,21 +2702,18 @@ function buildMonthlyIssues(strRows, pmsRows, diagnosis) {
 
   for (const mk of sortedMonthKeys) {
     const rows = byMonth.get(mk);
-    if (!rows || rows.length < MONTHLY_MIN_DAYS) continue;
+    // A month qualifies if it has 20+ days (complete or near-complete month)
+    // OR if it is the most recent month in the dataset (MTD — current partial month).
+    // The MTD month gets a confidence of 'low' automatically via the existing dayCount check.
+    const isMostRecentMonth = mk === sortedMonthKeys[sortedMonthKeys.length - 1];
+    const meetsMinDays = rows && rows.length >= MONTHLY_MIN_DAYS;
+    if (!rows || (!meetsMinDays && !isMostRecentMonth)) continue;
 
-    const baseWindowMetrics = buildWindowMetricsFromRows(rows);
-    // Dollar ADR / RevPAR are not part of buildWindowMetricsFromRows; layer them here so monthly cards can use the same 6-metric breach rule without changing the weekly helper.
-    const metrics = {
-      ...baseWindowMetrics,
-      avgADR: averageMetric(rows, ['ADR', 'Hotel ADR', 'ADR $', 'Average Daily Rate', 'ADR TY']),
-      avgRevPAR: averageMetric(rows, ['RevPAR', 'Hotel RevPAR', 'RevPAR $', 'RevPAR TY'])
-    };
+    const metrics = buildWindowMetricsFromRows(rows);
     monthMetrics.set(mk, { rows, metrics, dayCount: rows.length });
 
     totalDays += rows.length;
     if (metrics.avgOcc !== null) sumOcc += metrics.avgOcc * rows.length;
-    if (metrics.avgADR !== null) sumADR += metrics.avgADR * rows.length;
-    if (metrics.avgRevPAR !== null) sumRevPAR += metrics.avgRevPAR * rows.length;
     if (metrics.avgMPI !== null) {
       sumMPI += metrics.avgMPI;
       mpiMonthCount += 1;
@@ -2736,8 +2731,6 @@ function buildMonthlyIssues(strRows, pmsRows, diagnosis) {
   if (monthMetrics.size < 2) return [];
 
   const periodAvgOcc = totalDays > 0 ? sumOcc / totalDays : null;
-  const periodAvgADR = totalDays > 0 ? sumADR / totalDays : null;
-  const periodAvgRevPAR = totalDays > 0 ? sumRevPAR / totalDays : null;
   const periodAvgMPI = mpiMonthCount > 0 ? sumMPI / mpiMonthCount : null;
   const periodAvgARI = ariMonthCount > 0 ? sumARI / ariMonthCount : null;
   const periodAvgRGI = rgiMonthCount > 0 ? sumRGI / rgiMonthCount : null;
@@ -2776,20 +2769,6 @@ function buildMonthlyIssues(strRows, pmsRows, diagnosis) {
       if (delta >= MONTHLY_OCC_DIVERGENCE_PT) {
         breachCount += 1;
         breachDetails.occ = delta;
-      }
-    }
-    if (periodAvgADR !== null && metrics.avgADR !== null && periodAvgADR > 0) {
-      const delta = Math.abs(metrics.avgADR - periodAvgADR) / periodAvgADR;
-      if (delta >= MONTHLY_ADR_DIVERGENCE_PCT) {
-        breachCount += 1;
-        breachDetails.adr = delta;
-      }
-    }
-    if (periodAvgRevPAR !== null && metrics.avgRevPAR !== null && periodAvgRevPAR > 0) {
-      const delta = Math.abs(metrics.avgRevPAR - periodAvgRevPAR) / periodAvgRevPAR;
-      if (delta >= MONTHLY_REVPAR_DIVERGENCE_PCT) {
-        breachCount += 1;
-        breachDetails.revpar = delta;
       }
     }
     if (periodAvgMPI !== null && metrics.avgMPI !== null) {
