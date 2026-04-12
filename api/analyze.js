@@ -103,6 +103,16 @@ const MAX_ACTIONS_PER_RETAIL_ISSUE = 3;
 /** Minimum STR daily rows required to score a calendar week (thin weeks skipped). */
 const MIN_STR_DAYS_PER_WEEK = 4;
 
+// Phase 2: Monthly granularity — divergence thresholds.
+// A month must breach at least 2 of these 6 thresholds to generate a card.
+const MONTHLY_OCC_DIVERGENCE_PT = 8; // percentage points vs period weighted average
+const MONTHLY_ADR_DIVERGENCE_PCT = 0.1; // relative (10%) vs period weighted average ADR
+const MONTHLY_REVPAR_DIVERGENCE_PCT = 0.12; // relative (12%)
+const MONTHLY_MPI_DIVERGENCE_PT = 8; // index points vs period simple average
+const MONTHLY_ARI_DIVERGENCE_PT = 8; // index points
+const MONTHLY_RGI_DIVERGENCE_PT = 8; // index points
+const MONTHLY_MIN_DAYS = 20; // minimum STR days in a month to qualify
+
 /** Adjacent ISO weeks merge if MPI and ARI are within these index points (episode same regime). */
 const EPISODE_MERGE_MPI_ARI_MAX_DELTA = 4;
 
@@ -2648,6 +2658,315 @@ function groupStrRowsByCalendarWeek(strRows) {
     map.get(key).push(row);
   }
   return map;
+}
+
+// Phase 2: Groups actualized STR daily rows by calendar month key (YYYY-MM).
+// Mirrors groupStrRowsByCalendarWeek conceptually but uses month boundaries instead of ISO weeks.
+function groupStrRowsByCalendarMonth(strRows) {
+  const byMonth = new Map();
+  for (const row of strRows) {
+    const ymd = getRowStayDateYmd(row);
+    if (!ymd) continue;
+    const monthKey = ymd.slice(0, 7); // 'YYYY-MM'
+    if (!byMonth.has(monthKey)) byMonth.set(monthKey, []);
+    byMonth.get(monthKey).push(row);
+  }
+  return byMonth;
+}
+
+// Phase 2: Main monthly granularity function.
+// Slices STR rows by calendar month, computes per-month metrics,
+// compares each month to the period average, and generates a card
+// only for months where at least 2 metrics breach their divergence threshold.
+// Returns an array of monthly issue objects using the same schema as enrichedIssues.
+function buildMonthlyIssues(strRows, pmsRows, diagnosis) {
+  const byMonth = groupStrRowsByCalendarMonth(strRows);
+  const sortedMonthKeys = [...byMonth.keys()].sort();
+
+  // Need at least 2 months to have meaningful divergence comparison.
+  if (sortedMonthKeys.length < 2) return [];
+
+  // --- Compute period-level weighted averages for comparison baseline ---
+  // Weighted by room nights (day count proxy) for rate metrics; simple average for indices.
+  let totalDays = 0;
+  let sumOcc = 0;
+  let sumADR = 0;
+  let sumRevPAR = 0;
+  let sumMPI = 0;
+  let sumARI = 0;
+  let sumRGI = 0;
+  // Per-index month counts: each index is averaged only over months where that index exists (avoids skew if one column is sparse).
+  let mpiMonthCount = 0;
+  let ariMonthCount = 0;
+  let rgiMonthCount = 0;
+
+  const monthMetrics = new Map();
+
+  for (const mk of sortedMonthKeys) {
+    const rows = byMonth.get(mk);
+    if (!rows || rows.length < MONTHLY_MIN_DAYS) continue;
+
+    const baseWindowMetrics = buildWindowMetricsFromRows(rows);
+    // Dollar ADR / RevPAR are not part of buildWindowMetricsFromRows; layer them here so monthly cards can use the same 6-metric breach rule without changing the weekly helper.
+    const metrics = {
+      ...baseWindowMetrics,
+      avgADR: averageMetric(rows, ['ADR', 'Hotel ADR', 'ADR $', 'Average Daily Rate', 'ADR TY']),
+      avgRevPAR: averageMetric(rows, ['RevPAR', 'Hotel RevPAR', 'RevPAR $', 'RevPAR TY'])
+    };
+    monthMetrics.set(mk, { rows, metrics, dayCount: rows.length });
+
+    totalDays += rows.length;
+    if (metrics.avgOcc !== null) sumOcc += metrics.avgOcc * rows.length;
+    if (metrics.avgADR !== null) sumADR += metrics.avgADR * rows.length;
+    if (metrics.avgRevPAR !== null) sumRevPAR += metrics.avgRevPAR * rows.length;
+    if (metrics.avgMPI !== null) {
+      sumMPI += metrics.avgMPI;
+      mpiMonthCount += 1;
+    }
+    if (metrics.avgARI !== null) {
+      sumARI += metrics.avgARI;
+      ariMonthCount += 1;
+    }
+    if (metrics.avgRGI !== null) {
+      sumRGI += metrics.avgRGI;
+      rgiMonthCount += 1;
+    }
+  }
+
+  if (monthMetrics.size < 2) return [];
+
+  const periodAvgOcc = totalDays > 0 ? sumOcc / totalDays : null;
+  const periodAvgADR = totalDays > 0 ? sumADR / totalDays : null;
+  const periodAvgRevPAR = totalDays > 0 ? sumRevPAR / totalDays : null;
+  const periodAvgMPI = mpiMonthCount > 0 ? sumMPI / mpiMonthCount : null;
+  const periodAvgARI = ariMonthCount > 0 ? sumARI / ariMonthCount : null;
+  const periodAvgRGI = rgiMonthCount > 0 ? sumRGI / rgiMonthCount : null;
+
+  const monthNames = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December'
+  ];
+
+  const results = [];
+
+  for (const mk of sortedMonthKeys) {
+    const entry = monthMetrics.get(mk);
+    if (!entry) continue; // month was below MONTHLY_MIN_DAYS — skip silently
+
+    const { rows, metrics, dayCount } = entry;
+    const [yearStr, monthStr] = mk.split('-');
+    const monthLabel = `${monthNames[parseInt(monthStr, 10) - 1]} ${yearStr}`;
+
+    // --- Count how many metrics breach their threshold ---
+    let breachCount = 0;
+    const breachDetails = {};
+
+    if (periodAvgOcc !== null && metrics.avgOcc !== null) {
+      const delta = Math.abs(metrics.avgOcc - periodAvgOcc);
+      if (delta >= MONTHLY_OCC_DIVERGENCE_PT) {
+        breachCount += 1;
+        breachDetails.occ = delta;
+      }
+    }
+    if (periodAvgADR !== null && metrics.avgADR !== null && periodAvgADR > 0) {
+      const delta = Math.abs(metrics.avgADR - periodAvgADR) / periodAvgADR;
+      if (delta >= MONTHLY_ADR_DIVERGENCE_PCT) {
+        breachCount += 1;
+        breachDetails.adr = delta;
+      }
+    }
+    if (periodAvgRevPAR !== null && metrics.avgRevPAR !== null && periodAvgRevPAR > 0) {
+      const delta = Math.abs(metrics.avgRevPAR - periodAvgRevPAR) / periodAvgRevPAR;
+      if (delta >= MONTHLY_REVPAR_DIVERGENCE_PCT) {
+        breachCount += 1;
+        breachDetails.revpar = delta;
+      }
+    }
+    if (periodAvgMPI !== null && metrics.avgMPI !== null) {
+      const delta = Math.abs(metrics.avgMPI - periodAvgMPI);
+      if (delta >= MONTHLY_MPI_DIVERGENCE_PT) {
+        breachCount += 1;
+        breachDetails.mpi = delta;
+      }
+    }
+    if (periodAvgARI !== null && metrics.avgARI !== null) {
+      const delta = Math.abs(metrics.avgARI - periodAvgARI);
+      if (delta >= MONTHLY_ARI_DIVERGENCE_PT) {
+        breachCount += 1;
+        breachDetails.ari = delta;
+      }
+    }
+    if (periodAvgRGI !== null && metrics.avgRGI !== null) {
+      const delta = Math.abs(metrics.avgRGI - periodAvgRGI);
+      if (delta >= MONTHLY_RGI_DIVERGENCE_PT) {
+        breachCount += 1;
+        breachDetails.rgi = delta;
+      }
+    }
+
+    // Require at least 2 metric breaches — single-metric divergence may be noise.
+    if (breachCount < 2) continue;
+
+    // --- Determine direction: is this month above or below period average? ---
+    const occDir =
+      metrics.avgOcc !== null && periodAvgOcc !== null
+        ? metrics.avgOcc > periodAvgOcc
+          ? 'above'
+          : 'below'
+        : null;
+    const rgiDir =
+      metrics.avgRGI !== null && periodAvgRGI !== null
+        ? metrics.avgRGI > periodAvgRGI
+          ? 'above'
+          : 'below'
+        : null;
+    const direction = rgiDir || occDir || 'divergent';
+
+    // --- Find dominant PMS segment for this month if data exists ---
+    let dominantSegment = null;
+    if (Array.isArray(pmsRows) && pmsRows.length > 0) {
+      const monthStart = `${mk}-01`;
+      const [y, m] = mk.split('-').map(Number);
+      const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const monthEnd = `${mk}-${String(lastDay).padStart(2, '0')}`;
+      const monthPmsRows = pmsRows.filter((r) => {
+        const d = r?._ingestion?.stay_date_ymd;
+        return d && d >= monthStart && d <= monthEnd;
+      });
+      if (monthPmsRows.length > 0) {
+        const segRN = {};
+        for (const r of monthPmsRows) {
+          const name = r['Market Segment Name'] || r['market segment name'] || '';
+          const bucket = mapMarketSegmentNameToUsaliBucket(name);
+          const displayName = usaliBucketToDisplayName(bucket, name);
+          const rn = toNumber(r['Room Nights TY (Actual / OTB)'] || r['Room Nights TY'] || 0) || 0;
+          segRN[displayName] = (segRN[displayName] || 0) + rn;
+        }
+        const topSeg = Object.entries(segRN).sort((a, b) => b[1] - a[1])[0];
+        if (topSeg) dominantSegment = topSeg[0];
+      }
+    }
+
+    // --- Determine confidence ---
+    // HIGH: ≥20 days STR + PMS present + 2+ breaches
+    // MEDIUM: ≥20 days STR + no PMS, or exactly 2 breaches
+    // LOW: 20-27 days STR (borderline complete month)
+    let confidence = 'medium';
+    if (dayCount >= 28 && dominantSegment !== null && breachCount >= 2) confidence = 'high';
+    if (dayCount < 28) confidence = 'low';
+
+    // --- Build narrative ---
+    // Concise: month label, direction vs period, key metric deltas, segment if available.
+    const occStr = metrics.avgOcc !== null ? `Occ ${metrics.avgOcc.toFixed(1)}%` : null;
+    const mpiStr = metrics.avgMPI !== null ? `MPI ${metrics.avgMPI.toFixed(1)}` : null;
+    const ariStr = metrics.avgARI !== null ? `ARI ${metrics.avgARI.toFixed(1)}` : null;
+    const rgiStr = metrics.avgRGI !== null ? `RGI ${metrics.avgRGI.toFixed(1)}` : null;
+    const metricsStr = [occStr, mpiStr, ariStr, rgiStr].filter(Boolean).join(', ');
+
+    const periodOccStr = periodAvgOcc !== null ? `${periodAvgOcc.toFixed(1)}%` : 'period avg';
+    const periodRgiStr = periodAvgRGI !== null ? `${periodAvgRGI.toFixed(1)}` : 'period avg';
+
+    const segLine = dominantSegment ? `\n\nDominant segment: ${dominantSegment}.` : '';
+
+    const narrative =
+      `${monthLabel} performed ${direction} the period average across ${breachCount} metrics.\n\n` +
+      `Month metrics: ${metricsStr}.\n` +
+      `Period averages: Occ ${periodOccStr}, RGI ${periodRgiStr}.` +
+      segLine;
+
+    // --- Determine issue family from monthly metrics ---
+    // Reuse the same diagnosis logic already in the engine.
+    const monthDiag = buildDiagnosisFromSTR(rows);
+    const monthFamily = monthDiag.diagnosis_type || 'share_loss';
+    const monthDriver =
+      monthDiag.diagnosis_type === 'pricing_resistance'
+        ? 'pricing'
+        : monthDiag.diagnosis_type === 'discount_inefficiency'
+          ? 'conversion'
+          : monthDiag.diagnosis_type === 'healthy'
+            ? 'none'
+            : 'visibility';
+
+    // --- Decision line ---
+    let decisionLine = '';
+    if (direction === 'above') {
+      decisionLine = `${monthLabel} outperformed the period — identify what drove this and replicate the conditions.`;
+    } else {
+      decisionLine = `${monthLabel} underperformed the period — isolate the cause before the pattern recurs.`;
+    }
+
+    // --- Build execution actions ---
+    const executionActions = [];
+    if (direction === 'below') {
+      if (breachDetails.mpi)
+        executionActions.push(
+          `Audit share position in ${monthLabel}: MPI deviated ${breachDetails.mpi.toFixed(1)} pts from period average.`
+        );
+      if (breachDetails.ari)
+        executionActions.push(
+          `Review rate positioning for ${monthLabel}: ARI deviated ${breachDetails.ari.toFixed(1)} pts from period average.`
+        );
+      if (dominantSegment)
+        executionActions.push(
+          `Examine ${dominantSegment} segment performance for ${monthLabel} — it was the dominant demand source.`
+        );
+    } else {
+      executionActions.push(`Document what drove ${monthLabel} outperformance and build a replication framework.`);
+      if (dominantSegment)
+        executionActions.push(
+          `${dominantSegment} was dominant in ${monthLabel} — assess whether this mix can be replicated in equivalent months.`
+        );
+    }
+    if (!executionActions.length)
+      executionActions.push(`Review full commercial mix for ${monthLabel} against period benchmarks.`);
+
+    results.push({
+      // Stable unique key for this monthly card
+      finding_key: `MONTHLY_${mk}_${monthFamily}`,
+      // Granularity flag so frontend can distinguish from period cards
+      granularity: 'monthly',
+      month_key: mk,
+      month_label: monthLabel,
+      title: `${monthLabel} — ${direction === 'above' ? 'Outperformance' : 'Underperformance'} vs Period`,
+      issue_family: monthFamily,
+      primary_driver: monthDriver,
+      priority: direction === 'below' ? (breachCount >= 4 ? 'high' : 'medium') : 'medium',
+      confidence,
+      commercial_narrative: narrative,
+      enforced_decision_line: decisionLine,
+      enforced_execution_actions: executionActions,
+      card_metrics: {
+        avgMPI: metrics.avgMPI,
+        avgARI: metrics.avgARI,
+        avgRGI: metrics.avgRGI,
+        avgOcc: metrics.avgOcc,
+        trend_status: monthDiag.trend_status
+      },
+      period_comparison: {
+        period_avg_occ: periodAvgOcc,
+        period_avg_mpi: periodAvgMPI,
+        period_avg_ari: periodAvgARI,
+        period_avg_rgi: periodAvgRGI,
+        breach_count: breachCount,
+        breach_details: breachDetails,
+        direction
+      },
+      dominant_segment: dominantSegment,
+      day_count: dayCount
+    });
+  }
+
+  return results;
 }
 
 function buildWindowMetricsFromRows(rows) {
@@ -8078,6 +8397,10 @@ async function handler(req, res) {
       snapshotYmd
     );
 
+    // Phase 2: Monthly granularity — run after the main weekly pipeline is complete.
+    // Uses the same strRows and pmsRows already in scope. Does not modify any existing output.
+    const monthlyIssues = buildMonthlyIssues(strRows, pmsNormalized.rowsForEngine, diagnosis);
+
     const enginePayload = {
       success: true,
       detection,
@@ -8086,6 +8409,7 @@ async function handler(req, res) {
       driver,
       issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
       forward_issues: forwardIssues,
+      monthly_issues: monthlyIssues,
       retail_temporal:
         (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
       total_opportunity: totalOpportunity,
