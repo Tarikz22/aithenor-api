@@ -113,6 +113,20 @@ const MONTHLY_ARI_DIVERGENCE_PT = 8; // index points
 const MONTHLY_RGI_DIVERGENCE_PT = 8; // index points
 const MONTHLY_MIN_DAYS = 20; // minimum STR days in a month to qualify
 
+// Phase 2: Forecast vs OTB gap — thresholds and window definitions.
+// A card fires only when BOTH rn gap % AND revenue gap breach simultaneously.
+const FORECAST_RN_GAP_PCT_THRESHOLD = 0.1; // 10% shortfall vs forecast RN
+const FORECAST_REVENUE_GAP_THRESHOLD = 5000; // absolute revenue gap (reporting currency)
+const FORECAST_BEAT_RN_PCT_THRESHOLD = 0.05; // 5% OTB above forecast → green card
+const FORECAST_BEAT_REV_PCT_THRESHOLD = 0.03; // 3% revenue above forecast → confirmed beat
+const FORECAST_MIN_WINDOW_COVERAGE_PCT = 0.05; // window must have ≥5% of capacity×days forecasted
+const FORECAST_MIN_ABSOLUTE_RN = 5; // absolute floor when capacity cannot be inferred
+const FORECAST_WINDOWS = [
+  { label: 'Days 1–30', minLead: 1, maxLead: 30 },
+  { label: 'Days 31–60', minLead: 31, maxLead: 60 },
+  { label: 'Days 61–90', minLead: 61, maxLead: 90 }
+];
+
 /** Adjacent ISO weeks merge if MPI and ARI are within these index points (episode same regime). */
 const EPISODE_MERGE_MPI_ARI_MAX_DELTA = 4;
 
@@ -2942,6 +2956,482 @@ function buildMonthlyIssues(strRows, pmsRows, diagnosis) {
       },
       dominant_segment: dominantSegment,
       day_count: dayCount
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Phase 2: Forecast vs OTB Gap analysis.
+ * Compares the hotel's own forecast (Forecasted Room Nights TY, Forecasted Revenue TY)
+ * against current OTB (Room Nights TY Actual/OTB, Revenue TY Actual/OTB).
+ * Produces gap cards (shortfall) and beat cards (ahead of plan) per 30-day window.
+ * Entirely separate from buildForwardIssuesFromPmsOtb which compares OTB vs LY.
+ *
+ * @param {object[]} allPmsRows  - pmsNormalized.all (includes future rows with _ingestion)
+ * @param {object[]} strRows     - actualized STR rows (used for capacity inference only)
+ * @param {object}   diagnosis   - engine diagnosis object (used for capacity inference)
+ * @param {string}   snapshotYmd - current snapshot date YYYY-MM-DD
+ */
+function buildForecastGapIssues(allPmsRows, strRows, diagnosis, snapshotYmd) {
+  // --- Guard: need future rows to proceed ---
+  const futureRows = (allPmsRows || []).filter(
+    (r) => r?._ingestion?.row_phase === 'future_otb' || r?._ingestion?.row_phase === 'future_forecast'
+  );
+  if (!futureRows.length) return [];
+
+  // --- Guard: check that forecast columns are actually present ---
+  // Sample up to 10 future rows — if none have forecast RN, return silently.
+  const sampleRows = futureRows.slice(0, 10);
+  const hasForecastColumns = sampleRows.some((r) => {
+    const fRN = toNumber(r['Forecasted Room Nights TY'] ?? r['Forecasted Room Nights; TY']);
+    return fRN !== null && fRN > 0;
+  });
+  if (!hasForecastColumns) return [];
+
+  // --- Infer hotel capacity for the coverage floor check ---
+  const hotelCapacity = inferHotelCapacityFromContext(strRows, diagnosis) || 100;
+
+  // --- Helper: days from snapshot to a stay date ---
+  const leadDays = (stayYmd) => {
+    const s0 = parseYmdToUtcDate(snapshotYmd);
+    const s1 = parseYmdToUtcDate(stayYmd);
+    if (!s0 || !s1) return null;
+    return Math.round((s1.getTime() - s0.getTime()) / 86400000);
+  };
+
+  // --- Helper: safe number extraction with multiple key fallbacks ---
+  const safeGet = (row, ...keys) => {
+    for (const k of keys) {
+      const v = toNumber(row[k]);
+      if (v !== null) return v;
+    }
+    return null;
+  };
+
+  // --- Helper: format date label for narrative ---
+  const fmtDate = (ymd) => {
+    if (!ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd || '';
+    const [y, m, d] = ymd.split('-').map(Number);
+    const months = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December'
+    ];
+    return `${d} ${months[m - 1]} ${y}`;
+  };
+
+  // --- Helper: determine gap profile from RN and revenue gaps ---
+  // Returns one of: 'double_miss' | 'volume_miss' | 'rate_miss' | 'beat' | 'on_plan'
+  const classifyGapProfile = (rnGapPct, revGapPct) => {
+    const rnMiss = rnGapPct > FORECAST_RN_GAP_PCT_THRESHOLD;
+    const revMiss = revGapPct > FORECAST_REVENUE_GAP_THRESHOLD / 10000; // relative proxy
+    const rnBeat = rnGapPct < -FORECAST_BEAT_RN_PCT_THRESHOLD;
+    const revBeat = revGapPct < -FORECAST_BEAT_REV_PCT_THRESHOLD;
+    if (rnBeat && revBeat) return 'beat';
+    if (rnBeat && !revBeat) return 'beat_volume_rate_miss'; // volume ahead, rate diluted
+    if (rnMiss && revMiss) return 'double_miss';
+    if (rnMiss && !revMiss) return 'volume_miss';
+    if (!rnMiss && revMiss) return 'rate_miss';
+    return 'on_plan';
+  };
+
+  // --- Helper: gap severity for double_miss and volume_miss ---
+  const classifyGapSeverity = (rnGapPct, revGap) => {
+    if (rnGapPct > 0.25 && revGap > 20000) return 'critical';
+    if (rnGapPct > 0.15 || revGap > 10000) return 'high';
+    if (rnGapPct > 0.1 || revGap > 5000) return 'moderate';
+    return 'low';
+  };
+
+  // --- Helper: derive decision line from profile, severity, and window ---
+  const buildDecisionLine = (profile, severity, windowLabel, primarySeg, daysRemaining) => {
+    const seg = primarySeg || 'the lagging segment';
+    if (profile === 'beat') {
+      return `Forecast is being exceeded — protect rate integrity and assess whether the forecast should be revised upward.`;
+    }
+    if (profile === 'beat_volume_rate_miss') {
+      return `Room nights ahead of forecast but ADR is diluted — volume strategy is working; now focus on rate quality to convert volume into revenue.`;
+    }
+    if (profile === 'rate_miss') {
+      return `Room night target is on plan but revenue is short — ADR dilution in ${seg} must be addressed before it compounds.`;
+    }
+    if (profile === 'volume_miss') {
+      if (severity === 'critical' && daysRemaining <= 30) {
+        return `Critical volume shortfall with ${daysRemaining} days remaining — immediate commercial intervention required on ${seg}.`;
+      }
+      if (severity === 'high' && daysRemaining <= 30) {
+        return `Deploy targeted tactical offers on ${seg} now — ${daysRemaining} days remain and the gap will not self-close.`;
+      }
+      if (daysRemaining > 60) {
+        return `Review forecast validity for ${windowLabel} — a gap of this size at this lead time may indicate a planning assumption error.`;
+      }
+      return `Activate demand stimulation on ${seg} — ${daysRemaining} days remain in this window.`;
+    }
+    if (profile === 'double_miss') {
+      if (severity === 'critical') {
+        return `Both volume and rate are materially below forecast — escalate to full commercial team review immediately.`;
+      }
+      if (severity === 'high' && daysRemaining <= 30) {
+        return `Volume and rate both short with ${daysRemaining} days remaining — deploy tactical offers on ${seg} with rate floor protection.`;
+      }
+      if (daysRemaining > 60) {
+        return `Double miss at long lead time — recalibrate forecast and launch early demand capture on ${seg}.`;
+      }
+      return `Address both volume and rate gaps on ${seg} — ${daysRemaining} days remain in this window.`;
+    }
+    return `Monitor ${windowLabel} forecast materialisation weekly.`;
+  };
+
+  // --- Helper: build execution actions ---
+  const buildExecutionActions = (
+    profile,
+    severity,
+    primarySeg,
+    secondarySeg,
+    rnGap,
+    revGap,
+    rnGapPct,
+    windowEnd,
+    daysRemaining
+  ) => {
+    const seg = primarySeg || 'primary segment';
+    const seg2 = secondarySeg || null;
+    const actions = [];
+
+    if (profile === 'beat' || profile === 'beat_volume_rate_miss') {
+      actions.push(
+        `${seg} is the over-performing segment — validate that rate integrity is being maintained as volume builds.`
+      );
+      if (profile === 'beat_volume_rate_miss') {
+        actions.push(
+          `ADR is tracking below forecast despite volume strength — review discount depth and ensure rate floors are enforced.`
+        );
+      }
+      actions.push(`Reassess the forecast for this window — current pace suggests the original plan was conservative.`);
+      return actions;
+    }
+
+    // Gap cards
+    if (rnGap > 0) {
+      actions.push(
+        `${seg} is the primary volume shortfall driver — ${Math.round(rnGap)} room nights needed by ${fmtDate(windowEnd)} to close the gap.`
+      );
+    }
+    if (seg2) {
+      actions.push(`${seg2} is a secondary contributor to the shortfall — include in demand recovery plan.`);
+    }
+    if (profile === 'double_miss' || profile === 'rate_miss') {
+      actions.push(`ADR for this window is below forecast — enforce rate floors on ${seg} and avoid further discount depth.`);
+    }
+    if (severity === 'critical' || severity === 'high') {
+      actions.push(
+        `Set a weekly OTB checkpoint: if ${seg} does not recover at least ${Math.round(rnGap / Math.max(1, Math.ceil(daysRemaining / 7)))} room nights per week, escalate intervention.`
+      );
+    } else {
+      actions.push(`Monitor ${seg} pickup weekly — intervene if gap does not reduce by at least 20% within two weeks.`);
+    }
+    return actions.slice(0, 3); // executive readability cap
+  };
+
+  // ─────────────────────────────────────────────────
+  // MAIN WINDOW LOOP
+  // ─────────────────────────────────────────────────
+  const results = [];
+
+  for (const win of FORECAST_WINDOWS) {
+    // Filter future rows inside this lead window
+    const windowRows = futureRows.filter((r) => {
+      const stayYmd = r?._ingestion?.stay_date_ymd;
+      if (!stayYmd) return false;
+      const ld = leadDays(stayYmd);
+      if (ld === null) return false;
+      return ld >= win.minLead && ld <= win.maxLead;
+    });
+
+    if (!windowRows.length) continue;
+
+    // Determine window date range for labelling
+    const stayDates = windowRows
+      .map((r) => r._ingestion.stay_date_ymd)
+      .filter(Boolean)
+      .sort();
+    const windowStart = stayDates[0];
+    const windowEnd = stayDates[stayDates.length - 1];
+    const daysRemaining = win.maxLead - win.minLead + 1;
+
+    // ── Aggregate forecast and OTB totals across all rows in window ──
+    let totalForecastRN = 0;
+    let totalOtbRN = 0;
+    let totalForecastRev = 0;
+    let totalOtbRev = 0;
+    let totalStlyRN = 0;
+    let forecastRNRowCount = 0;
+
+    // Per-segment aggregation for decomposition
+    const segData = {};
+
+    for (const row of windowRows) {
+      const segName = row['Market Segment Name'] || row['market segment name'] || '';
+      const segBucket = mapMarketSegmentNameToUsaliBucket(segName);
+      const segDisplay = usaliBucketToDisplayName(segBucket, segName);
+
+      const forecastRN =
+        safeGet(row, 'Forecasted Room Nights TY', 'Forecasted Room Nights; TY', 'Forecast Room Nights TY') || 0;
+      const otbRN = safeGet(row, 'Room Nights TY (Actual / OTB)', 'Room Nights TY') || 0;
+      const forecastRev =
+        safeGet(row, 'Forecasted Revenue TY', 'Forecasted Revenue; TY', 'Forecast Revenue TY') || 0;
+      const otbRev = safeGet(row, 'Revenue TY (Actual / OTB)', 'Revenue TY') || 0;
+      const stlyRN = safeGet(row, 'Room Nights STLY', 'Room Nights LY Actual', 'Room Nights LY') || 0;
+
+      totalForecastRN += forecastRN;
+      totalOtbRN += otbRN;
+      totalForecastRev += forecastRev;
+      totalOtbRev += otbRev;
+      totalStlyRN += stlyRN;
+      if (forecastRN > 0) forecastRNRowCount += 1;
+
+      // Segment rollup
+      if (!segData[segDisplay]) {
+        segData[segDisplay] = { forecastRN: 0, otbRN: 0, forecastRev: 0, otbRev: 0 };
+      }
+      segData[segDisplay].forecastRN += forecastRN;
+      segData[segDisplay].otbRN += otbRN;
+      segData[segDisplay].forecastRev += forecastRev;
+      segData[segDisplay].otbRev += otbRev;
+    }
+
+    // ── Coverage floor check ──
+    // Suppress if forecast is too thin to be meaningful
+    const windowDays = win.maxLead - win.minLead + 1;
+    const coverageFloor = Math.max(
+      FORECAST_MIN_ABSOLUTE_RN,
+      hotelCapacity * windowDays * FORECAST_MIN_WINDOW_COVERAGE_PCT
+    );
+    if (totalForecastRN < coverageFloor) continue;
+
+    // ── Compute gaps ──
+    const rnGap = totalForecastRN - totalOtbRN; // positive = shortfall
+    const revGap = totalForecastRev - totalOtbRev; // positive = shortfall
+    const rnGapPct = totalForecastRN > 0 ? rnGap / totalForecastRN : 0;
+    const revGapPct = totalForecastRev > 0 ? revGap / totalForecastRev : 0;
+
+    // ── Derive ADR figures ──
+    const forecastADR = totalForecastRN > 0 ? totalForecastRev / totalForecastRN : null;
+    const otbADR = totalOtbRN > 0 ? totalOtbRev / totalOtbRN : null;
+    const adrGap =
+      forecastADR !== null && otbADR !== null ? forecastADR - otbADR : null; // positive = OTB ADR below forecast
+
+    // ── Classify gap profile ──
+    const profile = classifyGapProfile(rnGapPct, revGapPct);
+    const severity =
+      profile !== 'beat' && profile !== 'beat_volume_rate_miss' && profile !== 'on_plan'
+        ? classifyGapSeverity(rnGapPct, revGap)
+        : null;
+
+    // ── Suppress on_plan windows — no card needed ──
+    if (profile === 'on_plan') continue;
+
+    // ── Find primary and secondary gap segments ──
+    // Sort segments by absolute RN gap (forecast minus OTB), largest first
+    const segEntries = Object.entries(segData)
+      .map(([name, d]) => ({
+        name,
+        rnGap: d.forecastRN - d.otbRN,
+        revGap: d.forecastRev - d.otbRev,
+        forecastRN: d.forecastRN,
+        otbRN: d.otbRN
+      }))
+      .filter((s) => s.forecastRN > 0); // only segments with a forecast
+
+    // For gap cards: sort by largest shortfall first
+    // For beat cards: sort by largest surplus first (most negative rnGap)
+    const isBeat = profile === 'beat' || profile === 'beat_volume_rate_miss';
+    segEntries.sort((a, b) => (isBeat ? a.rnGap - b.rnGap : b.rnGap - a.rnGap));
+
+    const primarySeg = segEntries[0]?.name || null;
+    const secondaryGap = segEntries[1];
+    // Secondary segment named only if it contributes >30% of total gap
+    const secondarySeg =
+      secondaryGap && Math.abs(rnGap) > 0 && Math.abs(secondaryGap.rnGap) / Math.abs(rnGap) > 0.3
+        ? secondaryGap.name
+        : null;
+
+    // ── STLY implied landing (conditional — only when STLY data is present) ──
+    // Derives what the hotel is likely to land at based on last year's final RN
+    // and the current OTB position vs STLY OTB at same lead.
+    // Only adds a narrative sentence — does not change card type or decision.
+    let impliedLandingLine = null;
+    if (totalStlyRN > 0 && totalOtbRN > 0) {
+      // Implied landing = current OTB + (STLY total − STLY OTB at same lead)
+      // We approximate STLY-at-same-lead as totalStlyRN (from STLY column in PMS)
+      // This is a directional estimate, not a precise pickup model.
+      // Flagged as estimate in narrative — never presented as fact.
+      const stlyPickupRemaining = Math.max(0, totalStlyRN - totalOtbRN);
+      const impliedLanding = Math.round(totalOtbRN + stlyPickupRemaining);
+      const impliedVsForecast = impliedLanding - totalForecastRN;
+      if (Math.abs(impliedVsForecast / totalForecastRN) > 0.1) {
+        // Only surface when implied landing differs from forecast by >10% — otherwise noise
+        const direction = impliedVsForecast > 0 ? 'above' : 'below';
+        impliedLandingLine =
+          `Based on last year's pickup curve, implied landing is ~${impliedLanding} room nights` +
+          ` — ${Math.abs(Math.round(impliedVsForecast))} room nights ${direction} the hotel forecast of ${Math.round(totalForecastRN)}.`;
+      }
+    }
+
+    // ── Build narrative ──
+    const rnGapAbs = Math.abs(Math.round(rnGap));
+    const revGapAbs = Math.abs(Math.round(revGap));
+    const rnGapPctFmt = `${Math.abs(rnGapPct * 100).toFixed(1)}%`;
+    const revFmt = (v) =>
+      new Intl.NumberFormat('en-GB', { maximumFractionDigits: 0 }).format(Math.round(v));
+    const adrFmt = (v) => (v !== null ? `${v.toFixed(0)}` : 'n/a');
+
+    // Signal paragraph — precise numbers, no editorialising
+    let signalPara = '';
+    if (isBeat) {
+      signalPara =
+        `${win.label}: ${fmtDate(windowStart)} → ${fmtDate(windowEnd)}. ` +
+        `OTB is ${rnGapAbs} room nights ahead of forecast (${rnGapPctFmt} above plan). ` +
+        `Forecast: ${Math.round(totalForecastRN)} RN at ADR ${adrFmt(forecastADR)}. ` +
+        `OTB: ${Math.round(totalOtbRN)} RN at ADR ${adrFmt(otbADR)}.`;
+    } else {
+      signalPara =
+        `${win.label}: ${fmtDate(windowStart)} → ${fmtDate(windowEnd)}. ` +
+        `OTB is ${rnGapAbs} room nights short of forecast (${rnGapPctFmt} below plan). ` +
+        `Forecast: ${Math.round(totalForecastRN)} RN / ${revFmt(totalForecastRev)} revenue. ` +
+        `OTB: ${Math.round(totalOtbRN)} RN / ${revFmt(totalOtbRev)} revenue. ` +
+        `Revenue gap: ${revFmt(revGapAbs)}.`;
+    }
+
+    // Analysis paragraph — segment decomposition + ADR + implied landing
+    let analysisPara = '';
+    if (primarySeg) {
+      const pSegData = segData[primarySeg];
+      const pRnGap = Math.round(pSegData.forecastRN - pSegData.otbRN);
+      const pRnPct =
+        pSegData.forecastRN > 0
+          ? (((pSegData.forecastRN - pSegData.otbRN) / pSegData.forecastRN) * 100).toFixed(1)
+          : '0.0';
+      analysisPara = isBeat
+        ? `${primarySeg} is the primary driver of the beat — OTB is ${Math.abs(pRnGap)} room nights ahead of its segment forecast.`
+        : `${primarySeg} is the primary shortfall driver — ${Math.abs(pRnGap)} room nights short of its segment forecast (${pRnPct}% below plan).`;
+      if (secondarySeg) {
+        const sSegData = segData[secondarySeg];
+        const sRnGap = Math.round(sSegData.forecastRN - sSegData.otbRN);
+        analysisPara += ` ${secondarySeg} is a secondary contributor with ${Math.abs(sRnGap)} room nights of the shortfall.`;
+      }
+    }
+
+    // ADR paragraph — only when ADR gap is meaningful (>5 currency units)
+    let adrPara = '';
+    if (adrGap !== null && Math.abs(adrGap) > 5) {
+      if (adrGap > 0) {
+        adrPara = `ADR is ${adrGap.toFixed(0)} below the forecast rate (OTB: ${adrFmt(otbADR)} vs forecast: ${adrFmt(forecastADR)}) — revenue shortfall is compounded by rate dilution.`;
+      } else {
+        adrPara = `ADR is ${Math.abs(adrGap).toFixed(0)} above the forecast rate (OTB: ${adrFmt(otbADR)} vs forecast: ${adrFmt(forecastADR)}) — rate is overdelivering; volume is the constraint.`;
+      }
+    }
+
+    // Assemble full narrative
+    const narrativeParts = [signalPara, analysisPara, adrPara, impliedLandingLine].filter(Boolean);
+    const commercialNarrative = narrativeParts.join('\n\n');
+
+    // ── Decision and execution ──
+    const decisionLine = buildDecisionLine(profile, severity, win.label, primarySeg, daysRemaining);
+    const executionActions = buildExecutionActions(
+      profile,
+      severity,
+      primarySeg,
+      secondarySeg,
+      rnGap,
+      revGap,
+      rnGapPct,
+      windowEnd,
+      daysRemaining
+    );
+
+    // ── Priority and confidence ──
+    let priority = 'medium';
+    if (profile === 'beat' || profile === 'beat_volume_rate_miss') {
+      priority = 'low'; // green cards are informational, not urgent
+    } else if (severity === 'critical') {
+      priority = 'high';
+    } else if (severity === 'high') {
+      priority = 'high';
+    } else {
+      priority = 'medium';
+    }
+
+    // Confidence: high when both forecast and OTB columns populated across most rows
+    const rowCoverage = forecastRNRowCount / Math.max(1, windowRows.length);
+    const confidence = rowCoverage >= 0.8 ? 'high' : rowCoverage >= 0.5 ? 'medium' : 'low';
+
+    // ── Card title ──
+    const cardTitle = isBeat
+      ? `Forecast beat — ${win.label} OTB is ahead of plan`
+      : profile === 'rate_miss'
+        ? `Rate shortfall vs forecast — ${win.label} volume on plan, revenue behind`
+        : profile === 'volume_miss'
+          ? `Volume shortfall vs forecast — ${win.label} room nights behind plan`
+          : `Double miss vs forecast — ${win.label} volume and revenue both short`;
+
+    results.push({
+      // Stable unique key
+      finding_key: `FCG_${win.minLead}_${win.maxLead}_${profile}`,
+      // Granularity flag — distinct from forward_issues (LY pace) and monthly_issues
+      granularity: 'forecast_gap',
+      is_forward_card: true,
+      issue_family: profile,
+      primary_driver: isBeat ? 'pricing' : profile === 'rate_miss' ? 'pricing' : 'conversion',
+      window_label: win.label,
+      window_start: windowStart,
+      window_end: windowEnd,
+      forward_window: FORECAST_WINDOWS.indexOf(win) + 1,
+      title: cardTitle,
+      priority,
+      confidence,
+      gap_profile: profile,
+      gap_severity: severity,
+      commercial_narrative: commercialNarrative,
+      enforced_decision_line: decisionLine,
+      enforced_execution_actions: executionActions,
+      // Metrics for card header display
+      card_metrics: {
+        avgMPI: null, // STR indices not applicable to forecast gap cards
+        avgARI: null,
+        avgRGI: null,
+        avgOcc:
+          totalForecastRN > 0 ? Math.round((totalOtbRN / totalForecastRN) * 100 * 10) / 10 : null // repurposed: OTB as % of forecast
+      },
+      // Full quantification for downstream use
+      quantification: {
+        total_forecast_rn: Math.round(totalForecastRN),
+        total_otb_rn: Math.round(totalOtbRN),
+        total_forecast_rev: Math.round(totalForecastRev),
+        total_otb_rev: Math.round(totalOtbRev),
+        rn_gap: Math.round(rnGap),
+        rn_gap_pct: Math.round(rnGapPct * 1000) / 10,
+        rev_gap: Math.round(revGap),
+        rev_gap_pct: Math.round(revGapPct * 1000) / 10,
+        forecast_adr: forecastADR !== null ? Math.round(forecastADR) : null,
+        otb_adr: otbADR !== null ? Math.round(otbADR) : null,
+        adr_gap: adrGap !== null ? Math.round(adrGap) : null,
+        stly_rn: Math.round(totalStlyRN),
+        implied_landing_line: impliedLandingLine || null
+      },
+      primary_segment: primarySeg,
+      secondary_segment: secondarySeg
     });
   }
 
@@ -8376,6 +8866,15 @@ async function handler(req, res) {
       snapshotYmd
     );
 
+    // Phase 2: Forecast vs OTB gap — runs after forward pace issues.
+    // Uses allPmsRows (includes future rows) not just rowsForEngine.
+    const forecastGapIssues = buildForecastGapIssues(
+      workbookIngestion.rows.pms,
+      strRows,
+      diagnosis,
+      snapshotYmd
+    );
+
     // Phase 2: Monthly granularity — run after the main weekly pipeline is complete.
     // Uses the same strRows and pmsRows already in scope. Does not modify any existing output.
     const monthlyIssues = buildMonthlyIssues(strRows, pmsNormalized.rowsForEngine, diagnosis);
@@ -8388,6 +8887,7 @@ async function handler(req, res) {
       driver,
       issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
       forward_issues: forwardIssues,
+      forecast_gap_issues: forecastGapIssues,
       monthly_issues: monthlyIssues,
       retail_temporal:
         (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
