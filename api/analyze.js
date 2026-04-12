@@ -3226,6 +3226,19 @@ function buildForecastGapIssues(allPmsRows, strRows, diagnosis, snapshotYmd) {
     const rnGapPct = totalForecastRN > 0 ? rnGap / totalForecastRN : 0;
     const revGapPct = totalForecastRev > 0 ? revGap / totalForecastRev : 0;
 
+    // Forecast realism check: compare forecast RN to STLY RN.
+    // If forecast is more than 20% above STLY, it may be an aggressive plan.
+    // If OTB is within 10% of STLY despite the forecast gap, the hotel is
+    // tracking normally vs last year — the gap is a planning issue, not demand failure.
+    const forecastVsStlyPct = totalStlyRN > 0 ? (totalForecastRN - totalStlyRN) / totalStlyRN : null;
+    const otbVsStlyPct = totalStlyRN > 0 ? (totalOtbRN - totalStlyRN) / totalStlyRN : null;
+
+    // Flag: forecast is aggressive (>20% above LY) AND OTB is close to LY (<10% gap)
+    // This means the gap is a forecast error, not a demand collapse.
+    const isForecastAggressive = forecastVsStlyPct !== null && forecastVsStlyPct > 0.2;
+    const isOtbCloseToStly = otbVsStlyPct !== null && Math.abs(otbVsStlyPct) < 0.1;
+    const isForecastGapNotDemandGap = isForecastAggressive && isOtbCloseToStly;
+
     // ── Derive ADR figures ──
     const forecastADR = totalForecastRN > 0 ? totalForecastRev / totalForecastRN : null;
     const otbADR = totalOtbRN > 0 ? totalOtbRev / totalOtbRN : null;
@@ -3234,10 +3247,14 @@ function buildForecastGapIssues(allPmsRows, strRows, diagnosis, snapshotYmd) {
 
     // ── Classify gap profile ──
     const profile = classifyGapProfile(rnGapPct, revGapPct);
-    const severity =
+    let severity =
       profile !== 'beat' && profile !== 'beat_volume_rate_miss' && profile !== 'on_plan'
         ? classifyGapSeverity(rnGapPct, revGap)
         : null;
+    // Downgrade severity when gap is driven by aggressive forecasting, not demand failure.
+    // A hotel tracking at LY level should not trigger critical intervention.
+    if (isForecastGapNotDemandGap && severity === 'critical') severity = 'moderate';
+    if (isForecastGapNotDemandGap && severity === 'high') severity = 'moderate';
 
     // ── Suppress on_plan windows — no card needed ──
     if (profile === 'on_plan') continue;
@@ -3344,11 +3361,38 @@ function buildForecastGapIssues(allPmsRows, strRows, diagnosis, snapshotYmd) {
     }
 
     // Assemble full narrative
-    const narrativeParts = [signalPara, analysisPara, adrPara, impliedLandingLine].filter(Boolean);
+    // When the gap appears to be a planning issue rather than demand failure,
+    // add an explicit forecast challenge paragraph to the analysis.
+    let forecastChallengePara = null;
+    if (isForecastGapNotDemandGap) {
+      const stlyFmt = Math.round(totalStlyRN);
+      const fcstFmt = Math.round(totalForecastRN);
+      const otbFmt = Math.round(totalOtbRN);
+      const pctAboveLY = Math.round(forecastVsStlyPct * 100);
+      forecastChallengePara =
+        `Forecast challenge: the hotel forecast of ${fcstFmt} room nights is ` +
+        `${pctAboveLY}% above last year's ${stlyFmt} room nights. ` +
+        `Current OTB of ${otbFmt} room nights is tracking within 10% of last year — ` +
+        `the gap vs forecast is primarily a planning assumption, not a demand failure. ` +
+        `Validate the forecast basis before triggering demand generation intervention.`;
+    }
+    const narrativeParts = [
+      signalPara,
+      analysisPara,
+      adrPara,
+      forecastChallengePara,
+      impliedLandingLine
+    ].filter(Boolean);
     const commercialNarrative = narrativeParts.join('\n\n');
 
     // ── Decision and execution ──
     const decisionLine = buildDecisionLine(profile, severity, win.label, primarySeg, daysRemaining);
+    // Override decision framing when the gap is a forecast planning issue.
+    const finalDecisionLine = isForecastGapNotDemandGap
+      ? `Validate the forecast basis before acting — OTB is tracking close to last year. ` +
+        `The gap reflects an aggressive plan, not a demand collapse. ` +
+        `Reassess the forecast assumption before committing to demand generation spend.`
+      : decisionLine;
     const executionActions = buildExecutionActions(
       profile,
       severity,
@@ -3369,8 +3413,10 @@ function buildForecastGapIssues(allPmsRows, strRows, diagnosis, snapshotYmd) {
       priority = 'high';
     } else if (severity === 'high') {
       priority = 'high';
-    } else {
+    } else if (severity === 'moderate') {
       priority = 'medium';
+    } else {
+      priority = 'low';
     }
 
     // Confidence: high when both forecast and OTB columns populated across most rows
@@ -3404,7 +3450,7 @@ function buildForecastGapIssues(allPmsRows, strRows, diagnosis, snapshotYmd) {
       gap_profile: profile,
       gap_severity: severity,
       commercial_narrative: commercialNarrative,
-      enforced_decision_line: decisionLine,
+      enforced_decision_line: finalDecisionLine,
       enforced_execution_actions: executionActions,
       // Metrics for card header display
       card_metrics: {
