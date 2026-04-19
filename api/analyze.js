@@ -192,7 +192,6 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
     r?._ingestion?.row_phase === 'actualized' ||
     r?._ingestion?.row_phase === 'undated'
   );
-  console.log('DEBUG mixShift rows after filter:', rows.length);
   if (!rows.length) return [];
 
   // --- Guard: check period length ---
@@ -203,7 +202,6 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
     const e = parseYmdToUtcDate(periodEnd);
     if (s && e) periodDays = Math.round((e - s) / 86400000) + 1;
   }
-  console.log('DEBUG mixShift periodDays:', periodDays, 'periodStart:', periodStart, 'periodEnd:', periodEnd);
   if (periodDays > 0 && periodDays < MIX_MIN_PERIOD_DAYS) return [];
 
   // --- Helper: safe number from row with multiple key fallbacks ---
@@ -257,7 +255,6 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
   const totalRNLY = segments.reduce((s, x) => s + x.rnLY, 0);
 
   // --- Guard: minimum total RN ---
-  console.log('DEBUG mixShift totalRNTY:', totalRNTY, 'totalRNLY:', totalRNLY, 'hasLY:', totalRNLY > 0);
   if (totalRNTY < MIX_MIN_TOTAL_RN) return [];
 
   // --- Guard: LY data present ---
@@ -275,18 +272,6 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
     // Share change (positive = grew, negative = shrank)
     seg.shareShift = seg.shareTY - seg.shareLY;
   }
-
-  console.log('DEBUG mixShift segments:', JSON.stringify(segments.map(s => ({
-    bucket: s.bucket,
-    tier: s.tier,
-    rnTY: s.rnTY,
-    rnLY: s.rnLY,
-    shareTY: s.shareTY?.toFixed(4),
-    shareLY: s.shareLY?.toFixed(4),
-    shareShift: s.shareShift?.toFixed(4),
-    adrTY: s.adrTY?.toFixed(2),
-    adrLY: s.adrLY?.toFixed(2)
-  }))));
 
   const results = [];
 
@@ -306,9 +291,6 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
       s.shareShift >= MIX_DISPLACEMENT_RN_SHIFT_PCT &&
       s.tier >= 3 // must be discount tier — premium gaining is positive
     );
-
-    console.log('DEBUG mixShift P1 losers:', JSON.stringify(losers.map(s => s.bucket)));
-    console.log('DEBUG mixShift P1 gainers:', JSON.stringify(gainers.map(s => s.bucket)));
 
     // For each loser-gainer pair, check ADR spread
     for (const loser of losers) {
