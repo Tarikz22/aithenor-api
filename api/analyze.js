@@ -131,7 +131,7 @@ const FORECAST_WINDOWS = [
 
 // Pattern 1 — Displacement: premium segment loses share to discount segment.
 // Both conditions must be met simultaneously.
-const MIX_DISPLACEMENT_RN_SHIFT_PCT   = 0.05; // segment shifts ≥5% of total RN
+const MIX_DISPLACEMENT_RN_SHIFT_PCT   = 0.02; // segment shifts ≥2% of total RN
 const MIX_DISPLACEMENT_ADR_SPREAD_PCT = 0.10; // losing segment ADR ≥10% above gaining
 
 // Pattern 2 — Concentration: one segment dominates total RN.
