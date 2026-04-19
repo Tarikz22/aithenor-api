@@ -9394,6 +9394,39 @@ async function handler(req, res) {
     // Uses the same strRows and pmsRows already in scope. Does not modify any existing output.
     const monthlyIssues = buildMonthlyIssues(strRows, pmsNormalized.rowsForEngine, diagnosis);
 
+    const str_weekly_series = [];
+    if (Array.isArray(strRows) && strRows.length) {
+      const byWeek = new Map();
+      for (const row of strRows) {
+        const ymd = getRowStayDateYmd(row);
+        if (!ymd) continue;
+        const d = parseYmdToUtcDate(ymd);
+        if (!d) continue;
+        const weekKey = weekBucketKeyFromDate(d);
+        if (!weekKey) continue;
+        if (!byWeek.has(weekKey)) byWeek.set(weekKey, []);
+        byWeek.get(weekKey).push(row);
+      }
+      const weeklyParts = [...byWeek.entries()]
+        .filter(([, rows]) => rows.length >= MIN_STR_DAYS_PER_WEEK)
+        .map(([week_key, rows]) => {
+          const sampleYmd = getRowStayDateYmd(rows[0]);
+          const bounds = getIsoWeekStayBoundsFromYmd(sampleYmd);
+          return {
+            week_key,
+            week_start_ymd: bounds.stay_week_start_ymd,
+            week_end_ymd: bounds.stay_week_end_ymd,
+            avg_mpi: averageMetric(rows, ['MPI', 'MPI Index']),
+            avg_ari: averageMetric(rows, ['ARI', 'ARI Index']),
+            avg_rgi: averageMetric(rows, ['RGI', 'RGI Index']),
+            avg_occ: averageMetric(rows, ['Hotel Occupancy %', 'Occupancy %']),
+            day_count: rows.length
+          };
+        })
+        .sort((a, b) => (a.week_key < b.week_key ? -1 : a.week_key > b.week_key ? 1 : 0));
+      str_weekly_series.push(...weeklyParts);
+    }
+
     const enginePayload = {
       success: true,
       detection,
@@ -9405,6 +9438,8 @@ async function handler(req, res) {
       forecast_gap_issues: forecastGapIssues,
       mix_shift_issues: mixShiftIssues,
       monthly_issues: monthlyIssues,
+      // ISO-week STR KPI series for engine_json consumers (additive; does not replace any legacy field).
+      str_weekly_series,
       retail_temporal:
         (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
       total_opportunity: totalOpportunity,
