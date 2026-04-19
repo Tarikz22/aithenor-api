@@ -92,7 +92,7 @@ const OWNER_DEPARTMENT_BY_DRIVER = {
 };
 
 /** Max distinct retail issues per run — favor sharp, non-overlapping cards over volume. */
-const MAX_RETAIL_ISSUES_PER_RUN = 3;
+const MAX_RETAIL_ISSUES_PER_RUN = 5;
 
 /** Legacy fallback: max flattened actions when wrapping old driver-only path. */
 const MAX_LEGACY_RETAIL_ACTIONS = 5;
