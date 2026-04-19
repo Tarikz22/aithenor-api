@@ -7275,6 +7275,20 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       temporal_layer: 'forward_otb',
       window_label: winLab,
       forward_window: m.forward_window,
+      pace_data: {
+        otb_rn: Math.round(m.totalRnTy),
+        reference_rn: Math.round(m.referenceRn),
+        pace_gap_pct: m.paceGapPct !== null ? Math.round(m.paceGapPct * 10) / 10 : null,
+        otb_rev: m.totalRevTy !== null ? Math.round(m.totalRevTy) : null,
+        reference_rev: m.referenceRev !== null ? Math.round(m.referenceRev) : null,
+        revenue_gap_pct: m.revenueGapPct !== null ? Math.round(m.revenueGapPct * 10) / 10 : null,
+        otb_adr: m.blendedAdrTy !== null ? Math.round(m.blendedAdrTy) : null,
+        reference_adr: m.referenceAdr !== null ? Math.round(m.referenceAdr) : null,
+        window_label: winLab,
+        window_start_ymd: m.window_start_ymd || null,
+        window_end_ymd: m.window_end_ymd || null,
+        remaining_days: m.remainingDays ?? null
+      },
       is_forward_card: true
     });
   }
