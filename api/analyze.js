@@ -9504,6 +9504,13 @@ async function handler(req, res) {
       snapshotDateYmd: periodMeta.snapshot_date,
       pmsPaceComparator
     });
+    await validatePriorDecisions({
+      supabaseClient: supabase,
+      hotelCode,
+      snapshotYmd: periodMeta.snapshot_date,
+      currentDiagnosis: diagnosis,
+      currentPaceRows: pmsPaceSnapshotRowsForAnalysis
+    });
     const historicalPmsPaceRows = await readPmsPaceHistoricalRowsForFutureWindow({
       supabaseClient: supabase,
       hotelCode,
@@ -9699,6 +9706,21 @@ if (engineSaveError) {
   throw engineSaveError;
 }
 
+    const allCardsForTracking = [
+      ...(Array.isArray(enrichedIssues) ? enrichedIssues : []),
+      ...(Array.isArray(forwardIssues) ? forwardIssues : []),
+      ...(Array.isArray(forecastGapIssues) ? forecastGapIssues : []),
+      ...(Array.isArray(mixShiftIssues) ? mixShiftIssues : []),
+      ...(Array.isArray(monthlyIssues) ? monthlyIssues : [])
+    ];
+    const decisionTrackingRows = buildDecisionTrackingRows({
+      hotelCode,
+      snapshotYmd: periodMeta.snapshot_date,
+      allCards: allCardsForTracking
+    });
+    await persistDecisionTracking(supabase, decisionTrackingRows);
+    enginePayload.decision_tracking_count = decisionTrackingRows.length;
+
     console.log('DEBUG reached post-engine_outputs stage');
 
     console.log('DEBUG building pms pace snapshot rows', {
@@ -9778,7 +9800,8 @@ if (engineSaveError) {
       period: periodMeta.period_label,
       engine: enginePayload,
       recommendations_count: recommendationsPayload.length,
-      actions_count: actionsPayload.length
+      actions_count: actionsPayload.length,
+      decision_tracking_count: decisionTrackingRows.length
     });
   } catch (error) {
     console.error('Analyze handler error:', error);
