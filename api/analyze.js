@@ -1509,60 +1509,164 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     return {
       focus_segment: 'unknown',
       focus_reason: 'No PMS data available',
-      segment_analysis: []
+      segment_analysis: [],
+      active_signals: [],
+      total_rn_ty: null,
+      total_rn_ly: null,
+      total_rev_ty: null,
+      total_rev_ly: null,
+      overall_adr_ty: null,
+      overall_adr_ly: null,
+      overall_adr_variance: null
     };
   }
 
-  const segmentData = {};
-
-  pmsRows.forEach((row) => {
-    const name = row['market segment name'] || row['Market Segment Name'] || '';
-    const segment = mapMarketSegmentNameToUsaliBucket(name);
-
-    const rnTY = Number(row['Room Nights TY (Actual / OTB)'] || 0);
-    const rnLY = Number(row['Room Nights LY Actual'] || 0);
-    const revTY = Number(row['Revenue TY (Actual / OTB)'] || 0);
-    const revLY = Number(row['Revenue LY Actual'] || 0);
-
-    if (!segmentData[segment]) {
-      segmentData[segment] = { rnTY: 0, rnLY: 0, revTY: 0, revLY: 0 };
+  const pickNum = (...candidates) => {
+    for (const c of candidates) {
+      if (c === null || c === undefined || c === '') continue;
+      const n = Number(c);
+      if (Number.isFinite(n)) return n;
     }
+    return 0;
+  };
 
-    segmentData[segment].rnTY += rnTY;
-    segmentData[segment].rnLY += rnLY;
-    segmentData[segment].revTY += revTY;
-    segmentData[segment].revLY += revLY;
-  });
-
-  const segmentAnalysis = Object.entries(segmentData).map(([segment, data]) => ({
-    segment,
-    rnGrowth: data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0,
-    revGrowth: data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0
-  }));
-
-  let focus_segment = 'retail';
-
-  switch (diagnosis.diagnosis_type) {
-    case 'compression_mismanagement':
-      focus_segment = 'groups';
-      break;
-    case 'healthy':
-      focus_segment = 'none';
-      break;
-    default:
-      focus_segment = 'retail';
-      break;
+  // STEP 1 — Aggregate all segments from pmsRows (USALI buckets).
+  const segmentData = {};
+  for (const row of pmsRows) {
+    const segName =
+      row['Market Segment Name'] ||
+      row['market segment name'] ||
+      row['Market Segment'] ||
+      '';
+    const bucket = mapMarketSegmentNameToUsaliBucket(segName);
+    const rnTY = pickNum(
+      row['Room Nights TY (Actual / OTB)'],
+      row['Occupancy On Books This Year']
+    );
+    const rnLY = pickNum(
+      row['Room Nights LY Actual'],
+      row['Occupancy On Books Last Year Actual']
+    );
+    const revTY = pickNum(
+      row['Revenue TY (Actual / OTB)'],
+      row['Booked Room Revenue This Year']
+    );
+    const revLY = pickNum(
+      row['Revenue LY Actual'],
+      row['Booked Room Revenue Last Year Actual']
+    );
+    if (!segmentData[bucket]) {
+      segmentData[bucket] = { rnTY: 0, rnLY: 0, revTY: 0, revLY: 0 };
+    }
+    segmentData[bucket].rnTY += rnTY;
+    segmentData[bucket].rnLY += rnLY;
+    segmentData[bucket].revTY += revTY;
+    segmentData[bucket].revLY += revLY;
   }
 
-  const worstSegment = [...segmentAnalysis].sort((a, b) => a.rnGrowth - b.rnGrowth)[0];
-  if (worstSegment && worstSegment.rnGrowth < -0.1) {
-    focus_segment = usaliBucketToLegacyFocusSegment(worstSegment.segment);
+  const totalRnTY = Object.values(segmentData).reduce((s, d) => s + d.rnTY, 0);
+  const totalRnLY = Object.values(segmentData).reduce((s, d) => s + d.rnLY, 0);
+  const totalRevTY = Object.values(segmentData).reduce((s, d) => s + d.revTY, 0);
+  const totalRevLY = Object.values(segmentData).reduce((s, d) => s + d.revLY, 0);
+
+  const overallAdrTy = totalRnTY > 0 ? totalRevTY / totalRnTY : null;
+  const overallAdrLy = totalRnLY > 0 ? totalRevLY / totalRnLY : null;
+  const overallAdrVariance =
+    overallAdrTy != null && overallAdrLy != null && overallAdrLy !== 0
+      ? (overallAdrTy - overallAdrLy) / overallAdrLy
+      : null;
+
+  // STEP 2 — segment_analysis (per bucket).
+  const segment_analysis = Object.entries(segmentData).map(([bucket, data]) => {
+    const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
+    const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
+    const adrTY = data.rnTY > 0 ? data.revTY / data.rnTY : null;
+    const adrLY = data.rnLY > 0 ? data.revLY / data.rnLY : null;
+    const adrVariance =
+      adrTY != null && adrLY != null ? (adrTY - adrLY) / adrLY : 0;
+    const shareTY = totalRnTY > 0 ? data.rnTY / totalRnTY : 0;
+    const shareLY = totalRnLY > 0 ? data.rnLY / totalRnLY : 0;
+    const shareShift = shareTY - shareLY;
+    const tier = getSegmentRatingTier(bucket);
+    return {
+      segment: bucket,
+      rnGrowth,
+      revGrowth,
+      adrTY,
+      adrLY,
+      adrVariance,
+      shareTY,
+      shareLY,
+      shareShift,
+      tier
+    };
+  });
+
+  // STEP 3 — active_signals (all buckets with material volume / rate / mix movement).
+  const active_signals = [];
+  for (const row of segment_analysis) {
+    const bucket = row.segment;
+    const types = [];
+    if (Math.abs(row.rnGrowth) > 0.08) types.push('volume');
+    if (Math.abs(row.adrVariance) > 0.05) types.push('rate');
+    if (Math.abs(row.shareShift) > 0.02) types.push('mix');
+    if (!types.length) continue;
+    active_signals.push({
+      bucket,
+      display_name: usaliBucketToDisplayName(bucket),
+      tier: row.tier,
+      rnGrowth: row.rnGrowth,
+      adrVariance: row.adrVariance,
+      shareShift: row.shareShift,
+      signal_types: types
+    });
+  }
+
+  // STEP 4 — primary focus_segment (backward-compatible string).
+  let focus_segment = 'retail';
+  if (diagnosis?.diagnosis_type === 'compression_mismanagement') {
+    focus_segment = 'groups';
+  } else if (diagnosis?.diagnosis_type === 'healthy') {
+    focus_segment = 'none';
+  } else if (active_signals.length) {
+    const top = [...active_signals].sort(
+      (a, b) => Math.abs(b.rnGrowth) - Math.abs(a.rnGrowth)
+    )[0];
+    focus_segment = usaliBucketToLegacyFocusSegment(top.bucket);
+  } else {
+    focus_segment = 'retail';
+  }
+
+  let focus_reason;
+  if (diagnosis?.diagnosis_type === 'compression_mismanagement') {
+    focus_reason =
+      'Portfolio diagnosis indicates compression mismanagement — prioritizing groups segment for coordination and displacement risk.';
+  } else if (diagnosis?.diagnosis_type === 'healthy') {
+    focus_reason =
+      'STR diagnosis is healthy — no single segment focus; segment mix signals are informational only.';
+  } else if (active_signals.length) {
+    const topSig = [...active_signals].sort(
+      (a, b) => Math.abs(b.rnGrowth) - Math.abs(a.rnGrowth)
+    )[0];
+    const typeLabel = (topSig.signal_types || []).join(', ');
+    focus_reason = `Strongest material segment signal: ${topSig.display_name} (${typeLabel || 'signals'}) — mapped to ${focus_segment} focus for downstream compatibility.`;
+  } else {
+    focus_reason =
+      'No segment crossed volume, rate, or mix signal thresholds; defaulting to retail focus for the weekly reasoning pipeline.';
   }
 
   return {
     focus_segment,
-    focus_reason: `Focus on ${focus_segment} segment due to alignment with ${diagnosis.diagnosis_type} and observed performance gaps`,
-    segment_analysis: segmentAnalysis
+    focus_reason,
+    segment_analysis,
+    active_signals,
+    total_rn_ty: totalRnTY,
+    total_rn_ly: totalRnLY,
+    total_rev_ty: totalRevTY,
+    total_rev_ly: totalRevLY,
+    overall_adr_ty: overallAdrTy,
+    overall_adr_ly: overallAdrLy,
+    overall_adr_variance: overallAdrVariance
   };
 }
 
@@ -9956,6 +10060,9 @@ async function handler(req, res) {
     const detection = detectDataContext(workbook);
     const diagnosis = buildDiagnosisFromSTR(strRows);
     const focus = buildFocusFromPMS(pmsRows, diagnosis);
+    const isTransientFocus = ['retail', 'negotiated', 'discount', 'qualified', 'wholesale'].includes(
+      focus?.focus_segment || ''
+    );
     const driver = buildDriverFromDiagnosis(diagnosis, focus, strRows, pmsRows);
     const periodMeta = extractPeriodMetadata(strRows, snapshotYmd);
 
@@ -9964,7 +10071,7 @@ async function handler(req, res) {
 
     let retailTemporalMeta = null;
 
-    if ((focus?.focus_segment || '') === 'retail') {
+    if (isTransientFocus) {
       const weekly = buildRetailIssuesFromWeeklyTemporal(strRows, focus, driver, pmsRows);
       retailTemporalMeta = weekly.temporal_meta;
 
@@ -10080,7 +10187,7 @@ async function handler(req, res) {
       decisionFramingSummary,
       actionIntelligenceSummary
     );
-    if ((focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0) {
+    if (isTransientFocus && enrichedIssues.length > 0) {
       enrichedIssues = applyControlledActionsToRetailIssues(
         enrichedIssues,
         actionIntelligenceSummary,
@@ -10181,7 +10288,7 @@ async function handler(req, res) {
       diagnosis,
       focus,
       driver,
-      issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
+      issues: isTransientFocus ? enrichedIssues : [],
       forward_issues: forwardIssues,
       forecast_gap_issues: forecastGapIssues,
       weekly_pickup_delta_issues: weeklyPickupDeltaIssues,
@@ -10192,7 +10299,7 @@ async function handler(req, res) {
       // ISO-week STR KPI series for engine_json consumers (additive; does not replace any legacy field).
       str_weekly_series,
       retail_temporal:
-        (focus?.focus_segment || '') === 'retail' && retailTemporalMeta ? retailTemporalMeta : null,
+        isTransientFocus && retailTemporalMeta ? retailTemporalMeta : null,
       total_opportunity: totalOpportunity,
       /** Normalized workbook views + row classification (pace engine consumes later). */
       workbook_ingestion: workbookIngestion,
@@ -10216,6 +10323,15 @@ async function handler(req, res) {
       decision_arbitration_summary: decisionArbitrationSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
       actions: enrichedActions
+    };
+
+    enginePayload.active_segment_signals = focus?.active_signals || [];
+    enginePayload.segment_overview = {
+      total_rn_ty: focus?.total_rn_ty ?? null,
+      total_rn_ly: focus?.total_rn_ly ?? null,
+      overall_adr_ty: focus?.overall_adr_ty ?? null,
+      overall_adr_ly: focus?.overall_adr_ly ?? null,
+      overall_adr_variance: focus?.overall_adr_variance ?? null
     };
 
 console.log('DEBUG about to insert engine_outputs');
@@ -10288,7 +10404,7 @@ if (engineSaveError) {
     }
 
     const recommendationsPayload =
-      (focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0
+      isTransientFocus && enrichedIssues.length > 0
         ? buildRecommendationsFromIssues({ hotelCode, periodMeta, focus, issues: enrichedIssues })
         : buildRecommendationsPayload({
             hotelCode,
@@ -10310,7 +10426,7 @@ if (engineSaveError) {
     }
 
     const actionsPayload =
-      (focus?.focus_segment || '') === 'retail' && enrichedIssues.length > 0
+      isTransientFocus && enrichedIssues.length > 0
         ? buildActionsFromIssues({ hotelCode, periodMeta, focus, issues: enrichedIssues })
         : buildActionsPayload({
             hotelCode,
