@@ -9718,11 +9718,6 @@ function corpParseVarianceFraction(raw) {
 function buildCorporateAccountPaceIssues(corporateNormalized, snapshotYmd) {
   try {
     const rows = corporateNormalized?.all;
-    console.log('DEBUG corporate rows count:', corporateNormalized?.all?.length);
-    console.log(
-      'DEBUG corporate first row keys:',
-      corporateNormalized?.all?.[0] ? Object.keys(corporateNormalized.all[0]) : 'no rows'
-    );
     if (!Array.isArray(rows) || !rows.length) return [];
     if (!snapshotYmd) return [];
 
@@ -9973,11 +9968,6 @@ function grpMatchForecastIssue(forecastGapIssues, minLead, maxLead) {
 function buildGroupPipelineIssues(delphiNormalized, forecastGapIssues, snapshotYmd) {
   try {
     const rows = delphiNormalized?.all;
-    console.log('DEBUG delphi rows count:', delphiNormalized?.all?.length);
-    console.log(
-      'DEBUG delphi first row keys:',
-      delphiNormalized?.all?.[0] ? Object.keys(delphiNormalized.all[0]) : 'no rows'
-    );
     if (!Array.isArray(rows) || !rows.length) return [];
     if (!snapshotYmd) return [];
 
