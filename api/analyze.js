@@ -2452,6 +2452,50 @@ const DECISION_TARGET_METRICS = {
   corporate_pace_opportunity: { metric: 'rn_on_books_ty', direction: 'hold' },
   group_pipeline_gap: { metric: 'rn_on_books_ty', direction: 'up' }
 };
+
+const COMMERCIAL_SCENARIOS = {
+  S1_NEGOTIATED_DISPLACEMENT: {
+    id: 'S1',
+    name: 'Negotiated Volume Displacement',
+    description: 'Negotiated ahead of LY while ADR is diluted and retail losing share'
+  },
+  S2_RETAIL_PACKAGES_TRADEOFF: {
+    id: 'S2',
+    name: 'Retail vs Packages Trade-off',
+    description: 'Retail ahead while packages behind — intentional restriction or demand gap'
+  },
+  S3_GROUP_VOLUME_STRATEGY: {
+    id: 'S3',
+    name: 'Group Volume Strategy',
+    description: 'Group segment overweight — deliberate fill or displacement risk'
+  },
+  S4_ADR_WITHOUT_VOLUME: {
+    id: 'S4',
+    name: 'ADR Growth Without Volume Support',
+    description: 'ADR ahead of LY but occupancy flat or declining'
+  },
+  S5_VOLUME_WITHOUT_RATE: {
+    id: 'S5',
+    name: 'Volume Growth Without Rate Power',
+    description: 'Occupancy ahead of LY but ADR flat or declining'
+  },
+  S6_PACE_TIMING_MISREAD: {
+    id: 'S6',
+    name: 'Pace Timing Misread',
+    description: 'Booking pace significantly ahead or behind LY — wrong pricing response risk'
+  },
+  S7_UNCONSTRAINED_UNDERPERFORMANCE: {
+    id: 'S7',
+    name: 'Unconstrained Underperformance',
+    description: 'No compression periods yet performance weak vs LY — systemic issue'
+  },
+  S8_SEGMENT_CANNIBALIZATION: {
+    id: 'S8',
+    name: 'Segment Cannibalization',
+    description: 'One segment growing at expense of another without total revenue gain'
+  }
+};
+
 /** Smaller than default 500 to reduce single-request statement time (PostgREST upsert). */
 const PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE = 100;
 
@@ -9985,6 +10029,710 @@ function buildGroupPipelineIssues(delphiNormalized, forecastGapIssues, snapshotY
   }
 }
 
+/**
+ * Cross-segment commercial synthesis: evaluates eight locked scenario patterns
+ * against PMS + STR + forward pace signals. Purely additive; never throws.
+ */
+function buildCrossSegmentSynthesis({
+  pmsRows,
+  strRows,
+  forwardIssues,
+  forecastGapIssues,
+  focus,
+  diagnosis,
+  snapshotYmd
+}) {
+  const emptyOut = () => ({
+    scenarios_detected: [],
+    scenario_count: 0,
+    synthesis_cards: [],
+    primary_story: null,
+    data_quality: {
+      has_segment_data: false,
+      has_str_data: false,
+      has_forward_data: false,
+      segments_with_signals: 0
+    }
+  });
+
+  try {
+    const snapKey = String(snapshotYmd || 'unknown').replace(/[^\d-]/g, '') || 'unknown';
+    const rows = Array.isArray(pmsRows) ? pmsRows : [];
+    const forwardArr = Array.isArray(forwardIssues) ? forwardIssues : [];
+    const analysis = Array.isArray(focus?.segment_analysis) ? focus.segment_analysis : [];
+
+    const pickNum = (...candidates) => {
+      for (const c of candidates) {
+        if (c === null || c === undefined || c === '') continue;
+        const n = Number(c);
+        if (Number.isFinite(n)) return n;
+      }
+      return 0;
+    };
+
+    const segAgg = {};
+    for (const row of rows) {
+      const segName =
+        row['Market Segment Name'] ||
+        row['market segment name'] ||
+        row['Market Segment'] ||
+        '';
+      const bucket = mapMarketSegmentNameToUsaliBucket(segName);
+      const rnTY = pickNum(
+        row['Room Nights TY (Actual / OTB)'],
+        row['Occupancy On Books This Year']
+      );
+      const rnLY = pickNum(
+        row['Room Nights LY Actual'],
+        row['Occupancy On Books Last Year Actual']
+      );
+      const revTY = pickNum(
+        row['Revenue TY (Actual / OTB)'],
+        row['Booked Room Revenue This Year']
+      );
+      const revLY = pickNum(
+        row['Revenue LY Actual'],
+        row['Booked Room Revenue Last Year Actual']
+      );
+      if (!segAgg[bucket]) segAgg[bucket] = { rnTY: 0, rnLY: 0, revTY: 0, revLY: 0 };
+      segAgg[bucket].rnTY += rnTY;
+      segAgg[bucket].rnLY += rnLY;
+      segAgg[bucket].revTY += revTY;
+      segAgg[bucket].revLY += revLY;
+    }
+
+    const totalRnTY = Object.values(segAgg).reduce((s, d) => s + d.rnTY, 0);
+    const totalRnLY = Object.values(segAgg).reduce((s, d) => s + d.rnLY, 0);
+    const totalRevTY = Object.values(segAgg).reduce((s, d) => s + d.revTY, 0);
+    const totalRevLY = Object.values(segAgg).reduce((s, d) => s + d.revLY, 0);
+
+    const segmentMatrix = {};
+    for (const [bucket, data] of Object.entries(segAgg)) {
+      const rnGrowth = data.rnLY > 0 ? (data.rnTY - data.rnLY) / data.rnLY : 0;
+      const revGrowth = data.revLY > 0 ? (data.revTY - data.revLY) / data.revLY : 0;
+      const adrTY = data.rnTY > 0 ? data.revTY / data.rnTY : null;
+      const adrLY = data.rnLY > 0 ? data.revLY / data.rnLY : null;
+      const adrVariance =
+        adrTY != null && adrLY != null && adrLY !== 0 ? (adrTY - adrLY) / adrLY : 0;
+      const shareTY = totalRnTY > 0 ? data.rnTY / totalRnTY : 0;
+      const shareLY = totalRnLY > 0 ? data.rnLY / totalRnLY : 0;
+      const shareShift = shareTY - shareLY;
+      const fromFocus = analysis.find((a) => a.segment === bucket);
+      const tier =
+        fromFocus?.tier != null && Number.isFinite(Number(fromFocus.tier))
+          ? Number(fromFocus.tier)
+          : getSegmentRatingTier(bucket);
+      segmentMatrix[bucket] = {
+        display_name: usaliBucketToDisplayName(bucket),
+        tier,
+        rnTY: data.rnTY,
+        rnLY: data.rnLY,
+        rnGrowth,
+        revTY: data.revTY,
+        revLY: data.revLY,
+        revGrowth,
+        adrTY,
+        adrLY,
+        adrVariance,
+        shareTY,
+        shareLY,
+        shareShift
+      };
+    }
+
+    const getSegment = (bucket) => segmentMatrix[bucket] || null;
+    const segmentGrowingRN = (bucket) => {
+      const g = getSegment(bucket);
+      return g != null && g.rnGrowth > 0.08;
+    };
+    const segmentDecliningRN = (bucket) => {
+      const g = getSegment(bucket);
+      return g != null && g.rnGrowth < -0.08;
+    };
+    const adrDiluted = (bucket) => {
+      const g = getSegment(bucket);
+      return g != null && g.adrVariance < -0.05;
+    };
+    const adrStrong = (bucket) => {
+      const g = getSegment(bucket);
+      return g != null && g.adrVariance > 0.05;
+    };
+
+    const overallAdrTY = toFiniteNumberOrNull(focus?.overall_adr_ty);
+    const overallAdrLY = toFiniteNumberOrNull(focus?.overall_adr_ly);
+    const overallAdrVariance = toFiniteNumberOrNull(focus?.overall_adr_variance);
+    const focusTotalRnTY = toFiniteNumberOrNull(focus?.total_rn_ty);
+    const focusTotalRnLY = toFiniteNumberOrNull(focus?.total_rn_ly);
+    const focusTotalRevTY = toFiniteNumberOrNull(focus?.total_rev_ty);
+    const focusTotalRevLY = toFiniteNumberOrNull(focus?.total_rev_ly);
+
+    const effTotalRnTY =
+      focusTotalRnTY !== null && focusTotalRnTY > 0 ? focusTotalRnTY : totalRnTY;
+    const effTotalRnLY =
+      focusTotalRnLY !== null && focusTotalRnLY > 0 ? focusTotalRnLY : totalRnLY;
+    const effTotalRevTY =
+      focusTotalRevTY !== null && focusTotalRevTY >= 0 ? focusTotalRevTY : totalRevTY;
+    const effTotalRevLY =
+      focusTotalRevLY !== null && focusTotalRevLY >= 0 ? focusTotalRevLY : totalRevLY;
+
+    const rnGrowthOverall =
+      effTotalRnLY > 0 ? (effTotalRnTY - effTotalRnLY) / effTotalRnLY : 0;
+    const revGrowthOverall =
+      effTotalRevLY > 0 ? (effTotalRevTY - effTotalRevLY) / effTotalRevLY : 0;
+
+    const m = diagnosis?.metrics || {};
+    const avgMPI = toFiniteNumberOrNull(m.avgMPI);
+    const avgARI = toFiniteNumberOrNull(m.avgARI);
+    const avgRGI = toFiniteNumberOrNull(m.avgRGI);
+    const avgOcc = toFiniteNumberOrNull(m.avgOcc);
+    const diagnosisType = diagnosis?.diagnosis_type || '';
+    const trendStatus = diagnosis?.trend_status || 'stable';
+
+    const detectedScenarios = [];
+
+    const detectS1 = () => {
+      const neg = getSegment('transient_negotiated');
+      const oav = overallAdrVariance;
+      if (
+        !neg ||
+        !segmentGrowingRN('transient_negotiated') ||
+        !adrDiluted('transient_negotiated') ||
+        oav === null ||
+        !Number.isFinite(oav) ||
+        oav >= -0.03
+      ) {
+        return null;
+      }
+      let sub_type;
+      let decision_direction;
+      if (avgOcc !== null && avgOcc > 75 && segmentDecliningRN('transient_retail')) {
+        sub_type = 'displacement_on_constrained_dates';
+        decision_direction = 'restrict_lowest_paying_negotiated';
+      } else if (avgOcc !== null && avgOcc <= 75) {
+        sub_type = 'pricing_or_distribution_failure';
+        decision_direction = 'investigate_pricing_distribution';
+      } else {
+        sub_type = 'mix_dilution';
+        decision_direction = 'review_negotiated_allotments';
+      }
+      const str_verdict =
+        avgMPI !== null &&
+        avgARI !== null &&
+        avgMPI < 100 &&
+        avgARI < 100
+          ? 'strategy_failing'
+          : avgMPI !== null && avgMPI >= 100
+            ? 'share_maintained_despite_dilution'
+            : 'mixed_signals';
+      const adr_gap =
+        overallAdrLY !== null && overallAdrLY > 0 && overallAdrTY !== null
+          ? overallAdrTY - overallAdrLY
+          : 0;
+      const revenue_impact =
+        Number.isFinite(adr_gap) && Number.isFinite(effTotalRnTY) ? adr_gap * effTotalRnTY : 0;
+      const occStr = avgOcc !== null && Number.isFinite(avgOcc) ? avgOcc.toFixed(1) : 'n/a';
+      const diagnosisText =
+        sub_type === 'displacement_on_constrained_dates'
+          ? `Hotel is running ${occStr}% occupancy and still absorbing negotiated volume at the expense of higher-rated retail. This is a restriction failure on constrained dates.`
+          : `Hotel has available capacity. The ADR dilution suggests either negotiated rates are set too low, distribution is not generating sufficient premium demand, or suite/room type mix is limiting ADR.`;
+      const decisionText =
+        sub_type === 'displacement_on_constrained_dates'
+          ? `Identify your lowest-paying negotiated accounts and restrict them on dates where retail demand exists. Do not displace retail with negotiated on compression days.`
+          : `Investigate whether the pricing issue is at property level (rates too low), distribution level (wrong channels), or product level (suite pricing limiting blended ADR).`;
+      const interp =
+        str_verdict === 'strategy_failing'
+          ? `MPI ${avgMPI?.toFixed(1)} and ARI ${avgARI?.toFixed(1)} both below 100 — the market does not justify this dilution.`
+          : `MPI ${avgMPI?.toFixed(1)} — share is holding despite rate dilution. Strategy is defensible but ADR recovery is needed.`;
+      return {
+        scenario_id: 'S1',
+        scenario_name: COMMERCIAL_SCENARIOS.S1_NEGOTIATED_DISPLACEMENT.name,
+        sub_type,
+        decision_direction,
+        finding_key: `SYNTH_S1_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence:
+          neg.rnGrowth > 0.15 && oav !== null && oav < -0.05 ? 'high' : 'medium',
+        situation: `Negotiated segment is ${(neg.rnGrowth * 100).toFixed(1)}% ahead of LY in room nights. Overall ADR is ${(oav * 100).toFixed(1)}% below LY. The volume gain is coming at a rate cost.`,
+        diagnosis: diagnosisText,
+        str_validation: {
+          verdict: str_verdict,
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation: interp
+        },
+        decision: decisionText,
+        financial_impact: {
+          adr_gap: Math.round(adr_gap),
+          revenue_impact: Math.round(revenue_impact),
+          description: `ADR dilution of €${Math.abs(Math.round(adr_gap))} across ${Math.round(effTotalRnTY)} room nights = €${Math.abs(Math.round(revenue_impact))} revenue impact`
+        },
+        priority: 1,
+        trend_status: trendStatus
+      };
+    };
+
+    const detectS2 = () => {
+      const ret = getSegment('transient_retail');
+      const pkg = getSegment('transient_discount');
+      if (
+        !ret ||
+        !pkg ||
+        !segmentGrowingRN('transient_retail') ||
+        !segmentDecliningRN('transient_discount') ||
+        !(ret.adrVariance > 0)
+      ) {
+        return null;
+      }
+      const sub_type =
+        avgMPI !== null && avgMPI >= 100
+          ? 'intentional_restriction_validated'
+          : 'restriction_not_validated_by_market';
+      const str_verdict =
+        avgMPI !== null &&
+        avgARI !== null &&
+        avgMPI >= 100 &&
+        avgARI >= 100
+          ? 'strategy_correct'
+          : 'strategy_questionable';
+      const decisionText =
+        sub_type === 'intentional_restriction_validated'
+          ? 'Protect retail allocation and monitor compression carefully — market share supports the restriction posture.'
+          : 'Reassess whether package restriction was premature; MPI/ARI do not fully validate the trade-off versus last year.';
+      return {
+        scenario_id: 'S2',
+        scenario_name: COMMERCIAL_SCENARIOS.S2_RETAIL_PACKAGES_TRADEOFF.name,
+        sub_type,
+        finding_key: `SYNTH_S2_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: 'medium',
+        situation: `Retail transient room nights are ${(ret.rnGrowth * 100).toFixed(1)}% ahead of LY while packages/discount are ${(pkg.rnGrowth * 100).toFixed(1)}% behind, with retail ADR strength (variance ${(ret.adrVariance * 100).toFixed(1)}%).`,
+        diagnosis:
+          sub_type === 'intentional_restriction_validated'
+            ? 'Market indices suggest demand justifies protecting retail and constraining packages.'
+            : 'Market indices do not fully validate a hard package restriction — risk of leaving share on the table.',
+        str_validation: {
+          verdict: str_verdict,
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation:
+            str_verdict === 'strategy_correct'
+              ? 'MPI and ARI both at or above 100 — the retail-first posture is externally validated.'
+              : 'MPI and/or ARI below validation thresholds — revisit restriction economics weekly.'
+        },
+        decision: decisionText,
+        priority: 2,
+        trend_status: trendStatus
+      };
+    };
+
+    const detectS3 = () => {
+      const keys = ['group_corporate', 'group_association', 'group_smerf'];
+      let grp = null;
+      for (const k of keys) {
+        const s = getSegment(k);
+        if (!s) continue;
+        if (!grp || s.rnTY > grp.rnTY) grp = { bucket: k, ...s };
+      }
+      if (!grp) return null;
+      if (!(grp.shareTY > 0.2 && (grp.rnGrowth > 0.1 || grp.shareTY - grp.shareLY > 0.05))) return null;
+      let sub_type;
+      if (avgOcc !== null && avgOcc < 65) sub_type = 'deliberate_low_demand_fill';
+      else if (avgMPI !== null && avgMPI < 95) sub_type = 'aggressive_group_causing_displacement';
+      else sub_type = 'balanced_group_strategy';
+      const str_verdict =
+        avgMPI !== null && avgMPI >= 100
+          ? 'mpi_held_despite_group_weight'
+          : avgMPI !== null && avgMPI < 100
+            ? 'mpi_soft_group_dominance'
+            : 'insufficient_mpi_context';
+      const decisionText =
+        sub_type === 'aggressive_group_causing_displacement'
+          ? 'Review group allotments on shoulder dates where they may block higher-rated transient; tighten definite holds against compression retail.'
+          : sub_type === 'deliberate_low_demand_fill'
+            ? 'Low-occupancy fill via groups is acceptable tactically — monitor blended ADR and retail displacement weekly.'
+            : 'Balanced posture — keep steering group mix versus transient retail on high-demand weeks.';
+      return {
+        scenario_id: 'S3',
+        scenario_name: COMMERCIAL_SCENARIOS.S3_GROUP_VOLUME_STRATEGY.name,
+        sub_type,
+        finding_key: `SYNTH_S3_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: 'medium',
+        situation: `${grp.display_name} carries ${(grp.shareTY * 100).toFixed(1)}% of room nights TY with growth ${(grp.rnGrowth * 100).toFixed(1)}% vs LY and a share shift of ${(grp.shareShift * 100).toFixed(1)} points.`,
+        diagnosis:
+          sub_type === 'aggressive_group_causing_displacement'
+            ? 'Group share is high while MPI is soft — groups may be crowding out higher-rated transient demand.'
+            : sub_type === 'deliberate_low_demand_fill'
+              ? 'Occupancy is soft; overweighting groups reads as deliberate fill rather than pure displacement.'
+              : 'Group contribution is large but MPI remains supportive — strategy appears balanced if ADR holds.',
+        str_validation: {
+          verdict: str_verdict,
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation:
+            str_verdict === 'mpi_held_despite_group_weight'
+              ? 'MPI held despite group dominance — pace strategy is externally tolerable.'
+              : 'MPI deterioration alongside heavy group mix suggests displacement risk versus retail.'
+        },
+        decision: decisionText,
+        priority: 2,
+        trend_status: trendStatus,
+        primary_group_bucket: grp.bucket
+      };
+    };
+
+    const detectS4 = () => {
+      const oav = overallAdrVariance;
+      if (
+        oav === null ||
+        !Number.isFinite(oav) ||
+        oav <= 0.04 ||
+        !Number.isFinite(rnGrowthOverall) ||
+        rnGrowthOverall >= -0.03
+      ) {
+        return null;
+      }
+      const market_context =
+        avgMPI !== null && Number.isFinite(avgMPI) && avgMPI < 98
+          ? 'market_demand_weak'
+          : 'market_demand_strong';
+      let str_verdict = 'acceptable_tradeoff';
+      if (avgRGI !== null && Number.isFinite(avgRGI) && avgRGI < 100) str_verdict = 'strategy_failing';
+      else if (
+        avgARI !== null &&
+        avgMPI !== null &&
+        avgARI > 100 &&
+        avgMPI < 100
+      ) {
+        str_verdict = 'share_loss_due_to_pricing';
+      }
+      const adrLift =
+        overallAdrTY !== null && overallAdrLY !== null
+          ? overallAdrTY - overallAdrLY
+          : 0;
+      const gopBenefit =
+        effTotalRnTY > 0 && Number.isFinite(adrLift) ? adrLift * effTotalRnTY * 0.65 : 0;
+      const lostRn =
+        effTotalRnLY > 0 && effTotalRnTY >= 0 ? Math.max(0, effTotalRnLY - effTotalRnTY) : 0;
+      const adrForLost =
+        overallAdrTY !== null && Number.isFinite(overallAdrTY) ? overallAdrTY : 0;
+      const lostCost = lostRn * adrForLost;
+      const diagnosisText =
+        market_context === 'market_demand_strong'
+          ? 'ADR is outperforming while room nights shrink in a firm market — classic overpricing / share-loss risk versus competitors.'
+          : 'ADR is up but volume is soft in a weak MPI context — defensive pricing may be partially justified; still validate length-of-stay and channel mix.';
+      const decisionText =
+        str_verdict === 'share_loss_due_to_pricing'
+          ? 'Review rate positioning versus comp set on high-demand dates; test retail BAR elasticity before deepening discounts.'
+          : str_verdict === 'strategy_failing'
+            ? 'RGI below 100 with falling RN — rebalance retail acquisition; do not rely on ADR alone.'
+            : 'Hold rate posture but monitor RGI weekly; ensure volume trajectory does not deteriorate further.';
+      return {
+        scenario_id: 'S4',
+        scenario_name: COMMERCIAL_SCENARIOS.S4_ADR_WITHOUT_VOLUME.name,
+        market_context,
+        finding_key: `SYNTH_S4_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: 'medium',
+        situation: `Overall ADR is ${(oav * 100).toFixed(1)}% above LY while room nights sold are ${(rnGrowthOverall * 100).toFixed(1)}% vs LY — rate strength without volume support.`,
+        diagnosis: diagnosisText,
+        str_validation: {
+          verdict: str_verdict,
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation: `ARI ${avgARI?.toFixed(1)}, MPI ${avgMPI?.toFixed(1)}, RGI ${avgRGI?.toFixed(1)} — ${str_verdict.replace(/_/g, ' ')}.`
+        },
+        decision: decisionText,
+        financial_impact: {
+          gop_benefit_adr: Math.round(gopBenefit),
+          lost_rn_cost: Math.round(lostCost),
+          net_positioning_effect: Math.round(gopBenefit - lostCost),
+          description: `Estimated GOP benefit from ADR lift at 0.65 flow-through: €${Math.round(gopBenefit)}; estimated cost of lost room nights at TY ADR proxy: €${Math.round(lostCost)}; net €${Math.round(gopBenefit - lostCost)}.`
+        },
+        priority: 1,
+        trend_status: trendStatus
+      };
+    };
+
+    const detectS5 = () => {
+      const oav = overallAdrVariance;
+      if (
+        !Number.isFinite(rnGrowthOverall) ||
+        rnGrowthOverall <= 0.04 ||
+        oav === null ||
+        !Number.isFinite(oav) ||
+        oav >= -0.03
+      ) {
+        return null;
+      }
+      const candidates = Object.entries(segmentMatrix).filter(([, s]) => s.rnGrowth > 0);
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => {
+        const d = b[1].rnGrowth - a[1].rnGrowth;
+        if (d !== 0) return d;
+        const adrA = a[1].adrTY != null ? a[1].adrTY : Infinity;
+        const adrB = b[1].adrTY != null ? b[1].adrTY : Infinity;
+        return adrA - adrB;
+      });
+      const [driverBucket, driverSeg] = candidates[0];
+      let str_verdict = 'volume_strategy_working';
+      if (avgRGI !== null && Number.isFinite(avgRGI) && avgRGI < 100) str_verdict = 'value_destruction';
+      else if (
+        avgMPI !== null &&
+        avgARI !== null &&
+        avgMPI > 100 &&
+        avgARI < 100
+      ) {
+        str_verdict = 'classic_dilution_pattern';
+      }
+      const decisionText =
+        str_verdict === 'value_destruction'
+          ? 'Stop buying occupancy through price cuts. Identify displacement opportunities toward higher-rated retail and tighten discount floors.'
+          : 'Volume strategy is working on index — pivot to ADR maximization via upsell, suite conversion, and retail BAR integrity while protecting RN momentum.';
+      return {
+        scenario_id: 'S5',
+        scenario_name: COMMERCIAL_SCENARIOS.S5_VOLUME_WITHOUT_RATE.name,
+        dilution_driver_bucket: driverBucket,
+        dilution_driver_display: driverSeg.display_name,
+        finding_key: `SYNTH_S5_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: str_verdict === 'value_destruction' ? 'high' : 'medium',
+        situation: `Rooms sold are ${(rnGrowthOverall * 100).toFixed(1)}% ahead of LY while overall ADR is ${(oav * 100).toFixed(1)}% below LY — volume without rate power.`,
+        diagnosis: `Largest positive RN growth with weakest blended ADR is ${driverSeg.display_name} (${driverBucket}), pointing to this bucket as the primary dilution driver.`,
+        str_validation: {
+          verdict: str_verdict,
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation: `Pattern vs STR: ${str_verdict.replace(/_/g, ' ')}.`
+        },
+        decision: decisionText,
+        priority: 1,
+        trend_status: trendStatus
+      };
+    };
+
+    const detectS6 = () => {
+      let ahead_count = 0;
+      let behind_count = 0;
+      for (const iss of forwardArr) {
+        const gap = toFiniteNumberOrNull(iss?.pace_data?.pace_gap_pct);
+        if (gap === null || !Number.isFinite(gap)) continue;
+        if (gap > 0) ahead_count += 1;
+        else if (gap < 0) behind_count += 1;
+      }
+      if (!((ahead_count >= 2 || behind_count >= 2) && forwardArr.length > 0)) return null;
+      const pace_direction = ahead_count > behind_count ? 'ahead' : 'behind';
+      const diagnosisText =
+        pace_direction === 'ahead'
+          ? 'Pace is materially ahead of same-time-last-year reference — risk of closing inventory too late or underpricing early demand.'
+          : 'Pace trails reference across multiple forward windows — risk of panic discounting or tactical overcorrection.';
+      const decisionText =
+        pace_direction === 'ahead'
+          ? 'Hold rate; do not open incremental discounts. Review length-of-stay restrictions and BAR floors until pickup curve stabilizes.'
+          : 'Identify which segments and source markets are missing versus LY; avoid blanket discounts and target specific demand gaps.';
+      return {
+        scenario_id: 'S6',
+        scenario_name: COMMERCIAL_SCENARIOS.S6_PACE_TIMING_MISREAD.name,
+        pace_direction,
+        ahead_windows: ahead_count,
+        behind_windows: behind_count,
+        finding_key: `SYNTH_S6_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: 'medium',
+        situation: `Forward OTB shows ${ahead_count} window(s) ahead and ${behind_count} window(s) behind STLY pace on room nights — directional skew is ${pace_direction}.`,
+        diagnosis: diagnosisText,
+        str_validation: {
+          verdict: 'forward_pace_signal',
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation: 'Validated against forward OTB windows versus embedded STLY reference in pace_data.'
+        },
+        decision: decisionText,
+        priority: 2,
+        trend_status: trendStatus
+      };
+    };
+
+    const detectS7 = () => {
+      if (
+        avgOcc === null ||
+        !Number.isFinite(avgOcc) ||
+        avgOcc >= 72 ||
+        !Number.isFinite(rnGrowthOverall) ||
+        rnGrowthOverall >= -0.05 ||
+        overallAdrVariance === null ||
+        !Number.isFinite(overallAdrVariance) ||
+        overallAdrVariance >= -0.03 ||
+        diagnosisType === 'compression_mismanagement'
+      ) {
+        return null;
+      }
+      let failure_type = 'segment_mix_imbalance';
+      if (
+        avgMPI !== null &&
+        avgARI !== null &&
+        avgMPI < 95 &&
+        avgARI < 95
+      ) {
+        failure_type = 'systemic_failure';
+      } else if (avgMPI !== null && avgMPI < 95) failure_type = 'visibility_gap';
+      else if (avgARI !== null && avgARI < 95) failure_type = 'conversion_failure';
+      const diagnosisMap = {
+        systemic_failure:
+          'Fundamental commercial engine stress — MPI and ARI both weak without a compression diagnosis, implying broad demand, conversion, or positioning failure.',
+        visibility_gap:
+          'MPI below threshold suggests distribution and marketing are not generating sufficient competitive demand.',
+        conversion_failure:
+          'MPI acceptable versus ARI weakness — demand exists but the property is not converting at a competitive rate.',
+        segment_mix_imbalance:
+          'Indices are not uniformly weak — investigate whether segment mix and channel allocation misalign with current demand.'
+      };
+      const decisionMap = {
+        systemic_failure:
+          'Run an integrated commercial diagnostic: channel mix, retail BAR ladder, group pace, and OTA contribution in one steering cadence.',
+        visibility_gap:
+          'Prioritize demand generation and upper-funnel investments; audit OTA retail contribution versus direct.',
+        conversion_failure:
+          'Focus on conversion levers: website UX, parity, reviews, and in-market tactical retail promotions with rate integrity.',
+        segment_mix_imbalance:
+          'Rebalance segment allotments versus retail BAR opportunity; validate negotiated and group blocks against forward compression.'
+      };
+      return {
+        scenario_id: 'S7',
+        scenario_name: COMMERCIAL_SCENARIOS.S7_UNCONSTRAINED_UNDERPERFORMANCE.name,
+        failure_type,
+        finding_key: `SYNTH_S7_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: 'high',
+        situation: `Hotel is below 72% occupancy (${avgOcc.toFixed(1)}%) with room nights ${(rnGrowthOverall * 100).toFixed(1)}% vs LY and ADR ${(overallAdrVariance * 100).toFixed(1)}% vs LY while diagnosis is not compression mismanagement.`,
+        diagnosis: diagnosisMap[failure_type] || diagnosisMap.segment_mix_imbalance,
+        str_validation: {
+          verdict: 'multi_index_underperformance',
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation: `MPI ${avgMPI?.toFixed(1)}, ARI ${avgARI?.toFixed(1)}, RGI ${avgRGI?.toFixed(1)} jointly describe the unconstrained softness.`
+        },
+        decision: decisionMap[failure_type] || decisionMap.segment_mix_imbalance,
+        priority: 1,
+        trend_status: trendStatus
+      };
+    };
+
+    const detectS8 = () => {
+      const buckets = Object.keys(segmentMatrix);
+      let bestPair = null;
+      let bestScore = -1;
+      for (let i = 0; i < buckets.length; i += 1) {
+        for (let j = 0; j < buckets.length; j += 1) {
+          if (i === j) continue;
+          const bA = buckets[i];
+          const bB = buckets[j];
+          const A = segmentMatrix[bA];
+          const B = segmentMatrix[bB];
+          if (!A || !B) continue;
+          if (!(A.rnGrowth > 0.08 && B.rnGrowth < -0.08)) continue;
+          if (!(A.tier >= B.tier)) continue;
+          if (Math.abs(revGrowthOverall) >= 0.03) continue;
+          const score = Math.abs(A.rnGrowth) + Math.abs(B.rnGrowth);
+          if (score > bestScore) {
+            bestScore = score;
+            bestPair = { grower: bA, decliner: bB, A, B };
+          }
+        }
+      }
+      if (!bestPair) return null;
+      let cannibalization_type = 'revenue_neutral_pointless';
+      if (revGrowthOverall > 0.02) cannibalization_type = 'revenue_positive_intentional';
+      else if (revGrowthOverall < -0.02) cannibalization_type = 'revenue_negative_destructive';
+      let str_verdict = 'flat_rgi_inefficiency';
+      if (avgRGI !== null && Number.isFinite(avgRGI)) {
+        if (avgRGI >= 100) str_verdict = 'rgi_up_justified_shift';
+        else if (avgRGI < 100) str_verdict = 'flat_rgi_inefficiency';
+      }
+      const decisionText =
+        cannibalization_type === 'revenue_negative_destructive' ||
+        cannibalization_type === 'revenue_neutral_pointless'
+          ? 'Identify whether allotments, negotiated rates, or channel incentives are driving the shift; correct displacement toward higher-quality revenue.'
+          : 'Cannibalization is revenue-positive for now — monitor RGI weekly to ensure the trade remains justified.';
+      const pr =
+        cannibalization_type === 'revenue_negative_destructive'
+          ? 1
+          : cannibalization_type === 'revenue_neutral_pointless'
+            ? 3
+            : 3;
+      return {
+        scenario_id: 'S8',
+        scenario_name: COMMERCIAL_SCENARIOS.S8_SEGMENT_CANNIBALIZATION.name,
+        cannibalization_type,
+        grower_bucket: bestPair.grower,
+        decliner_bucket: bestPair.decliner,
+        finding_key: `SYNTH_S8_${snapKey}`,
+        card_type: 'cross_segment_synthesis',
+        confidence: cannibalization_type === 'revenue_negative_destructive' ? 'high' : 'medium',
+        situation: `${bestPair.A.display_name} is growing room nights while ${bestPair.B.display_name} declines, with total revenue change near flat (${(revGrowthOverall * 100).toFixed(1)}% vs LY).`,
+        diagnosis:
+          cannibalization_type === 'revenue_positive_intentional'
+            ? 'Shift is lifting revenue modestly — likely intentional mix management if RGI holds.'
+            : cannibalization_type === 'revenue_neutral_pointless'
+              ? 'Mix is shifting without revenue gain — inefficient cannibalization of higher-quality segments.'
+              : 'Lower-quality volume is replacing higher-quality rooms and destroying revenue — destructive cannibalization.',
+        str_validation: {
+          verdict: str_verdict,
+          mpi: avgMPI,
+          ari: avgARI,
+          rgi: avgRGI,
+          interpretation:
+            str_verdict === 'rgi_up_justified_shift'
+              ? 'RGI supportive — cannibalization may still be strategically tolerable if monitored.'
+              : 'Flat or weak RGI alongside diverging segment RN — commercial inefficiency signal.'
+        },
+        decision: decisionText,
+        priority: pr,
+        trend_status: trendStatus
+      };
+    };
+
+    const push = (fn) => {
+      const r = fn();
+      if (r) detectedScenarios.push(r);
+    };
+    push(detectS1);
+    push(detectS2);
+    push(detectS3);
+    push(detectS4);
+    push(detectS5);
+    push(detectS6);
+    push(detectS7);
+    push(detectS8);
+
+    detectedScenarios.sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    const primary_story = detectedScenarios[0] || null;
+
+    return {
+      scenarios_detected: detectedScenarios.map((s) => s.scenario_id),
+      scenario_count: detectedScenarios.length,
+      synthesis_cards: detectedScenarios,
+      primary_story,
+      data_quality: {
+        has_segment_data: analysis.length > 0 || Object.keys(segmentMatrix).length > 0,
+        has_str_data: avgMPI !== null,
+        has_forward_data: forwardArr.length > 0,
+        segments_with_signals: focus?.active_signals?.length || 0
+      }
+    };
+  } catch (e) {
+    console.log('buildCrossSegmentSynthesis non-fatal error:', e);
+    return emptyOut();
+  }
+}
+
 // --------------------
 // MAIN HANDLER
 // --------------------
@@ -10225,6 +10973,16 @@ async function handler(req, res) {
       diagnosis
     });
 
+    const crossSegmentSynthesis = buildCrossSegmentSynthesis({
+      pmsRows,
+      strRows,
+      forwardIssues,
+      forecastGapIssues,
+      focus,
+      diagnosis,
+      snapshotYmd: periodMeta.snapshot_date
+    });
+
     const corporateAccountPaceIssues = buildCorporateAccountPaceIssues(
       corporateNormalized,
       periodMeta.snapshot_date
@@ -10292,6 +11050,7 @@ async function handler(req, res) {
       forward_issues: forwardIssues,
       forecast_gap_issues: forecastGapIssues,
       weekly_pickup_delta_issues: weeklyPickupDeltaIssues,
+      cross_segment_synthesis: crossSegmentSynthesis,
       corporate_account_pace_issues: corporateAccountPaceIssues,
       group_pipeline_issues: groupPipelineIssues,
       mix_shift_issues: mixShiftIssues,
@@ -10361,6 +11120,9 @@ if (engineSaveError) {
       ...(Array.isArray(enrichedIssues) ? enrichedIssues : []),
       ...(Array.isArray(forwardIssues) ? forwardIssues : []),
       ...(Array.isArray(forecastGapIssues) ? forecastGapIssues : []),
+      ...(Array.isArray(crossSegmentSynthesis?.synthesis_cards)
+        ? crossSegmentSynthesis.synthesis_cards
+        : []),
       ...(Array.isArray(weeklyPickupDeltaIssues) ? weeklyPickupDeltaIssues : []),
       ...(Array.isArray(corporateAccountPaceIssues) ? corporateAccountPaceIssues : []),
       ...(Array.isArray(groupPipelineIssues) ? groupPipelineIssues : []),
