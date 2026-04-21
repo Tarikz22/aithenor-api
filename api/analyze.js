@@ -601,6 +601,7 @@ const SHEET_ALIASES_CORPORATE = [
   'Account Production'
 ];
 const SHEET_ALIASES_DELPHI = ['Delphi Groups Pipeline', 'Delphi Groups', 'Groups Pipeline'];
+const SHEET_ALIASES_HOTEL_PROFILE = ['Hotel Profile', 'hotel profile', 'Profile', 'HOTEL PROFILE'];
 
 /** Stay / business date column candidates (template-aligned). */
 const INGESTION_DATE_KEYS = [
@@ -1185,7 +1186,62 @@ function normalizeDelphiRowsForIngestion(rowsRaw, snapshotYmd) {
   return { all, counts };
 }
 
+function extractHotelProfileFromWorkbook(workbook) {
+  const empty = {
+    city: null,
+    hotel_name: null,
+    total_rooms: null,
+    currency: null
+  };
+
+  try {
+    if (!workbook || !workbook.Sheets) return empty;
+
+    const sheetName = findSheetByAliases(workbook, SHEET_ALIASES_HOTEL_PROFILE);
+    if (!sheetName) return empty;
+
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) return empty;
+
+    const rawMatrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    if (!Array.isArray(rawMatrix) || !rawMatrix.length) return empty;
+
+    const matchLabel = (cell, label) => normalizeKey(cell) === normalizeKey(label);
+
+    let detectedCity = null;
+    let detectedHotelName = null;
+    let detectedTotalRooms = null;
+    let detectedCurrency = null;
+
+    for (const row of rawMatrix) {
+      if (!Array.isArray(row)) continue;
+      const label = row[0];
+      const value = row[1];
+      if (value === null || value === undefined) continue;
+      const strVal = String(value).trim();
+      if (!strVal) continue;
+
+      if (matchLabel(label, 'City')) detectedCity = strVal;
+      else if (matchLabel(label, 'Hotel Name')) detectedHotelName = strVal;
+      else if (matchLabel(label, 'Total Rooms')) {
+        const n = Number(String(value).replace(/,/g, '').trim());
+        detectedTotalRooms = Number.isFinite(n) ? n : null;
+      } else if (matchLabel(label, 'Currency')) detectedCurrency = strVal;
+    }
+
+    return {
+      city: detectedCity,
+      hotel_name: detectedHotelName,
+      total_rooms: detectedTotalRooms,
+      currency: detectedCurrency
+    };
+  } catch {
+    return empty;
+  }
+}
+
 function buildWorkbookIngestionModel({
+  workbook,
   snapshotYmd,
   strSheetName,
   strRowsRaw,
@@ -1195,11 +1251,18 @@ function buildWorkbookIngestionModel({
   delphiNormalized,
   pmsPaceComparator
 }) {
+  const hotelProfileFields = extractHotelProfileFromWorkbook(workbook);
+
   return {
     snapshot_date: snapshotYmd,
     snapshot_source: 'server_upload_time_utc',
     cutoff_rule: 'stay_date_on_or_before_snapshot_is_actualized; after_snapshot_is_forward',
-    hotel_profile: { ingested: false, note: 'Hotel Profile tab is not read — unchanged by design.' },
+    hotel_profile: {
+      city: hotelProfileFields.city,
+      hotel_name: hotelProfileFields.hotel_name,
+      total_rooms: hotelProfileFields.total_rooms,
+      currency: hotelProfileFields.currency
+    },
     str: {
       sheet_resolved: strSheetName,
       str_actual_only_no_stly: true,
@@ -1231,6 +1294,442 @@ function buildWorkbookIngestionModel({
       delphi: delphiNormalized.all
     }
   };
+}
+
+function daysBetweenYmd(fromYmd, toYmd) {
+  const from = new Date(fromYmd);
+  const to = new Date(toYmd);
+  return Math.round((to - from) / (1000 * 60 * 60 * 24));
+}
+
+function getCityCountryCode(city) {
+  const cityMap = {
+    paris: 'FR',
+    casablanca: 'MA',
+    london: 'GB',
+    dubai: 'AE',
+    madrid: 'ES',
+    barcelona: 'ES',
+    rome: 'IT',
+    milan: 'IT',
+    amsterdam: 'NL',
+    berlin: 'DE',
+    geneva: 'CH',
+    zurich: 'CH',
+    'new york': 'US',
+    'los angeles': 'US',
+    singapore: 'SG',
+    tokyo: 'JP',
+    'hong kong': 'HK',
+    marrakech: 'MA',
+    rabat: 'MA'
+  };
+  const key = String(city || '')
+    .toLowerCase()
+    .trim();
+  return cityMap[key] || 'FR';
+}
+
+function getCityRegion(city) {
+  const regionMap = {
+    casablanca: 'north-africa',
+    marrakech: 'north-africa',
+    rabat: 'north-africa',
+    paris: 'europe',
+    london: 'europe',
+    madrid: 'europe',
+    barcelona: 'europe',
+    rome: 'europe',
+    milan: 'europe',
+    amsterdam: 'europe',
+    berlin: 'europe',
+    geneva: 'europe',
+    zurich: 'europe',
+    dubai: 'middle-east',
+    'new york': 'americas',
+    'los angeles': 'americas',
+    singapore: 'asia',
+    tokyo: 'asia',
+    'hong kong': 'asia'
+  };
+  const key = String(city || '')
+    .toLowerCase()
+    .trim();
+  return regionMap[key] || 'europe';
+}
+
+function buildNewsQuery(city, region) {
+  const cityQueries = {
+    'north-africa':
+      '(Morocco OR Casablanca OR "North Africa") AND ' +
+      '(tourism OR travel OR hotel OR "Middle East conflict" OR ' +
+      '"GCC travel" OR "European tourism")',
+    'middle-east':
+      '(Dubai OR UAE OR "Middle East") AND ' +
+      '(tourism OR travel OR hotel OR conflict OR sanctions)',
+    europe:
+      `(${city} OR "European tourism") AND ` +
+      '(tourism OR travel OR hotel OR "city break" OR events)',
+    americas: `(${city} OR "US travel") AND ` + '(tourism OR travel OR hotel OR events)',
+    asia: `(${city} OR "Asian tourism") AND ` + '(tourism OR travel OR hotel OR events)'
+  };
+  return cityQueries[region] || `${city} tourism travel hotel`;
+}
+
+function getRegionKeywords(region) {
+  const keywords = {
+    'middle-east': [
+      'middle east',
+      'gcc',
+      'gulf',
+      'israel',
+      'iran',
+      'iraq',
+      'syria',
+      'lebanon',
+      'saudi',
+      'dubai',
+      'uae',
+      'qatar'
+    ],
+    'north-africa': ['morocco', 'algeria', 'tunisia', 'egypt', 'libya', 'north africa'],
+    europe: ['europe', 'european', 'eu', 'schengen'],
+    americas: ['america', 'us travel', 'usa', 'canada'],
+    asia: ['asia', 'asian', 'china', 'japan', 'singapore']
+  };
+  return keywords[region] || [];
+}
+
+function classifyNewsArticle(article, city, region) {
+  const title = (article.title || '').toLowerCase();
+  const desc = (article.description || '').toLowerCase();
+  const combined = `${title} ${desc}`;
+  const cityLower = String(city || '').toLowerCase();
+
+  const positiveKeywords = [
+    'tourism boom',
+    'record visitors',
+    'high demand',
+    'sold out',
+    'increase visitors',
+    'growing tourism',
+    'major event',
+    'world cup',
+    'olympics',
+    'expo',
+    'conference',
+    'summit',
+    'fashion week',
+    'film festival',
+    'art fair',
+    'trade fair',
+    'congress'
+  ];
+
+  const negativeKeywords = [
+    'conflict',
+    'war',
+    'attack',
+    'terrorism',
+    'unrest',
+    'cancel',
+    'avoid travel',
+    'warning',
+    'sanctions',
+    'airline cancel',
+    'flight cancel',
+    'travel ban',
+    'recession',
+    'slowdown',
+    'downturn'
+  ];
+
+  let impact = 'neutral';
+  let displacement_opportunity = false;
+
+  if (positiveKeywords.some((k) => combined.includes(k))) impact = 'positive';
+  if (negativeKeywords.some((k) => combined.includes(k))) {
+    const cityInArticle = cityLower && combined.includes(cityLower);
+    const regionKeywords = getRegionKeywords(region);
+    const affectsOurMarket = regionKeywords.some((k) => combined.includes(k));
+
+    if (affectsOurMarket && !cityInArticle) {
+      impact = 'mixed';
+      displacement_opportunity = true;
+    } else if (cityInArticle) {
+      impact = 'negative';
+    } else {
+      impact = 'mixed';
+    }
+  }
+
+  return {
+    title: article.title,
+    source: article.source?.name || 'Unknown',
+    published_at: article.publishedAt,
+    url: article.url,
+    impact,
+    displacement_opportunity,
+    summary: article.description
+  };
+}
+
+function buildDemandOutlook(holidays, signals, city, region) {
+  const positiveCount = signals.filter((s) => s.impact === 'positive').length;
+  const negativeCount = signals.filter((s) => s.impact === 'negative').length;
+  const displacementCount = signals.filter((s) => s.displacement_opportunity).length;
+  const upcomingHolidays = holidays
+    .slice(0, 3)
+    .map((h) => h.name)
+    .join(', ');
+
+  let outlook = '';
+
+  if (upcomingHolidays) {
+    outlook += `Upcoming demand catalysts: ${upcomingHolidays}. `;
+  }
+
+  if (displacementCount > 0) {
+    outlook +=
+      `${displacementCount} news signal(s) suggest ` +
+      `potential displacement demand from competing destinations ` +
+      `toward ${city} — monitor source market performance closely. `;
+  }
+
+  if (negativeCount > 0 && positiveCount === 0) {
+    outlook +=
+      `${negativeCount} negative demand signal(s) detected ` +
+      `for this region. Validate forward pace against market context ` +
+      `before taking pricing action.`;
+  } else if (positiveCount > 0) {
+    outlook +=
+      `${positiveCount} positive demand signal(s) support ` +
+      `rate confidence for the forward window.`;
+  }
+
+  return (
+    outlook ||
+    'No significant demand signals detected for current forward window.'
+  );
+}
+
+async function fetchDemandCalendarData({
+  hotelCode,
+  city,
+  snapshotYmd,
+  forwardWindowDays = 180
+}) {
+  try {
+    const countryCode = getCityCountryCode(city);
+    const snapDate = new Date(`${snapshotYmd}T00:00:00.000Z`);
+    if (Number.isNaN(snapDate.getTime())) {
+      throw new Error('Invalid snapshotYmd');
+    }
+    const year = snapDate.getUTCFullYear();
+    const holidayUrl1 = `https://date.nager.at/api/v3/PublicHolidays/${year}/${countryCode}`;
+    const holidayUrl2 = `https://date.nager.at/api/v3/PublicHolidays/${year + 1}/${countryCode}`;
+
+    const [holRes1, holRes2] = await Promise.all([
+      axios.get(holidayUrl1, { timeout: 5000 }),
+      axios.get(holidayUrl2, { timeout: 5000 })
+    ]);
+
+    const rawHolidayList = [
+      ...(Array.isArray(holRes1.data) ? holRes1.data : []),
+      ...(Array.isArray(holRes2.data) ? holRes2.data : [])
+    ];
+
+    const windowEndDate = new Date(snapDate);
+    windowEndDate.setUTCDate(windowEndDate.getUTCDate() + forwardWindowDays);
+    const windowEndYmd = formatDateToYMD(windowEndDate);
+
+    const holidayDedup = new Map();
+    for (const h of rawHolidayList) {
+      if (!h || !h.date) continue;
+      if (h.date < snapshotYmd || h.date > windowEndYmd) continue;
+      const k = `${h.date}|${h.name || ''}`;
+      if (!holidayDedup.has(k)) holidayDedup.set(k, h);
+    }
+    const holidays = [...holidayDedup.values()].sort((a, b) =>
+      a.date < b.date ? -1 : a.date > b.date ? 1 : 0
+    );
+
+    const public_holidays = holidays.map((h) => ({
+      date: h.date,
+      name: h.localName || h.name,
+      global_name: h.name,
+      type: h.types?.[0] || 'Public',
+      days_from_snapshot: daysBetweenYmd(snapshotYmd, h.date)
+    }));
+
+    const newsApiKey = process.env.NEWS_API_KEY;
+    let articles = [];
+    if (newsApiKey) {
+      const newsUrl =
+        `https://newsapi.org/v2/everything?` +
+        `q=${encodeURIComponent(buildNewsQuery(city, region))}&` +
+        `from=${snapshotYmd}&` +
+        `sortBy=relevancy&` +
+        `language=en&` +
+        `pageSize=10&` +
+        `apiKey=${newsApiKey}`;
+      try {
+        const newsRes = await axios.get(newsUrl, { timeout: 8000 });
+        articles = Array.isArray(newsRes.data?.articles) ? newsRes.data.articles : [];
+      } catch {
+        articles = [];
+      }
+    }
+
+    const classifiedArticles = articles.map((a) =>
+      classifyNewsArticle(a, city, region)
+    );
+
+    const demand_outlook = buildDemandOutlook(
+      holidays,
+      classifiedArticles,
+      city,
+      region
+    );
+
+    return {
+      city,
+      country_code: getCityCountryCode(city),
+      region: getCityRegion(city),
+      snapshot_date: snapshotYmd,
+      forward_window_days: forwardWindowDays,
+      public_holidays,
+      holiday_count: holidays.length,
+      news_signals: classifiedArticles,
+      positive_signals: classifiedArticles.filter((a) => a.impact === 'positive').length,
+      negative_signals: classifiedArticles.filter((a) => a.impact === 'negative').length,
+      displacement_opportunities: classifiedArticles.filter((a) => a.displacement_opportunity)
+        .length,
+      demand_outlook,
+      data_sources: {
+        holidays: 'Nager.Date Public Holiday API',
+        news: newsApiKey ? 'NewsAPI.org' : 'not_configured',
+        last_fetched: new Date().toISOString()
+      }
+    };
+  } catch (err) {
+    return {
+      city,
+      error: err?.message || String(err),
+      public_holidays: [],
+      news_signals: [],
+      demand_outlook: 'Demand calendar data unavailable this upload.',
+      data_sources: { holidays: 'error', news: 'error' }
+    };
+  }
+}
+
+async function persistDemandCalendar(supabaseClient, hotelCode, calendarData) {
+  try {
+    if (!supabaseClient || !hotelCode || !calendarData || typeof calendarData !== 'object') return;
+
+    const city = calendarData.city || null;
+    const snapshotYmd = calendarData.snapshot_date || null;
+    const rows = [];
+
+    for (const holiday of calendarData.public_holidays || []) {
+      if (!holiday?.date) continue;
+      rows.push({
+        hotel_code: hotelCode,
+        city,
+        event_date_start: holiday.date,
+        event_date_end: holiday.date,
+        event_name: holiday.global_name,
+        event_type: 'public_holiday',
+        demand_impact: 'positive',
+        demand_magnitude: 'medium',
+        source_markets: [],
+        destination_effect: 'direct',
+        confidence: 'high',
+        source: 'Nager.Date Public Holiday API',
+        notes: holiday.name
+      });
+    }
+
+    for (const signal of calendarData.news_signals || []) {
+      if (signal.impact === 'neutral' || !snapshotYmd) continue;
+      rows.push({
+        hotel_code: hotelCode,
+        city,
+        event_date_start: snapshotYmd,
+        event_date_end: snapshotYmd,
+        event_name: signal.title?.substring(0, 200) || 'News signal',
+        event_type: 'macro_news',
+        demand_impact: signal.impact,
+        demand_magnitude: 'medium',
+        source_markets: [],
+        destination_effect: signal.displacement_opportunity ? 'displacement' : 'direct',
+        confidence: 'low',
+        source: signal.source,
+        notes: signal.summary?.substring(0, 500)
+      });
+    }
+
+    if (!rows.length) return;
+
+    const { error } = await supabaseClient.from('demand_calendar').upsert(rows, {
+      onConflict: 'hotel_code,event_name,event_date_start'
+    });
+    if (error) console.error('persistDemandCalendar upsert error', error);
+  } catch (err) {
+    console.error('persistDemandCalendar', err?.message || err);
+  }
+}
+
+function enrichForwardCardsWithDemandContext(forwardIssues, calendarData, snapshotYmd) {
+  try {
+    if (!Array.isArray(forwardIssues)) return forwardIssues;
+
+    const cal =
+      calendarData && typeof calendarData === 'object' ? calendarData : {};
+    const ph = Array.isArray(cal.public_holidays) ? cal.public_holidays : [];
+    const newsSignals = Array.isArray(cal.news_signals) ? cal.news_signals : [];
+    const outlook =
+      typeof cal.demand_outlook === 'string'
+        ? cal.demand_outlook
+        : 'No significant demand signals detected for current forward window.';
+
+    return forwardIssues.map((card) => {
+      const ws =
+        card.window_start_date ||
+        card.pace_data?.window_start_ymd ||
+        card.window_start_ymd ||
+        null;
+      const we =
+        card.window_end_date ||
+        card.pace_data?.window_end_ymd ||
+        card.window_end_ymd ||
+        null;
+
+      let qualifying_holidays = [];
+      if (ws && we) {
+        qualifying_holidays = ph.filter((h) => h.date >= ws && h.date <= we);
+      }
+
+      const displacement_signals = newsSignals.filter((s) => s.displacement_opportunity);
+
+      return {
+        ...card,
+        demand_context: {
+          holidays_in_window: qualifying_holidays,
+          holiday_count: qualifying_holidays.length,
+          displacement_signals,
+          demand_outlook: outlook,
+          context_note:
+            qualifying_holidays.length > 0
+              ? `${qualifying_holidays.length} public holiday(s) in this window may accelerate late demand: ${qualifying_holidays.map((h) => h.name).join(', ')}`
+              : null
+        }
+      };
+    });
+  } catch {
+    return forwardIssues;
+  }
 }
 
 function getRowValue(row, candidateKeys) {
@@ -10936,6 +11435,7 @@ async function handler(req, res) {
     );
 
     const workbookIngestion = buildWorkbookIngestionModel({
+      workbook,
       snapshotYmd,
       strSheetName,
       strRowsRaw,
@@ -11098,6 +11598,29 @@ async function handler(req, res) {
       snapshotYmd
     );
 
+    // Phase E: Fetch demand calendar data for hotel city
+    // City comes from hotel profile or defaults to a known city.
+    // Non-fatal — engine continues if this fails.
+    const hotelCity =
+      workbookIngestion?.hotel_profile?.city || 'Casablanca'; // default for current test hotel
+
+    const demandCalendarData = await fetchDemandCalendarData({
+      hotelCode,
+      city: hotelCity,
+      snapshotYmd: periodMeta.snapshot_date,
+      forwardWindowDays: 180
+    });
+
+    // Enrich forward cards with demand context
+    const enrichedForwardIssues = enrichForwardCardsWithDemandContext(
+      forwardIssues,
+      demandCalendarData,
+      periodMeta.snapshot_date
+    );
+
+    // Persist demand calendar to Supabase
+    await persistDemandCalendar(supabase, hotelCode, demandCalendarData);
+
     // Phase 2: Forecast vs OTB gap — runs after forward pace issues.
     // Uses allPmsRows (includes future rows) not just rowsForEngine.
     const forecastGapIssues = buildForecastGapIssues(
@@ -11117,7 +11640,7 @@ async function handler(req, res) {
     const crossSegmentSynthesis = buildCrossSegmentSynthesis({
       pmsRows,
       strRows,
-      forwardIssues,
+      forwardIssues: enrichedForwardIssues,
       forecastGapIssues,
       focus,
       diagnosis,
@@ -11188,7 +11711,8 @@ async function handler(req, res) {
       focus,
       driver,
       issues: isTransientFocus ? enrichedIssues : [],
-      forward_issues: forwardIssues,
+      forward_issues: enrichedForwardIssues,
+      demand_calendar: demandCalendarData,
       forecast_gap_issues: forecastGapIssues,
       weekly_pickup_delta_issues: weeklyPickupDeltaIssues,
       cross_segment_synthesis: crossSegmentSynthesis,
@@ -11259,7 +11783,7 @@ if (engineSaveError) {
 
     const allCardsForTracking = [
       ...(Array.isArray(enrichedIssues) ? enrichedIssues : []),
-      ...(Array.isArray(forwardIssues) ? forwardIssues : []),
+      ...(Array.isArray(enrichedForwardIssues) ? enrichedForwardIssues : []),
       ...(Array.isArray(forecastGapIssues) ? forecastGapIssues : []),
       ...(Array.isArray(crossSegmentSynthesis?.synthesis_cards)
         ? crossSegmentSynthesis.synthesis_cards
