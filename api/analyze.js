@@ -9367,6 +9367,520 @@ async function persistDecisionTracking(supabaseClient, rows) {
   }
 }
 
+function wpdBucketForLeadDays(leadDays) {
+  if (leadDays == null || !Number.isFinite(Number(leadDays))) return null;
+  const ld = Number(leadDays);
+  if (ld >= 1 && ld <= 30) return 'window_1';
+  if (ld >= 31 && ld <= 60) return 'window_2';
+  if (ld >= 61 && ld <= 90) return 'window_3';
+  return null;
+}
+
+function wpdWindowLabel(windowClass) {
+  if (windowClass === 'window_1') return '1–30';
+  if (windowClass === 'window_2') return '31–60';
+  if (windowClass === 'window_3') return '61–90';
+  return windowClass || '';
+}
+
+function wpdMaxLeadForWindowClass(windowClass) {
+  if (windowClass === 'window_1') return 30;
+  if (windowClass === 'window_2') return 60;
+  if (windowClass === 'window_3') return 90;
+  return 0;
+}
+
+function buildWeeklyPickupDeltaIssues({ currentPaceRows, historicalPmsPaceRows, snapshotYmd, diagnosis }) {
+  try {
+    const current = Array.isArray(currentPaceRows) ? currentPaceRows : [];
+    const historical = Array.isArray(historicalPmsPaceRows) ? historicalPmsPaceRows : [];
+    if (!snapshotYmd || !current.length) return [];
+
+    let priorSnapshotDate = null;
+    for (const h of historical) {
+      const sd = h?.snapshot_date;
+      if (!sd || typeof sd !== 'string') continue;
+      if (sd >= snapshotYmd) continue;
+      if (priorSnapshotDate == null || sd > priorSnapshotDate) priorSnapshotDate = sd;
+    }
+    if (!priorSnapshotDate) return [];
+
+    const priorRows = historical.filter((r) => r?.snapshot_date === priorSnapshotDate);
+
+    const sumRn = (rows) => {
+      let s = 0;
+      for (const r of rows) {
+        const n = toFiniteNumberOrNull(r?.rn_on_books_ty);
+        if (n !== null) s += n;
+      }
+      return s;
+    };
+
+    const sumForecastRn = (rows) => {
+      let s = 0;
+      for (const r of rows) {
+        const n = toFiniteNumberOrNull(r?.forecast_room_nights_ty);
+        if (n !== null) s += n;
+      }
+      return s;
+    };
+
+    const forwardCurrent = current.filter(
+      (r) => (r?.future_window_class || '') === 'future_forward' && r?.stay_date_ymd
+    );
+    const forwardPrior = priorRows.filter((r) => r?.stay_date_ymd);
+
+    const cards = [];
+    const windowOrder = ['window_1', 'window_2', 'window_3'];
+
+    for (const windowClass of windowOrder) {
+      const curWin = forwardCurrent.filter((r) => wpdBucketForLeadDays(r?.lead_days_snapshot_to_stay) === windowClass);
+      const priorWin = forwardPrior.filter((r) => wpdBucketForLeadDays(r?.lead_days_snapshot_to_stay) === windowClass);
+
+      const current_rn_otb = sumRn(curWin);
+      const prior_rn_otb = sumRn(priorWin);
+      const forecast_rn = sumForecastRn(curWin);
+
+      const pickup_this_week = current_rn_otb - prior_rn_otb;
+      const gap_to_forecast = forecast_rn - current_rn_otb;
+      const maxLead = wpdMaxLeadForWindowClass(windowClass);
+      const weeks_remaining = maxLead > 0 ? Math.ceil(maxLead / 7) : 0;
+      const required_weekly_pickup =
+        weeks_remaining > 0 && Number.isFinite(gap_to_forecast) ? gap_to_forecast / weeks_remaining : null;
+      const pickup_vs_required =
+        required_weekly_pickup != null &&
+        Number.isFinite(required_weekly_pickup) &&
+        required_weekly_pickup > 0 &&
+        Number.isFinite(pickup_this_week)
+          ? pickup_this_week / required_weekly_pickup
+          : null;
+
+      let gap_direction = 'widening';
+      if (
+        required_weekly_pickup != null &&
+        Number.isFinite(required_weekly_pickup) &&
+        required_weekly_pickup > 0
+      ) {
+        gap_direction = pickup_this_week >= required_weekly_pickup ? 'closing' : 'widening';
+      } else if (pickup_this_week > 0) {
+        gap_direction = 'closing';
+      }
+
+      const priorOk = priorWin.length > 0 && Number.isFinite(prior_rn_otb);
+      if (!priorOk) continue;
+      if (!(gap_to_forecast > 0)) continue;
+      if (!(Math.abs(pickup_this_week) > 0)) continue;
+
+      const windowLabel = wpdWindowLabel(windowClass);
+      const reqStr =
+        required_weekly_pickup != null && Number.isFinite(required_weekly_pickup)
+          ? required_weekly_pickup.toFixed(0)
+          : 'n/a';
+
+      cards.push({
+        finding_key: `WPD_${windowClass}_${snapshotYmd}`,
+        card_type: 'weekly_pickup_delta',
+        window_class: windowClass,
+        snapshot_date: snapshotYmd,
+        signal: {
+          current_rn_otb,
+          prior_rn_otb,
+          pickup_this_week,
+          required_weekly_pickup,
+          pickup_vs_required,
+          gap_to_forecast,
+          gap_direction,
+          weeks_remaining
+        },
+        situation: `Days ${windowLabel}: picked up ${pickup_this_week} RN this week. Required ${reqStr} RN/week to close forecast gap. Gap is ${gap_direction}.`,
+        diagnosis:
+          gap_direction === 'widening'
+            ? `At current pace you will be ${Math.round(gap_to_forecast)} RN short at window close.`
+            : `Pickup rate is sufficient to close the gap if sustained.`,
+        decision:
+          gap_direction === 'widening'
+            ? `Accelerate pickup in Days ${windowLabel}. Review rate positioning and open distribution. Do not wait until window tightens.`
+            : `Maintain current pace. Monitor weekly to confirm trend holds.`,
+        urgency:
+          windowClass === 'window_1' ? 'critical' : windowClass === 'window_2' ? 'high' : 'medium',
+        str_validation: {
+          mpi: diagnosis?.metrics?.avgMPI,
+          ari: diagnosis?.metrics?.avgARI,
+          rgi: diagnosis?.metrics?.avgRGI
+        }
+      });
+    }
+
+    return cards;
+  } catch (e) {
+    console.log('buildWeeklyPickupDeltaIssues non-fatal error:', e);
+    return [];
+  }
+}
+
+function corpParseVarianceFraction(raw) {
+  const n = toNumber(raw);
+  if (n === null || !Number.isFinite(n)) return null;
+  if (Math.abs(n) > 1 && Math.abs(n) <= 100) return n / 100;
+  return n;
+}
+
+function buildCorporateAccountPaceIssues(corporateNormalized, snapshotYmd) {
+  try {
+    const rows = corporateNormalized?.all;
+    if (!snapshotYmd || !Array.isArray(rows) || !rows.length) return [];
+
+    const companyKeys = [
+      'Company Name',
+      'company name',
+      'Company',
+      'Account Name',
+      'Corporate Account'
+    ];
+    const fyLyRnKeys = ['2025 FY Room Nights', '2025 FY RN', 'FY 2025 Room Nights', 'FY LY Room Nights'];
+    const fullProjKeys = [
+      '2026 Full Year RN (Actual + OTB)',
+      '2026 Full Year RN',
+      'Full Year RN',
+      'Projected FY RN'
+    ];
+    const varianceKeys = [
+      'Projected RN vs 2025',
+      'Projected RN vs LY',
+      'Variance vs 2025',
+      'RN Variance vs LY',
+      'Variance %'
+    ];
+    const ytdAdrKeys = ['2026 Actual ADR YTD', 'Actual ADR YTD', 'ADR YTD'];
+    const mgrKeys = ['Account Manager', 'account manager', 'Manager'];
+    const sectorKeys = ['Sector', 'sector', 'Industry'];
+    const commentsKeys = ['Comments / Account Intelligence', 'Comments', 'Account Intelligence', 'Notes'];
+
+    const accounts = [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const company_name = getRowValue(row, companyKeys);
+      if (company_name == null || `${company_name}`.trim() === '') continue;
+
+      const fy_ly_rn = toNumber(getRowValue(row, fyLyRnKeys));
+      const full_year_projected_rn = toNumber(getRowValue(row, fullProjKeys));
+      const variance_vs_ly = corpParseVarianceFraction(getRowValue(row, varianceKeys));
+      if (variance_vs_ly === null || !Number.isFinite(variance_vs_ly)) continue;
+
+      const actual_ytd_adr = toNumber(getRowValue(row, ytdAdrKeys));
+      const account_manager = getRowValue(row, mgrKeys) ?? null;
+      const sector = getRowValue(row, sectorKeys) ?? null;
+      const comments = getRowValue(row, commentsKeys) ?? null;
+
+      let variance_rn = null;
+      if (
+        fy_ly_rn !== null &&
+        full_year_projected_rn !== null &&
+        Number.isFinite(fy_ly_rn) &&
+        Number.isFinite(full_year_projected_rn)
+      ) {
+        variance_rn = full_year_projected_rn - fy_ly_rn;
+      }
+
+      const variance_pct = variance_vs_ly * 100;
+
+      accounts.push({
+        company_name: `${company_name}`.trim(),
+        fy_ly_rn,
+        full_year_projected_rn,
+        variance_vs_ly,
+        variance_pct,
+        variance_rn,
+        actual_ytd_adr,
+        account_manager: account_manager != null ? `${account_manager}`.trim() : null,
+        sector: sector != null ? `${sector}`.trim() : null,
+        comments: comments != null ? `${comments}`.trim() : null
+      });
+    }
+
+    if (!accounts.length) return [];
+
+    const pace_risk = accounts.filter((a) => a.variance_vs_ly < -0.1).sort((a, b) => a.variance_vs_ly - b.variance_vs_ly);
+    const pace_opportunity = accounts
+      .filter((a) => a.variance_vs_ly > 0.1)
+      .sort((a, b) => b.variance_vs_ly - a.variance_vs_ly);
+
+    const out = [];
+
+    if (pace_risk.length) {
+      const accounts_at_risk = pace_risk.map((a) => ({
+        company_name: a.company_name,
+        fy_ly_rn: a.fy_ly_rn,
+        full_year_projected_rn: a.full_year_projected_rn,
+        variance_pct: a.variance_pct,
+        variance_rn: a.variance_rn,
+        account_manager: a.account_manager,
+        sector: a.sector,
+        comments: a.comments
+      }));
+
+      let total_rn_at_risk = 0;
+      for (const a of pace_risk) {
+        if (a.variance_rn != null && Number.isFinite(a.variance_rn) && a.variance_rn < 0) {
+          total_rn_at_risk += a.variance_rn;
+        }
+      }
+
+      const adrVals = pace_risk.map((a) => a.actual_ytd_adr).filter((v) => v != null && Number.isFinite(v));
+      const avgAdr =
+        adrVals.length > 0 ? adrVals.reduce((s, v) => s + v, 0) / adrVals.length : null;
+      const total_revenue_at_risk =
+        avgAdr != null && Number.isFinite(avgAdr) && Number.isFinite(total_rn_at_risk)
+          ? Math.abs(total_rn_at_risk) * avgAdr
+          : 0;
+
+      const revStr = Number.isFinite(total_revenue_at_risk)
+        ? Math.round(total_revenue_at_risk).toLocaleString()
+        : '0';
+
+      out.push({
+        finding_key: `CORP_PACE_RISK_${snapshotYmd}`,
+        card_type: 'corporate_pace_risk',
+        snapshot_date: snapshotYmd,
+        accounts_at_risk,
+        total_rn_at_risk,
+        total_revenue_at_risk,
+        situation: `${accounts_at_risk.length} corporate accounts are tracking behind 2025 pace. Combined RN shortfall: ${total_rn_at_risk} RN. Estimated revenue at risk: €${revStr}.`,
+        diagnosis: `Accounts behind pace may indicate lost RFP, reduced travel budgets, or competitor displacement. Each account requires individual investigation before taking rate or restriction action.`,
+        decision: `Contact account managers for the ${Math.min(3, accounts_at_risk.length)} most at-risk accounts this week. Identify whether shortfall is recoverable or requires replacement volume from alternative segments.`,
+        urgency: total_rn_at_risk < -200 ? 'critical' : 'high'
+      });
+    }
+
+    if (pace_opportunity.length) {
+      const accounts_ahead = pace_opportunity.map((a) => ({
+        company_name: a.company_name,
+        fy_ly_rn: a.fy_ly_rn,
+        full_year_projected_rn: a.full_year_projected_rn,
+        variance_pct: a.variance_pct,
+        variance_rn: a.variance_rn,
+        account_manager: a.account_manager,
+        sector: a.sector,
+        comments: a.comments
+      }));
+
+      out.push({
+        finding_key: `CORP_PACE_OPP_${snapshotYmd}`,
+        card_type: 'corporate_pace_opportunity',
+        snapshot_date: snapshotYmd,
+        accounts_ahead,
+        situation: `${accounts_ahead.length} corporate accounts are tracking ahead of 2025 pace.`,
+        diagnosis: `Strong corporate pace from these accounts provides rate support. Protect their preferred dates from discount dilution.`,
+        decision: `Ensure preferred rate agreements are honoured on compression dates. Do not displace these accounts with lower-rated group or wholesale business.`,
+        urgency: 'medium'
+      });
+    }
+
+    return out;
+  } catch (e) {
+    console.log('buildCorporateAccountPaceIssues non-fatal error:', e);
+    return [];
+  }
+}
+
+function grpArrivalYmdFromRow(row) {
+  const arrivalKeys = [
+    'Arrival Date',
+    'arrival date',
+    'Group Arrival',
+    'Start Date',
+    'Event Start'
+  ];
+  const raw = getRowValue(row, arrivalKeys);
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw.trim())) return raw.trim().slice(0, 10);
+  const d = parseExcelDate(raw);
+  return d ? formatDateToYMD(d) : null;
+}
+
+function grpLeadBucketFromArrival(snapshotYmd, arrivalYmd) {
+  const sSnap = parseYmdToUtcDate(snapshotYmd);
+  const sArr = parseYmdToUtcDate(arrivalYmd);
+  if (!sSnap || !sArr) return null;
+  const lead = Math.round((sArr.getTime() - sSnap.getTime()) / 86400000);
+  if (lead < 1) return null;
+  if (lead >= 1 && lead <= 30) return 'window_1';
+  if (lead >= 31 && lead <= 60) return 'window_2';
+  if (lead >= 61 && lead <= 90) return 'window_3';
+  if (lead >= 91) return 'beyond';
+  return null;
+}
+
+function grpForecastGapRn(issue) {
+  const q = issue?.quantification;
+  const v =
+    q?.gap_rn ??
+    q?.rn_gap ??
+    issue?.gap_rn ??
+    (typeof q?.rn_gap === 'number' ? q.rn_gap : null) ??
+    0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function grpMatchForecastIssue(forecastGapIssues, minLead, maxLead) {
+  const list = Array.isArray(forecastGapIssues) ? forecastGapIssues : [];
+  for (const issue of list) {
+    const fk = String(issue?.finding_key || '');
+    const m = fk.match(/^FCG_(\d+)_(\d+)_/);
+    if (m) {
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      if (a === minLead && b === maxLead) return issue;
+    }
+  }
+  return null;
+}
+
+function buildGroupPipelineIssues(delphiNormalized, forecastGapIssues, snapshotYmd) {
+  try {
+    const rows = delphiNormalized?.all;
+    if (!snapshotYmd || !Array.isArray(rows) || !rows.length) return [];
+
+    const nameKeys = [
+      'Account: Account Name',
+      'Account Name',
+      'Group Name',
+      'Account',
+      'Name'
+    ];
+    const statusKeys = ['Status', 'status', 'Booking Status'];
+    const rnKeys = ['Blended Roomnights', 'Blended Room Nights', 'Room Nights', 'RN'];
+    const roomRevKeys = [
+      'Blended Guestroom Revenue Total',
+      'Guestroom Revenue',
+      'Room Revenue',
+      'Blended Revenue'
+    ];
+    const totalRevKeys = ['Blended Revenue Total', 'Total Revenue', 'Revenue Total'];
+    const segKeys = ['Market Segment', 'Segment', 'market segment'];
+    const ownerKeys = ['Booking: Owner Name', 'Owner Name', 'Sales Manager', 'Owner'];
+
+    const byWindow = new Map();
+    const windowOrder = ['window_1', 'window_2', 'window_3'];
+
+    for (const w of windowOrder) byWindow.set(w, []);
+
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const statusRaw = getRowValue(row, statusKeys);
+      const status = statusRaw != null ? `${statusRaw}`.trim() : '';
+      const sl = status.toLowerCase();
+      if (sl !== 'tentative' && sl !== 'prospect') continue;
+
+      const arrivalYmd = grpArrivalYmdFromRow(row);
+      if (!arrivalYmd) continue;
+      const windowClass = grpLeadBucketFromArrival(snapshotYmd, arrivalYmd);
+      if (!windowClass || windowClass === 'beyond' || !byWindow.has(windowClass)) continue;
+
+      const group_name = getRowValue(row, nameKeys);
+      const room_nights = toNumber(getRowValue(row, rnKeys));
+      const room_revenue = toNumber(getRowValue(row, roomRevKeys));
+      const total_revenue = toNumber(getRowValue(row, totalRevKeys));
+      const market_segment = getRowValue(row, segKeys);
+      const owner_name = getRowValue(row, ownerKeys);
+
+      const is_event_only = room_nights === null || room_nights === 0;
+
+      byWindow.get(windowClass).push({
+        group_name: group_name != null ? `${group_name}`.trim() : null,
+        status,
+        arrival_date: arrivalYmd,
+        room_nights,
+        room_revenue,
+        total_revenue,
+        market_segment: market_segment != null ? `${market_segment}`.trim() : null,
+        owner_name: owner_name != null ? `${owner_name}`.trim() : null,
+        is_event_only
+      });
+    }
+
+    const cards = [];
+    const winParams = [
+      { windowClass: 'window_1', minLead: 1, maxLead: 30, label: '1–30' },
+      { windowClass: 'window_2', minLead: 31, maxLead: 60, label: '31–60' },
+      { windowClass: 'window_3', minLead: 61, maxLead: 90, label: '61–90' }
+    ];
+
+    for (const wp of winParams) {
+      const groupsRaw = byWindow.get(wp.windowClass) || [];
+      if (!groupsRaw.length) continue;
+
+      const fgIssue = grpMatchForecastIssue(forecastGapIssues, wp.minLead, wp.maxLead);
+      if (!fgIssue) continue;
+
+      const forecast_gap_rn = grpForecastGapRn(fgIssue);
+
+      const groups = [...groupsRaw].sort((a, b) => {
+        const ra = a.room_revenue != null && Number.isFinite(a.room_revenue) ? a.room_revenue : -Infinity;
+        const rb = b.room_revenue != null && Number.isFinite(b.room_revenue) ? b.room_revenue : -Infinity;
+        return rb - ra;
+      });
+
+      let tentative_rn = 0;
+      let prospect_rn = 0;
+      let has_event_only_groups = false;
+
+      for (const g of groups) {
+        if (g.is_event_only) has_event_only_groups = true;
+        const addRn = !g.is_event_only && g.room_nights != null && Number.isFinite(g.room_nights) ? g.room_nights : 0;
+        const st = `${g.status}`.toLowerCase();
+        if (st === 'tentative') tentative_rn += addRn;
+        else if (st === 'prospect') prospect_rn += addRn;
+      }
+
+      const total_pipeline_rn = tentative_rn + prospect_rn;
+      const gap_closure_pct =
+        forecast_gap_rn > 0 ? (tentative_rn + prospect_rn) / forecast_gap_rn : 0;
+
+      const top = groups[0];
+      const topRevStr =
+        top?.room_revenue != null && Number.isFinite(top.room_revenue)
+          ? Math.round(top.room_revenue).toLocaleString()
+          : '';
+      const topRnStr =
+        top?.room_nights != null && Number.isFinite(top.room_nights) ? `${top.room_nights}` : '';
+      const priorityName = top?.group_name ? `${top.group_name}` : '';
+
+      cards.push({
+        finding_key: `GRP_PIPELINE_${wp.windowClass}_${snapshotYmd}`,
+        card_type: 'group_pipeline_gap',
+        window_class: wp.windowClass,
+        snapshot_date: snapshotYmd,
+        groups,
+        tentative_rn,
+        prospect_rn,
+        total_pipeline_rn,
+        forecast_gap_rn,
+        gap_closure_pct,
+        has_event_only_groups,
+        situation: `Days ${wp.label}: ${groups.length} groups in pipeline (${tentative_rn} RN Tentative, ${prospect_rn} RN Prospect). Pipeline covers ${(gap_closure_pct * 100).toFixed(0)}% of forecast gap.`,
+        diagnosis:
+          gap_closure_pct >= 0.5
+            ? `Confirming pipeline groups would close the majority of the forecast gap for this window. Priority: convert Tentative to Definite.`
+            : `Pipeline groups are insufficient to close the forecast window gap alone. Group conversion must be combined with transient pace acceleration.`,
+        decision: `Focus on converting the highest-revenue Tentative groups first. ${
+          priorityName
+            ? `Priority: ${priorityName} (${topRnStr} RN, €${topRevStr}).`
+            : ''
+        }`,
+        urgency:
+          wp.windowClass === 'window_1' ? 'critical' : wp.windowClass === 'window_2' ? 'high' : 'medium'
+      });
+    }
+
+    return cards;
+  } catch (e) {
+    console.log('buildGroupPipelineIssues non-fatal error:', e);
+    return [];
+  }
+}
+
 // --------------------
 // MAIN HANDLER
 // --------------------
@@ -9597,6 +10111,24 @@ async function handler(req, res) {
       snapshotYmd
     );
 
+    const weeklyPickupDeltaIssues = buildWeeklyPickupDeltaIssues({
+      currentPaceRows: pmsPaceSnapshotRowsForAnalysis,
+      historicalPmsPaceRows,
+      snapshotYmd: periodMeta.snapshot_date,
+      diagnosis
+    });
+
+    const corporateAccountPaceIssues = buildCorporateAccountPaceIssues(
+      corporateNormalized,
+      periodMeta.snapshot_date
+    );
+
+    const groupPipelineIssues = buildGroupPipelineIssues(
+      delphiNormalized,
+      forecastGapIssues,
+      periodMeta.snapshot_date
+    );
+
     // Phase 2: Segment mix shift detection — runs after forecast gap.
     // Uses actualized pmsRows only. Does not modify any existing output.
     const mixShiftIssues = buildMixShiftIssues(
@@ -9652,6 +10184,9 @@ async function handler(req, res) {
       issues: (focus?.focus_segment || '') === 'retail' ? enrichedIssues : [],
       forward_issues: forwardIssues,
       forecast_gap_issues: forecastGapIssues,
+      weekly_pickup_delta_issues: weeklyPickupDeltaIssues,
+      corporate_account_pace_issues: corporateAccountPaceIssues,
+      group_pipeline_issues: groupPipelineIssues,
       mix_shift_issues: mixShiftIssues,
       monthly_issues: monthlyIssues,
       // ISO-week STR KPI series for engine_json consumers (additive; does not replace any legacy field).
@@ -9710,6 +10245,9 @@ if (engineSaveError) {
       ...(Array.isArray(enrichedIssues) ? enrichedIssues : []),
       ...(Array.isArray(forwardIssues) ? forwardIssues : []),
       ...(Array.isArray(forecastGapIssues) ? forecastGapIssues : []),
+      ...(Array.isArray(weeklyPickupDeltaIssues) ? weeklyPickupDeltaIssues : []),
+      ...(Array.isArray(corporateAccountPaceIssues) ? corporateAccountPaceIssues : []),
+      ...(Array.isArray(groupPipelineIssues) ? groupPipelineIssues : []),
       ...(Array.isArray(mixShiftIssues) ? mixShiftIssues : []),
       ...(Array.isArray(monthlyIssues) ? monthlyIssues : [])
     ];
