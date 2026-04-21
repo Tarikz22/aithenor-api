@@ -9676,49 +9676,90 @@ function corpParseVarianceFraction(raw) {
 function buildCorporateAccountPaceIssues(corporateNormalized, snapshotYmd) {
   try {
     const rows = corporateNormalized?.all;
-    if (!snapshotYmd || !Array.isArray(rows) || !rows.length) return [];
+    console.log('DEBUG corporate rows count:', corporateNormalized?.all?.length);
+    console.log(
+      'DEBUG corporate first row keys:',
+      corporateNormalized?.all?.[0] ? Object.keys(corporateNormalized.all[0]) : 'no rows'
+    );
+    if (!Array.isArray(rows) || !rows.length) return [];
+    if (!snapshotYmd) return [];
 
-    const companyKeys = [
-      'Company Name',
-      'company name',
-      'Company',
-      'Account Name',
-      'Corporate Account'
-    ];
-    const fyLyRnKeys = ['2025 FY Room Nights', '2025 FY RN', 'FY 2025 Room Nights', 'FY LY Room Nights'];
-    const fullProjKeys = [
-      '2026 Full Year RN (Actual + OTB)',
-      '2026 Full Year RN',
-      'Full Year RN',
-      'Projected FY RN'
-    ];
-    const varianceKeys = [
-      'Projected RN vs 2025',
-      'Projected RN vs LY',
-      'Variance vs 2025',
-      'RN Variance vs LY',
-      'Variance %'
-    ];
-    const ytdAdrKeys = ['2026 Actual ADR YTD', 'Actual ADR YTD', 'ADR YTD'];
-    const mgrKeys = ['Account Manager', 'account manager', 'Manager'];
-    const sectorKeys = ['Sector', 'sector', 'Industry'];
-    const commentsKeys = ['Comments / Account Intelligence', 'Comments', 'Account Intelligence', 'Notes'];
+    function readField(row, ...keys) {
+      for (const k of keys) {
+        if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+      }
+      return null;
+    }
+
+    function parseVariance(val) {
+      if (val === null || val === undefined) return null;
+      if (typeof val === 'number') return val;
+      const str = String(val).replace('%', '').trim();
+      const num = parseFloat(str);
+      if (Number.isNaN(num)) return null;
+      return Math.abs(num) > 1 ? num / 100 : num;
+    }
 
     const accounts = [];
     for (const row of rows) {
       if (!row || typeof row !== 'object') continue;
-      const company_name = getRowValue(row, companyKeys);
+
+      const company_name = readField(
+        row,
+        'Company Name',
+        'company_name',
+        'Account Name',
+        'account_name'
+      );
       if (company_name == null || `${company_name}`.trim() === '') continue;
 
-      const fy_ly_rn = toNumber(getRowValue(row, fyLyRnKeys));
-      const full_year_projected_rn = toNumber(getRowValue(row, fullProjKeys));
-      const variance_vs_ly = corpParseVarianceFraction(getRowValue(row, varianceKeys));
+      const fy_ly_rn = toNumber(
+        readField(
+          row,
+          '2025 FY Room Nights',
+          '2025 FY RN',
+          'FY LY Room Nights',
+          'fy_ly_rn',
+          'LY Room Nights'
+        )
+      );
+      const full_year_projected_rn = toNumber(
+        readField(
+          row,
+          '2026 Full Year RN (Actual + OTB)',
+          'Full Year RN (Actual + OTB)',
+          '2026 Full Year RN',
+          'full_year_projected_rn'
+        )
+      );
+      const actual_ytd_rn = toNumber(
+        readField(row, '2026 Actual RN YTD', 'Actual RN YTD', 'actual_ytd_rn')
+      );
+      const actual_ytd_adr = toNumber(
+        readField(row, '2026 Actual ADR YTD', 'Actual ADR YTD', 'actual_ytd_adr')
+      );
+      const variance_vs_ly = parseVariance(
+        readField(
+          row,
+          'Projected RN vs 2025',
+          'Projected RN vs LY',
+          'variance_vs_ly',
+          'Variance vs LY',
+          '% vs LY'
+        )
+      );
       if (variance_vs_ly === null || !Number.isFinite(variance_vs_ly)) continue;
 
-      const actual_ytd_adr = toNumber(getRowValue(row, ytdAdrKeys));
-      const account_manager = getRowValue(row, mgrKeys) ?? null;
-      const sector = getRowValue(row, sectorKeys) ?? null;
-      const comments = getRowValue(row, commentsKeys) ?? null;
+      const account_manager = readField(row, 'Account Manager', 'account_manager', 'Manager');
+      const sector = readField(row, 'Sector', 'sector', 'Industry', 'industry');
+      const comments = readField(
+        row,
+        'Comments / Account Intelligence',
+        'Comments',
+        'comments',
+        'Account Intelligence'
+      );
+      const account_type = readField(row, 'Account Type', 'account_type', 'Type');
 
       let variance_rn = null;
       if (
@@ -9736,13 +9777,15 @@ function buildCorporateAccountPaceIssues(corporateNormalized, snapshotYmd) {
         company_name: `${company_name}`.trim(),
         fy_ly_rn,
         full_year_projected_rn,
+        actual_ytd_rn,
         variance_vs_ly,
         variance_pct,
         variance_rn,
         actual_ytd_adr,
         account_manager: account_manager != null ? `${account_manager}`.trim() : null,
         sector: sector != null ? `${sector}`.trim() : null,
-        comments: comments != null ? `${comments}`.trim() : null
+        comments: comments != null ? `${comments}`.trim() : null,
+        account_type: account_type != null ? `${account_type}`.trim() : null
       });
     }
 
@@ -9888,26 +9931,37 @@ function grpMatchForecastIssue(forecastGapIssues, minLead, maxLead) {
 function buildGroupPipelineIssues(delphiNormalized, forecastGapIssues, snapshotYmd) {
   try {
     const rows = delphiNormalized?.all;
-    if (!snapshotYmd || !Array.isArray(rows) || !rows.length) return [];
+    console.log('DEBUG delphi rows count:', delphiNormalized?.all?.length);
+    console.log(
+      'DEBUG delphi first row keys:',
+      delphiNormalized?.all?.[0] ? Object.keys(delphiNormalized.all[0]) : 'no rows'
+    );
+    if (!Array.isArray(rows) || !rows.length) return [];
+    if (!snapshotYmd) return [];
 
-    const nameKeys = [
-      'Account: Account Name',
-      'Account Name',
-      'Group Name',
-      'Account',
-      'Name'
-    ];
-    const statusKeys = ['Status', 'status', 'Booking Status'];
-    const rnKeys = ['Blended Roomnights', 'Blended Room Nights', 'Room Nights', 'RN'];
-    const roomRevKeys = [
-      'Blended Guestroom Revenue Total',
-      'Guestroom Revenue',
-      'Room Revenue',
-      'Blended Revenue'
-    ];
-    const totalRevKeys = ['Blended Revenue Total', 'Total Revenue', 'Revenue Total'];
-    const segKeys = ['Market Segment', 'Segment', 'market segment'];
-    const ownerKeys = ['Booking: Owner Name', 'Owner Name', 'Sales Manager', 'Owner'];
+    function readField(row, ...keys) {
+      for (const k of keys) {
+        if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+      }
+      return null;
+    }
+
+    function parseArrivalDate(val) {
+      if (!val && val !== 0) return null;
+      if (val instanceof Date) return val;
+      if (typeof val === 'number' && Number.isFinite(val)) {
+        const excelEpoch = new Date(1899, 11, 30);
+        return new Date(excelEpoch.getTime() + val * 86400000);
+      }
+      if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val.trim())) {
+        const d = parseYmdToUtcDate(val.trim().slice(0, 10));
+        return d || null;
+      }
+      const fromExcel = parseExcelDate(val);
+      if (fromExcel instanceof Date && !Number.isNaN(fromExcel.getTime())) return fromExcel;
+      const d = new Date(val);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
 
     const byWindow = new Map();
     const windowOrder = ['window_1', 'window_2', 'window_3'];
@@ -9916,22 +9970,77 @@ function buildGroupPipelineIssues(delphiNormalized, forecastGapIssues, snapshotY
 
     for (const row of rows) {
       if (!row || typeof row !== 'object') continue;
-      const statusRaw = getRowValue(row, statusKeys);
-      const status = statusRaw != null ? `${statusRaw}`.trim() : '';
-      const sl = status.toLowerCase();
-      if (sl !== 'tentative' && sl !== 'prospect') continue;
 
-      const arrivalYmd = grpArrivalYmdFromRow(row);
+      const statusRaw = readField(row, 'Status', 'status', 'Booking Status', 'Group Status');
+      const status = statusRaw != null ? `${statusRaw}`.trim() : '';
+      const statusNorm = String(status || '').toLowerCase().trim();
+      if (statusNorm !== 'tentative' && statusNorm !== 'prospect') continue;
+
+      const arrivalRaw = readField(
+        row,
+        'Arrival Date',
+        'arrival_date',
+        'Arrival',
+        'Check In Date',
+        'Check-in Date'
+      );
+      const arrivalDt = parseArrivalDate(arrivalRaw);
+      let arrivalYmd = null;
+      if (arrivalDt instanceof Date && !Number.isNaN(arrivalDt.getTime())) {
+        arrivalYmd = formatDateToYMD(arrivalDt);
+      }
       if (!arrivalYmd) continue;
+
       const windowClass = grpLeadBucketFromArrival(snapshotYmd, arrivalYmd);
       if (!windowClass || windowClass === 'beyond' || !byWindow.has(windowClass)) continue;
 
-      const group_name = getRowValue(row, nameKeys);
-      const room_nights = toNumber(getRowValue(row, rnKeys));
-      const room_revenue = toNumber(getRowValue(row, roomRevKeys));
-      const total_revenue = toNumber(getRowValue(row, totalRevKeys));
-      const market_segment = getRowValue(row, segKeys);
-      const owner_name = getRowValue(row, ownerKeys);
+      const group_name = readField(
+        row,
+        'Account: Account Name',
+        'Account Name',
+        'group_name',
+        'Group Name',
+        'Name'
+      );
+      const room_nights = toNumber(
+        readField(
+          row,
+          'Blended Roomnights',
+          'Room Nights',
+          'Roomnights',
+          'room_nights',
+          'RN',
+          'Rooms'
+        )
+      );
+      const room_revenue = toNumber(
+        readField(
+          row,
+          'Blended Guestroom Revenue Total',
+          'Guestroom Revenue',
+          'Room Revenue',
+          'room_revenue',
+          'Rooms Revenue'
+        )
+      );
+      const total_revenue = toNumber(
+        readField(row, 'Blended Revenue Total', 'Total Revenue', 'total_revenue', 'Revenue Total')
+      );
+      const market_segment = readField(
+        row,
+        'Market Segment',
+        'market_segment',
+        'Segment',
+        'Group Segment'
+      );
+      const owner_name = readField(
+        row,
+        'Booking: Owner Name',
+        'Owner Name',
+        'owner_name',
+        'Sales Manager',
+        'Owner'
+      );
 
       const is_event_only = room_nights === null || room_nights === 0;
 
