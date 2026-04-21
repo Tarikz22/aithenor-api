@@ -2330,6 +2330,24 @@ function buildPmsPaceComparatorLayer(pmsClassifiedRows, snapshotYmd, stlyTabFlag
 
 /** Supabase table name for slim PMS pace history (see sql/pms_pace_snapshots.sql). */
 const PMS_PACE_SNAPSHOTS_TABLE = 'pms_pace_snapshots';
+const DECISION_TRACKING_TABLE = 'decision_tracking';
+const DECISION_TARGET_METRICS = {
+  pricing_resistance: { metric: 'avg_mpi', direction: 'up' },
+  share_loss: { metric: 'avg_mpi', direction: 'up' },
+  discount_inefficiency: { metric: 'avg_ari', direction: 'up' },
+  compression_mismanagement: { metric: 'avg_rgi', direction: 'up' },
+  visibility_gap: { metric: 'avg_mpi', direction: 'up' },
+  healthy: { metric: 'avg_rgi', direction: 'hold' },
+  forward_pace_risk: { metric: 'rn_on_books_ty', direction: 'up' },
+  forecast_gap: { metric: 'rn_on_books_ty', direction: 'up' },
+  mix_displacement: { metric: 'avg_ari', direction: 'up' },
+  mix_concentration: { metric: 'avg_mpi', direction: 'up' },
+  mix_rate_dilution: { metric: 'avg_ari', direction: 'up' },
+  weekly_pickup_delta: { metric: 'rn_on_books_ty', direction: 'up' },
+  corporate_pace_risk: { metric: 'rn_on_books_ty', direction: 'up' },
+  corporate_pace_opportunity: { metric: 'rn_on_books_ty', direction: 'hold' },
+  group_pipeline_gap: { metric: 'rn_on_books_ty', direction: 'up' }
+};
 /** Smaller than default 500 to reduce single-request statement time (PostgREST upsert). */
 const PMS_PACE_SNAPSHOT_UPSERT_CHUNK_SIZE = 100;
 
@@ -9170,6 +9188,183 @@ function buildActionsPayload({ hotelCode, periodMeta, focus, actions }) {
     driver: action.driver || null,
     segment: focus.focus_segment || null
   }));
+}
+
+function generateDecisionId(hotelCode, findingKey, snapshotYmd) {
+  return `${hotelCode}__${findingKey}__${snapshotYmd}`;
+}
+
+function buildDecisionTrackingRows({ hotelCode, snapshotYmd, allCards }) {
+  const rows = [];
+  if (!hotelCode || !snapshotYmd || !Array.isArray(allCards)) return rows;
+
+  for (const card of allCards) {
+    const findingKey = card?.finding_key;
+    if (findingKey == null || findingKey === '') continue;
+
+    const fromCard =
+      card?.card_type || card?.type || card?.issue_type || null;
+    let cardType = fromCard;
+    if (!cardType) {
+      const fk = String(findingKey);
+      if (fk.startsWith('MIX_')) cardType = 'mix_shift';
+      else if (fk.startsWith('FCG_')) cardType = 'forecast_gap';
+      else if (fk.startsWith('MONTHLY_')) cardType = 'monthly';
+      else if (fk.startsWith('FWD_')) cardType = 'forward_pace';
+      else if (fk.startsWith('WPD_')) cardType = 'weekly_pickup_delta';
+      else if (fk.startsWith('CORP_')) cardType = 'corporate_pace';
+      else if (fk.startsWith('GRP_')) cardType = 'group_pipeline';
+      else cardType = 'retail';
+    }
+
+    const decisionSummary =
+      card?.decision ||
+      card?.gm_decision ||
+      card?.enforcement?.decision_line ||
+      card?.commercial_decision ||
+      card?.analysis?.decision ||
+      null;
+
+    const diagnosisKey =
+      card?.diagnosis_type || card?.analysis?.diagnosis_type || cardType;
+    const targetConfig = DECISION_TARGET_METRICS[diagnosisKey] || null;
+
+    rows.push({
+      hotel_code: hotelCode,
+      finding_key: findingKey,
+      card_type: cardType,
+      snapshot_date: snapshotYmd,
+      decision_summary: decisionSummary,
+      target_metric: targetConfig ? targetConfig.metric : null,
+      target_direction: targetConfig ? targetConfig.direction : null,
+      validation_snapshot: null,
+      outcome_status: 'pending',
+      outcome_delta: null,
+      outcome_notes: null,
+      created_at: new Date().toISOString()
+    });
+  }
+
+  return rows;
+}
+
+async function validatePriorDecisions({
+  supabaseClient,
+  hotelCode,
+  snapshotYmd,
+  currentDiagnosis,
+  currentPaceRows
+}) {
+  try {
+    const { data: pendingRows, error: fetchError } = await supabaseClient
+      .from(DECISION_TRACKING_TABLE)
+      .select('*')
+      .eq('hotel_code', hotelCode)
+      .eq('outcome_status', 'pending')
+      .lt('snapshot_date', snapshotYmd);
+
+    if (fetchError) {
+      console.log('decision_tracking validatePriorDecisions fetch error:', fetchError);
+      return;
+    }
+    if (!Array.isArray(pendingRows) || pendingRows.length === 0) {
+      console.log('decision_tracking validatePriorDecisions: no pending rows');
+      return;
+    }
+
+    let rnSum = 0;
+    if (Array.isArray(currentPaceRows)) {
+      for (const pr of currentPaceRows) {
+        const v = pr?.rn_on_books_ty;
+        const n = Number(v);
+        if (Number.isFinite(n)) rnSum += n;
+      }
+    }
+
+    const currentMetrics = {
+      avg_mpi: toFiniteNumberOrNull(currentDiagnosis?.metrics?.avgMPI),
+      avg_ari: toFiniteNumberOrNull(currentDiagnosis?.metrics?.avgARI),
+      avg_rgi: toFiniteNumberOrNull(currentDiagnosis?.metrics?.avgRGI),
+      rn_on_books_ty: Number.isFinite(rnSum) ? rnSum : null
+    };
+
+    for (const row of pendingRows) {
+      const metricKey = row.target_metric;
+      const direction = row.target_direction;
+      const cur =
+        metricKey != null && Object.prototype.hasOwnProperty.call(currentMetrics, metricKey)
+          ? currentMetrics[metricKey]
+          : null;
+
+      let outcomeStatus = 'pending';
+      let outcomeDelta = null;
+      let outcomeNotes = null;
+      let validationSnapshot = null;
+
+      if (direction === 'hold') {
+        outcomeStatus = 'correct';
+        outcomeDelta = cur;
+        outcomeNotes = null;
+        validationSnapshot = snapshotYmd;
+      } else if (
+        direction === 'up' &&
+        (metricKey === 'avg_mpi' || metricKey === 'avg_ari' || metricKey === 'avg_rgi')
+      ) {
+        if (cur == null || !Number.isFinite(Number(cur))) {
+          outcomeNotes = 'Unable to validate: missing or non-finite metric';
+        } else {
+          const n = Number(cur);
+          outcomeDelta = n;
+          if (n >= 100) outcomeStatus = 'correct';
+          else if (n >= 95) outcomeStatus = 'partial';
+          else outcomeStatus = 'incorrect';
+          validationSnapshot = snapshotYmd;
+        }
+      } else if (direction === 'up' && metricKey === 'rn_on_books_ty') {
+        outcomeNotes = 'rn_on_books_ty direction=up: comparison rules not defined; left pending';
+      } else if (cur == null || !Number.isFinite(Number(cur))) {
+        outcomeNotes = 'Unable to validate: missing or non-finite metric';
+      } else {
+        outcomeNotes = 'Unable to validate: unsupported target_metric/direction pair';
+      }
+
+      const patch = {
+        outcome_status: outcomeStatus,
+        outcome_delta: outcomeDelta,
+        outcome_notes: outcomeNotes,
+        validation_snapshot: validationSnapshot
+      };
+
+      const { error: updateError } = await supabaseClient
+        .from(DECISION_TRACKING_TABLE)
+        .update(patch)
+        .eq('hotel_code', row.hotel_code)
+        .eq('finding_key', row.finding_key)
+        .eq('snapshot_date', row.snapshot_date);
+
+      if (updateError) {
+        console.log('decision_tracking validatePriorDecisions update error:', updateError);
+      }
+    }
+  } catch (e) {
+    console.log('decision_tracking validatePriorDecisions non-fatal error:', e);
+  }
+}
+
+async function persistDecisionTracking(supabaseClient, rows) {
+  try {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+
+    const { error } = await supabaseClient.from(DECISION_TRACKING_TABLE).upsert(rows, {
+      onConflict: 'hotel_code,finding_key,snapshot_date'
+    });
+
+    if (error) {
+      console.log('decision_tracking persistDecisionTracking upsert error:', error);
+    }
+  } catch (e) {
+    console.log('decision_tracking persistDecisionTracking non-fatal error:', e);
+  }
 }
 
 // --------------------
