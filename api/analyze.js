@@ -821,6 +821,48 @@ function getSheetRowsTabular(workbook, aliases) {
   if (!sheetName) return [];
 
   const sheet = workbook.Sheets[sheetName];
+
+  const rawMatrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+  const maxScan = Math.min(7, rawMatrix.length);
+
+  const isPlausibleHeaderRow = (rowArr) => {
+    if (!Array.isArray(rowArr)) return false;
+    let nonEmptyCount = 0;
+    for (const cell of rowArr) {
+      if (cell === null || cell === undefined) continue;
+      const s = String(cell).trim();
+      if (s === '') continue;
+      nonEmptyCount += 1;
+      const upper = s.toUpperCase();
+      if (upper.includes('AITHENOR') || upper.includes('INSTRUCTIONS')) return false;
+      if (s.length > 80) return false;
+    }
+    return nonEmptyCount >= 4;
+  };
+
+  const rowHasMeaningfulValue = (row) => {
+    if (!row || typeof row !== 'object') return false;
+    for (const v of Object.values(row)) {
+      if (v === null || v === undefined) continue;
+      if (typeof v === 'string' && v.trim() === '') continue;
+      return true;
+    }
+    return false;
+  };
+
+  let detectedHeaderRow = null;
+  for (let ri = 0; ri < maxScan; ri += 1) {
+    if (isPlausibleHeaderRow(rawMatrix[ri])) {
+      detectedHeaderRow = ri;
+      break;
+    }
+  }
+
+  if (detectedHeaderRow !== null) {
+    const parsed = XLSX.utils.sheet_to_json(sheet, { range: detectedHeaderRow, defval: null });
+    return parsed.filter(rowHasMeaningfulValue);
+  }
+
   const rowsDefault = XLSX.utils.sheet_to_json(sheet, { defval: null });
   const rowsOffset3 = XLSX.utils.sheet_to_json(sheet, { range: 3, defval: null });
 
