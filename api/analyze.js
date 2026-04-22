@@ -1521,6 +1521,7 @@ async function fetchDemandCalendarData({
 }) {
   try {
     const countryCode = getCityCountryCode(city);
+    const region = getCityRegion(city);
     const snapDate = new Date(`${snapshotYmd}T00:00:00.000Z`);
     if (Number.isNaN(snapDate.getTime())) {
       throw new Error('Invalid snapshotYmd');
