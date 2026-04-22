@@ -1358,22 +1358,87 @@ function getCityRegion(city) {
   return regionMap[key] || 'europe';
 }
 
-function buildNewsQuery(city, region) {
-  const cityQueries = {
-    'north-africa':
-      '(Morocco OR Casablanca OR "North Africa") AND ' +
-      '(tourism OR travel OR hotel OR "Middle East conflict" OR ' +
-      '"GCC travel" OR "European tourism")',
-    'middle-east':
-      '(Dubai OR UAE OR "Middle East") AND ' +
-      '(tourism OR travel OR hotel OR conflict OR sanctions)',
-    europe:
-      `(${city} OR "European tourism") AND ` +
-      '(tourism OR travel OR hotel OR "city break" OR events)',
-    americas: `(${city} OR "US travel") AND ` + '(tourism OR travel OR hotel OR events)',
-    asia: `(${city} OR "Asian tourism") AND ` + '(tourism OR travel OR hotel OR events)'
+function getCitySourceMarkets(city) {
+  const c = String(city || '')
+    .toLowerCase()
+    .trim();
+  const markets = {
+    paris: ['UK', 'USA', 'GCC', 'Germany', 'China', 'Italy'],
+    london: ['USA', 'France', 'Germany', 'GCC', 'Australia'],
+    casablanca: ['France', 'GCC', 'Spain', 'UK', 'USA'],
+    marrakech: ['France', 'UK', 'Spain', 'GCC', 'USA'],
+    dubai: ['UK', 'India', 'Russia', 'GCC', 'USA', 'Europe'],
+    madrid: ['UK', 'Germany', 'France', 'USA', 'Latin America'],
+    barcelona: ['UK', 'Germany', 'France', 'USA', 'Russia'],
+    rome: ['USA', 'UK', 'Germany', 'France', 'Japan'],
+    milan: ['USA', 'UK', 'Germany', 'France', 'GCC'],
+    amsterdam: ['UK', 'USA', 'Germany', 'France', 'Spain'],
+    berlin: ['UK', 'USA', 'France', 'Netherlands', 'Spain'],
+    geneva: ['UK', 'USA', 'GCC', 'France', 'Germany'],
+    zurich: ['Germany', 'UK', 'USA', 'France', 'GCC'],
+    singapore: ['China', 'India', 'Australia', 'UK', 'USA'],
+    tokyo: ['USA', 'China', 'South Korea', 'Australia', 'UK'],
+    'new york': ['UK', 'Canada', 'France', 'Germany', 'Japan'],
+    'los angeles': ['UK', 'Canada', 'Mexico', 'Japan', 'Australia']
   };
-  return cityQueries[region] || `${city} tourism travel hotel`;
+  return markets[c] || ['UK', 'USA', 'Germany', 'France'];
+}
+
+function buildMacroQueries(city, region, sourceMarkets) {
+  const economicQuery =
+    '(inflation OR recession OR "consumer confidence" OR ' +
+    '"cost of living" OR "purchasing power" OR "interest rates" OR ' +
+    '"economic slowdown" OR unemployment OR "stock market") AND ' +
+    '(travel OR tourism OR luxury OR "business travel")';
+
+  const politicalQuery =
+    '(election OR "political uncertainty" OR "political crisis" OR ' +
+    'protests OR "government shutdown" OR sanctions OR ' +
+    '"visa restrictions" OR "travel ban") AND ' +
+    '(travel OR tourism OR flights OR "luxury hotel")';
+
+  const securityQuery =
+    '(war OR conflict OR attack OR terrorism OR ' +
+    '"travel warning" OR "security alert" OR ' +
+    '"airline cancel" OR "flight suspension") AND ' +
+    '(travel OR tourism OR Europe OR ' +
+    sourceMarkets.slice(0, 3).join(' OR ') +
+    ')';
+
+  const competingDestinations = {
+    europe:
+      'Barcelona OR Istanbul OR Dubai OR Cairo OR ' +
+      'Marrakech OR Athens OR Lisbon OR Prague',
+    'north-africa':
+      'Egypt OR Tunisia OR Algeria OR Libya OR ' +
+      'Canary Islands OR Malta OR Cyprus',
+    'middle-east':
+      'Israel OR Lebanon OR Jordan OR Bahrain OR ' +
+      'Turkey OR Cyprus OR Egypt',
+    americas: 'Caribbean OR Mexico OR Cuba OR Brazil OR ' + 'Colombia OR Venezuela',
+    asia: 'China OR Thailand OR Bali OR Japan OR ' + 'Vietnam OR Philippines OR Sri Lanka'
+  };
+
+  const competingQuery =
+    '("travel warning" OR instability OR attack OR ' +
+    'conflict OR strike OR "natural disaster") AND ' +
+    '(' +
+    (competingDestinations[region] || competingDestinations.europe) +
+    ')';
+
+  const currencyQuery =
+    '(currency OR "exchange rate" OR "dollar" OR "euro" OR ' +
+    '"pound sterling" OR "yuan" OR devaluation OR ' +
+    '"financial crisis") AND ' +
+    '(travel OR tourism OR luxury OR "outbound travel")';
+
+  return {
+    economic: { query: economicQuery, type: 'economic' },
+    political: { query: politicalQuery, type: 'political' },
+    security: { query: securityQuery, type: 'security' },
+    displacement: { query: competingQuery, type: 'displacement' },
+    currency: { query: currencyQuery, type: 'currency' }
+  };
 }
 
 function getRegionKeywords(region) {
@@ -1423,7 +1488,13 @@ function classifyNewsArticle(article, city, region) {
     'film festival',
     'art fair',
     'trade fair',
-    'congress'
+    'congress',
+    'election result',
+    'rate cut',
+    'economic recovery',
+    'consumer spending up',
+    'tourism record',
+    'strong demand'
   ];
 
   const negativeKeywords = [
@@ -1441,7 +1512,14 @@ function classifyNewsArticle(article, city, region) {
     'travel ban',
     'recession',
     'slowdown',
-    'downturn'
+    'downturn',
+    'inflation surge',
+    'election uncertainty',
+    'political crisis',
+    'purchasing power',
+    'cost of living crisis',
+    'interest rate hike',
+    'consumer confidence low'
   ];
 
   let impact = 'neutral';
@@ -1569,36 +1647,57 @@ async function fetchDemandCalendarData({
 
     const newsApiKey = process.env.NEWS_API_KEY;
     console.log('DEBUG newsApiKey present:', !!newsApiKey, 'length:', newsApiKey?.length);
-    let articles = [];
+    let classifiedArticles = [];
     if (newsApiKey) {
-      const newsUrl =
-        `https://newsapi.org/v2/everything?` +
-        `q=${encodeURIComponent(buildNewsQuery(city, region))}&` +
-        `from=${snapshotYmd}&` +
-        `sortBy=relevancy&` +
-        `language=en&` +
-        `pageSize=10&` +
-        `apiKey=${newsApiKey}`;
-      try {
-        console.log('DEBUG about to fetch news for:', city, region);
-        const newsResponse = await axios.get(newsUrl, { timeout: 8000 });
-        console.log(
-          'DEBUG news fetch result:',
-          newsResponse?.data?.totalResults,
-          'articles'
-        );
-        articles = Array.isArray(newsResponse.data?.articles)
-          ? newsResponse.data.articles
-          : [];
-      } catch (err) {
-        console.log('DEBUG news fetch error:', err.message);
-        articles = [];
-      }
-    }
+      const allNewsSignals = [];
+      const sourceMarkets = getCitySourceMarkets(city);
+      const queries = buildMacroQueries(city, region, sourceMarkets);
+      const priorityQueries = [queries.security, queries.economic, queries.displacement];
+      const newsFetchStarted = Date.now();
+      const newsBudgetMs = 30000;
 
-    const classifiedArticles = articles.map((a) =>
-      classifyNewsArticle(a, city, region)
-    );
+      for (const q of priorityQueries) {
+        if (Date.now() - newsFetchStarted > newsBudgetMs) break;
+        try {
+          console.log('DEBUG news query type:', q.type);
+          const newsUrl =
+            `https://newsapi.org/v2/everything?` +
+            `q=${encodeURIComponent(q.query)}&` +
+            `from=${snapshotYmd}&` +
+            `sortBy=relevancy&` +
+            `language=en&` +
+            `pageSize=5&` +
+            `apiKey=${newsApiKey}`;
+
+          const newsResponse = await axios.get(newsUrl, { timeout: 8000 });
+          const articles = newsResponse?.data?.articles || [];
+          console.log(`DEBUG news ${q.type}: ${articles.length} articles`);
+
+          for (const article of articles) {
+            const isDisplacement = q.type === 'displacement';
+            const classified = classifyNewsArticle(article, city, region);
+            classified.query_type = q.type;
+            classified.source_markets_affected = sourceMarkets;
+            if (isDisplacement) {
+              classified.displacement_opportunity = true;
+              classified.impact =
+                classified.impact === 'negative' ? 'mixed' : classified.impact;
+            }
+            allNewsSignals.push(classified);
+          }
+        } catch (err) {
+          console.log(`DEBUG news ${q.type} error:`, err?.message || err);
+        }
+      }
+
+      const seen = new Set();
+      classifiedArticles = allNewsSignals.filter((s) => {
+        const key = (s.title || '').substring(0, 60);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
 
     const demand_outlook = buildDemandOutlook(
       holidays,
