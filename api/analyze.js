@@ -1597,10 +1597,6 @@ async function fetchDemandCalendarData({
   snapshotYmd,
   forwardWindowDays = 180
 }) {
-  console.log('DEBUG fetchDemandCalendar called:', {
-    city,
-    snapshotYmd
-  });
   try {
     const countryCode = getCityCountryCode(city);
     const region = getCityRegion(city);
@@ -1646,7 +1642,6 @@ async function fetchDemandCalendarData({
     }));
 
     const newsApiKey = process.env.NEWS_API_KEY;
-    console.log('DEBUG newsApiKey present:', !!newsApiKey, 'length:', newsApiKey?.length);
     let classifiedArticles = [];
     if (newsApiKey) {
       const allNewsSignals = [];
@@ -1659,7 +1654,6 @@ async function fetchDemandCalendarData({
       for (const q of priorityQueries) {
         if (Date.now() - newsFetchStarted > newsBudgetMs) break;
         try {
-          console.log('DEBUG news query type:', q.type);
           const newsUrl =
             `https://newsapi.org/v2/everything?` +
             `q=${encodeURIComponent(q.query)}&` +
@@ -1671,7 +1665,6 @@ async function fetchDemandCalendarData({
 
           const newsResponse = await axios.get(newsUrl, { timeout: 8000 });
           const articles = newsResponse?.data?.articles || [];
-          console.log(`DEBUG news ${q.type}: ${articles.length} articles`);
 
           for (const article of articles) {
             const isDisplacement = q.type === 'displacement';
@@ -1685,8 +1678,7 @@ async function fetchDemandCalendarData({
             }
             allNewsSignals.push(classified);
           }
-        } catch (err) {
-          console.log(`DEBUG news ${q.type} error:`, err?.message || err);
+        } catch {
         }
       }
 
