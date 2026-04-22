@@ -1519,6 +1519,10 @@ async function fetchDemandCalendarData({
   snapshotYmd,
   forwardWindowDays = 180
 }) {
+  console.log('DEBUG fetchDemandCalendar called:', {
+    city,
+    snapshotYmd
+  });
   try {
     const countryCode = getCityCountryCode(city);
     const region = getCityRegion(city);
@@ -1564,6 +1568,7 @@ async function fetchDemandCalendarData({
     }));
 
     const newsApiKey = process.env.NEWS_API_KEY;
+    console.log('DEBUG newsApiKey present:', !!newsApiKey, 'length:', newsApiKey?.length);
     let articles = [];
     if (newsApiKey) {
       const newsUrl =
@@ -1575,9 +1580,18 @@ async function fetchDemandCalendarData({
         `pageSize=10&` +
         `apiKey=${newsApiKey}`;
       try {
-        const newsRes = await axios.get(newsUrl, { timeout: 8000 });
-        articles = Array.isArray(newsRes.data?.articles) ? newsRes.data.articles : [];
-      } catch {
+        console.log('DEBUG about to fetch news for:', city, region);
+        const newsResponse = await axios.get(newsUrl, { timeout: 8000 });
+        console.log(
+          'DEBUG news fetch result:',
+          newsResponse?.data?.totalResults,
+          'articles'
+        );
+        articles = Array.isArray(newsResponse.data?.articles)
+          ? newsResponse.data.articles
+          : [];
+      } catch (err) {
+        console.log('DEBUG news fetch error:', err.message);
         articles = [];
       }
     }
