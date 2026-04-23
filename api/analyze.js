@@ -11810,6 +11810,32 @@ async function handler(req, res) {
       str_weekly_series.push(...weeklyParts);
     }
 
+    // Store daily STR rows for NL query access
+    // Only store the fields needed — not the full raw row
+    const str_daily_series = Array.isArray(strRows)
+      ? strRows.map(row => {
+          const ymd = getRowStayDateYmd(row);
+          return {
+            date: ymd,
+            day_of_week: row['Day of Week'] || row['day_of_week'] || null,
+            hotel_occ: row['Hotel Occupancy %'] ||
+                       row['Occupancy %'] || null,
+            mpi: row['MPI'] || row['MPI (Index)'] ||
+                 row['MPI Index'] || null,
+            ari: row['ARI'] || row['ARI (Index)'] ||
+                 row['ARI Index'] || null,
+            rgi: row['RGI'] || row['RGI (Index)'] ||
+                 row['RGI Index'] || null,
+            hotel_adr: row['Hotel ADR'] || row['hotel_adr'] || null,
+            comp_adr: row['Comp Set ADR'] || row['comp_adr'] || null,
+            hotel_revpar: row['Hotel RevPAR'] ||
+                          row['hotel_revpar'] || null,
+            comp_revpar: row['Comp Set RevPAR'] ||
+                         row['comp_revpar'] || null
+          };
+        }).filter(r => r.date)
+      : [];
+
     const enginePayload = {
       success: true,
       detection,
@@ -11828,6 +11854,7 @@ async function handler(req, res) {
       monthly_issues: monthlyIssues,
       // ISO-week STR KPI series for engine_json consumers (additive; does not replace any legacy field).
       str_weekly_series,
+      str_daily_series,
       retail_temporal:
         isTransientFocus && retailTemporalMeta ? retailTemporalMeta : null,
       total_opportunity: totalOpportunity,
