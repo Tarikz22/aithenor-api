@@ -185,7 +185,7 @@ function getSegmentRatingTier(bucket) {
  * @param {string}   periodStart - period start YYYY-MM-DD (from periodMeta)
  * @param {string}   periodEnd   - period end YYYY-MM-DD (from periodMeta)
  */
-function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
+function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd, diagnosis) {
 
   // --- Guard: need actualized PMS rows ---
   const rows = (pmsRows || []).filter(r =>
@@ -370,11 +370,12 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
             .join('\n\n'),
           enforced_decision_line: decisionLine,
           enforced_execution_actions: executionActions,
+          // Surface period STR indices on mix-shift retail cards from the same diagnosis.metrics used elsewhere.
           card_metrics: {
-            avgMPI: null,
-            avgARI: null,
-            avgRGI: null,
-            avgOcc: null
+            avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
+            avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
+            avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
+            avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
           },
           quantification: {
             loser_segment:      loser.displayName,
@@ -457,8 +458,12 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
       commercial_narrative: [signalPara, analysisPara].join('\n\n'),
       enforced_decision_line: decisionLine,
       enforced_execution_actions: executionActions,
+      // Surface period STR indices on mix-shift retail cards from the same diagnosis.metrics used elsewhere.
       card_metrics: {
-        avgMPI: null, avgARI: null, avgRGI: null, avgOcc: null
+        avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
+        avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
+        avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
+        avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
       },
       quantification: {
         dominant_segment:   seg.displayName,
@@ -545,8 +550,12 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd) {
         commercial_narrative: [signalPara, analysisPara].join('\n\n'),
         enforced_decision_line: decisionLine,
         enforced_execution_actions: executionActions,
+        // Surface period STR indices on mix-shift retail cards from the same diagnosis.metrics used elsewhere.
         card_metrics: {
-          avgMPI: null, avgARI: null, avgRGI: null, avgOcc: null
+          avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
+          avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
+          avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
+          avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
         },
         quantification: {
           segment:          seg.displayName,
@@ -2254,9 +2263,26 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
   for (const row of segment_analysis) {
     const bucket = row.segment;
     const types = [];
-    if (Math.abs(row.rnGrowth) > 0.08) types.push('volume');
-    if (Math.abs(row.adrVariance) > 0.05) types.push('rate');
-    if (Math.abs(row.shareShift) > 0.02) types.push('mix');
+    // Recalibrated thresholds + “two of three at half strength” so segment signals are not over-filtered.
+    const absRn = Math.abs(row.rnGrowth);
+    const absAdr = Math.abs(row.adrVariance);
+    const absShare = Math.abs(row.shareShift);
+    const halfRn = absRn > 0.015;
+    const halfAdr = absAdr > 0.01;
+    const halfShare = absShare > 0.01;
+    const twoAtHalf =
+      (halfRn ? 1 : 0) + (halfAdr ? 1 : 0) + (halfShare ? 1 : 0) >= 2;
+    const qualifies =
+      absRn > 0.03 || absAdr > 0.02 || absShare > 0.015 || twoAtHalf;
+    if (!qualifies) continue;
+    if (absRn > 0.03) types.push('volume');
+    if (absAdr > 0.02) types.push('rate');
+    if (absShare > 0.015) types.push('mix');
+    if (!types.length && twoAtHalf) {
+      if (halfRn) types.push('volume');
+      if (halfAdr) types.push('rate');
+      if (halfShare) types.push('mix');
+    }
     if (!types.length) continue;
     active_signals.push({
       bucket,
@@ -4918,8 +4944,8 @@ function materializeRetailEpisode(ep, focus) {
 
   const finding_key = episodeFindingKey(ep.family, ep.startYmd, ep.endYmd);
   const lib = pickRetailLibraryActionsForFamily(ep.family);
-  const cappedLib = lib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
-  const pri = cappedLib.some((a) => a.priority === 'high') ? 'high' : 'medium';
+  // Cap after dedupe in enrichRetailIssue — pass full library list through _library_actions.
+  const pri = lib.some((a) => a.priority === 'high') ? 'high' : 'medium';
   const chain = ep.narrative_chain || {};
   const am = aggMetrics;
   const mpiF = toFiniteNumberOrNull(am?.avgMPI);
@@ -4984,7 +5010,7 @@ function materializeRetailEpisode(ep, focus) {
     expected_outcome:
       expectedOutcomeText || RETAIL_ISSUE_EXPECTED_OUTCOMES[ep.family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
     rule_triggered: ep.family,
-    _library_actions: cappedLib,
+    _library_actions: lib,
     episode_week_start: ep.startYmd,
     episode_week_end: ep.endYmd,
     episode_week_keys: ep.weekKeys,
@@ -6050,8 +6076,8 @@ function detectRetailIssueSpecs(diagnosis, focus, driver) {
 function materializeRetailIssue(spec, diagnosis, focus) {
   const { family, primary_driver } = spec;
   const lib = pickRetailLibraryActionsForFamily(family);
-  const cappedLib = lib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
-  const pri = cappedLib.some((a) => a.priority === 'high') ? 'high' : 'medium';
+  // Cap after dedupe in enrichRetailIssue — pass full library list through _library_actions.
+  const pri = lib.some((a) => a.priority === 'high') ? 'high' : 'medium';
 
   return {
     finding_key: retailIssueFindingKey(family),
@@ -6065,7 +6091,7 @@ function materializeRetailIssue(spec, diagnosis, focus) {
     expected_outcome:
       RETAIL_ISSUE_EXPECTED_OUTCOMES[family] || RETAIL_ISSUE_EXPECTED_OUTCOMES.share_loss_fallback,
     rule_triggered: family,
-    _library_actions: cappedLib,
+    _library_actions: lib,
     card_metrics: snapshotCardMetricsFromDiagnosisLike(diagnosis),
     segment_attribution_summary: spec.segment_attribution_summary || null,
     daily_validation_summary: spec.daily_validation_summary || null,
@@ -6460,7 +6486,20 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
 function enrichRetailIssue(issue, ctx) {
   const { diagnosis, focus, detection, pmsRows, strRows, period_start, period_end } = ctx;
   const proxy = issueProxyDriver(issue);
-  const actions = (issue._library_actions || []).map((row) => {
+  // Deduplicate library rows by action_id (first wins) per issue, then cap — MAX_ACTIONS_PER_RETAIL_ISSUE applies only after dedupe.
+  const libIn = issue._library_actions || [];
+  const seenActionIds = new Set();
+  const dedupedLib = [];
+  for (const row of libIn) {
+    const aid = row?.action_id;
+    if (aid != null && aid !== '') {
+      if (seenActionIds.has(aid)) continue;
+      seenActionIds.add(aid);
+    }
+    dedupedLib.push(row);
+  }
+  const cappedLib = dedupedLib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
+  const actions = cappedLib.map((row) => {
     const base = row.action_id ? mapLibraryRowToActionShape(row) : { ...row };
     return {
       ...base,
@@ -8084,7 +8123,13 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       commercial_narrative: narrative,
       enforced_decision_line: enforcedDecisionLine,
       enforced_execution_actions,
-      card_metrics: { avgMPI: null, avgARI: null, avgRGI: null, avgOcc: null },
+      // Forward retail cards reuse period STR indices from diagnosis.metrics (pace fields stay in pace_data).
+      card_metrics: {
+        avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
+        avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
+        avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
+        avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
+      },
       temporal_layer: 'forward_otb',
       window_label: winLab,
       forward_window: m.forward_window,
@@ -10887,21 +10932,22 @@ function buildCrossSegmentSynthesis({
     }
 
     const getSegment = (bucket) => segmentMatrix[bucket] || null;
+    // Align scenario segment RN / ADR gates with recalibrated active_signals sensitivity (was 0.08 / 0.05).
     const segmentGrowingRN = (bucket) => {
       const g = getSegment(bucket);
-      return g != null && g.rnGrowth > 0.08;
+      return g != null && g.rnGrowth > 0.03;
     };
     const segmentDecliningRN = (bucket) => {
       const g = getSegment(bucket);
-      return g != null && g.rnGrowth < -0.08;
+      return g != null && g.rnGrowth < -0.03;
     };
     const adrDiluted = (bucket) => {
       const g = getSegment(bucket);
-      return g != null && g.adrVariance < -0.05;
+      return g != null && g.adrVariance < -0.02;
     };
     const adrStrong = (bucket) => {
       const g = getSegment(bucket);
-      return g != null && g.adrVariance > 0.05;
+      return g != null && g.adrVariance > 0.02;
     };
 
     const overallAdrTY = toFiniteNumberOrNull(focus?.overall_adr_ty);
@@ -11479,6 +11525,186 @@ function buildCrossSegmentSynthesis({
   }
 }
 
+/**
+ * Single-run commercial verdict for hero summary (additive payload field).
+ * Uses only supplied inputs — omits narrative clauses when backing numbers are absent.
+ */
+function buildCommercialVerdict({
+  focus,
+  driver,
+  diagnosis,
+  forwardIssues,
+  forecastGapIssues,
+  corporateAccountPaceIssues,
+  crossSegmentSynthesis,
+  strRows
+}) {
+  const dm = diagnosis?.metrics || {};
+  const avgMPI = toFiniteNumberOrNull(dm.avgMPI);
+  const avgARI = toFiniteNumberOrNull(dm.avgARI);
+  const avgRGI = toFiniteNumberOrNull(dm.avgRGI);
+  const avgOcc = toFiniteNumberOrNull(dm.avgOcc);
+  const oav = toFiniteNumberOrNull(focus?.overall_adr_variance);
+  const enginePd = driver?.primary_driver || null;
+  const ownerDept =
+    (enginePd && OWNER_DEPARTMENT_BY_DRIVER[enginePd]) || 'Commercial';
+
+  const corpCards = Array.isArray(corporateAccountPaceIssues) ? corporateAccountPaceIssues : [];
+  let leadCorp = null;
+  for (const c of corpCards) {
+    const rev = c?.total_revenue_at_risk;
+    const acc = c?.accounts_at_risk;
+    if (Array.isArray(acc) && acc.length && typeof rev === 'number' && rev > 500000) {
+      leadCorp = c;
+      break;
+    }
+  }
+
+  const fwdList = Array.isArray(forwardIssues) ? forwardIssues : [];
+  const windowsBehind = new Set();
+  const paceVals = [];
+  for (const iss of fwdList) {
+    const w = iss?.forward_window;
+    const pg = toFiniteNumberOrNull(iss?.pace_data?.pace_gap_pct);
+    if (pg !== null) paceVals.push(pg);
+    if (w >= 1 && w <= 3 && pg !== null && pg < 0) windowsBehind.add(w);
+  }
+  const allThreeForwardBehindLY =
+    windowsBehind.has(1) && windowsBehind.has(2) && windowsBehind.has(3);
+  const avgForwardPace =
+    paceVals.length > 0 ? paceVals.reduce((a, b) => a + b, 0) / paceVals.length : null;
+
+  const strPresent =
+    Array.isArray(strRows) &&
+    strRows.length > 0 &&
+    (avgMPI !== null || avgARI !== null || avgRGI !== null || avgOcc !== null);
+  const forwardPresent = fwdList.length > 0;
+  const corporatePresent = corpCards.length > 0;
+  let confidence = 'low';
+  if (strPresent && forwardPresent && corporatePresent) confidence = 'high';
+  else if ((strPresent && forwardPresent) || (strPresent && corporatePresent) || (forwardPresent && corporatePresent)) {
+    confidence = 'medium';
+  }
+
+  const sentences = [];
+
+  if (leadCorp) {
+    const acctN = leadCorp.accounts_at_risk.length;
+    const revN = Math.round(leadCorp.total_revenue_at_risk || 0);
+    sentences.push(
+      `Corporate production pace shows ${acctN} account${acctN === 1 ? '' : 's'} materially behind last year, with combined revenue still at an estimated €${revN.toLocaleString('en-GB')} risk in the outlook.`
+    );
+    sentences.push(
+      'The immediate commercial exposure is pipeline volume at contracted accounts, not a hypothetical retail index move.'
+    );
+  }
+
+  if (allThreeForwardBehindLY) {
+    sentences.push(
+      'Forward OTB for the first three stay windows is behind the same-period last-year reference on room nights, so the near-term gap is realised booking volume in the known horizon.'
+    );
+  }
+
+  if (
+    avgARI !== null &&
+    avgARI > 100 &&
+    avgMPI !== null &&
+    avgMPI >= 98 &&
+    avgMPI <= 102
+  ) {
+    sentences.push(
+      'ADR index is holding above parity while MPI sits within a tight band around 100 — treat this as rate holding with a volume-and-demand capture problem, not a pricing-led problem.'
+    );
+  }
+
+  if (oav !== null && oav > 0) {
+    sentences.push(
+      'Actualised blended ADR is ahead of last year, which confirms the current rate posture is delivering before any MPI softness is reframed as accidental overpricing.'
+    );
+  }
+
+  const ps = crossSegmentSynthesis?.primary_story;
+  if (sentences.length < 2 && ps?.situation && typeof ps.situation === 'string') {
+    sentences.push(ps.situation);
+  }
+
+  let verdict_text = sentences.slice(0, 3).join(' ').trim();
+  if (!verdict_text) {
+    verdict_text = `Commercial focus remains anchored on the engine primary lever (${enginePd || 'portfolio strategy'}) with the current STR and segment read.`;
+  }
+
+  const headline_numbers = [];
+  const pushHeadline = (value, label, direction) => {
+    if (headline_numbers.length >= 4) return;
+    const n = toFiniteNumberOrNull(value);
+    if (n === null) return;
+    headline_numbers.push({ value: n, label, direction });
+  };
+  pushHeadline(avgMPI, 'MPI index', avgMPI >= 100 ? 'positive' : 'negative');
+  pushHeadline(avgARI, 'ARI index', avgARI >= 100 ? 'positive' : 'negative');
+  pushHeadline(avgRGI, 'RGI index', avgRGI >= 100 ? 'positive' : 'negative');
+  pushHeadline(avgOcc, 'Occupancy %', avgOcc >= 72 ? 'positive' : 'negative');
+  pushHeadline(
+    leadCorp?.total_revenue_at_risk,
+    'Corporate revenue at risk (est.)',
+    'negative'
+  );
+  pushHeadline(
+    avgForwardPace,
+    'Avg forward pace vs reference (%, all issued windows)',
+    avgForwardPace !== null && avgForwardPace >= 0 ? 'positive' : 'negative'
+  );
+  const fcg0 = Array.isArray(forecastGapIssues) ? forecastGapIssues[0] : null;
+  const fcgRnPct = toFiniteNumberOrNull(fcg0?.quantification?.rn_gap_pct);
+  pushHeadline(
+    fcgRnPct,
+    'Forecast gap RN gap % (lead card)',
+    fcgRnPct === null ? 'neutral' : fcgRnPct >= 0 ? 'positive' : 'negative'
+  );
+  pushHeadline(focus?.active_signals?.length, 'Active PMS segment signal rows', 'neutral');
+  pushHeadline(fwdList.length, 'Forward OTB issue cards issued', 'neutral');
+  pushHeadline(corpCards.length, 'Corporate pace cards issued', 'neutral');
+  pushHeadline(
+    crossSegmentSynthesis?.scenario_count,
+    'Cross-segment synthesis scenarios',
+    'neutral'
+  );
+  pushHeadline(paceVals.length, 'Forward windows with pace % computed', 'neutral');
+  pushHeadline(Array.isArray(strRows) ? strRows.length : null, 'STR daily rows ingested', 'neutral');
+  pushHeadline(
+    Array.isArray(forecastGapIssues) ? forecastGapIssues.length : null,
+    'Forecast gap cards issued',
+    'neutral'
+  );
+
+  let primary_decision = '';
+  if (leadCorp && typeof leadCorp.decision === 'string' && leadCorp.decision.trim()) {
+    const topM = leadCorp.accounts_at_risk[0]?.account_manager || 'the named account manager';
+    primary_decision = `${topM} must execute this week: ${leadCorp.decision.trim()}`;
+  } else if (allThreeForwardBehindLY) {
+    primary_decision = `${ownerDept} must chair a next-90-day OTB recovery cadence versus last year with segment owners accountable for weekly pickup deltas, starting this week.`;
+  } else if (
+    avgARI !== null &&
+    avgARI > 100 &&
+    avgMPI !== null &&
+    avgMPI >= 98 &&
+    avgMPI <= 102
+  ) {
+    primary_decision = `${OWNER_DEPARTMENT_BY_DRIVER.visibility || 'Revenue & Marketing'} must own demand-generation and conversion checkpoints this week while ${ownerDept} holds rate floors steady.`;
+  } else if (oav !== null && oav > 0) {
+    primary_decision = `${ownerDept} must defend the working rate strategy this week while volume tactics are sequenced explicitly against MPI, not by reopening headline price cuts.`;
+  } else {
+    primary_decision = `${ownerDept} must decide the single highest-impact move for the declared primary lever (${enginePd || 'commercial'}) this week and record ownership plus a Friday checkpoint.`;
+  }
+
+  return {
+    verdict_text,
+    headline_numbers,
+    primary_decision,
+    confidence
+  };
+}
+
 // --------------------
 // MAIN HANDLER
 // --------------------
@@ -11595,6 +11821,27 @@ async function handler(req, res) {
         period_start: periodMeta.period_start,
         period_end: periodMeta.period_end
       };
+      // Align each retail issue’s declared driver with the single engine primary_driver; stash the card-level label as secondary_driver when it differed.
+      const enginePrimaryDriver = driver?.primary_driver ?? null;
+      if (Array.isArray(rawIssues) && enginePrimaryDriver != null && enginePrimaryDriver !== '') {
+        for (const ri of rawIssues) {
+          const hasOwnPrimary =
+            ri != null && Object.prototype.hasOwnProperty.call(ri, 'primary_driver');
+          if (!hasOwnPrimary || ri.primary_driver == null || ri.primary_driver === '') {
+            ri.primary_driver = enginePrimaryDriver;
+            const d0 = ri.driver;
+            if (d0 != null && d0 !== '' && d0 !== enginePrimaryDriver) ri.secondary_driver = d0;
+            ri.driver = enginePrimaryDriver;
+          } else if (ri.primary_driver !== enginePrimaryDriver) {
+            ri.secondary_driver = ri.primary_driver;
+            ri.primary_driver = enginePrimaryDriver;
+            ri.driver = enginePrimaryDriver;
+          } else {
+            ri.primary_driver = enginePrimaryDriver;
+            ri.driver = enginePrimaryDriver;
+          }
+        }
+      }
       enrichedIssues = rawIssues.map((issue) => enrichRetailIssue(issue, enrichCtx));
       enrichedActions = flattenIssuesToLegacyActions(enrichedIssues);
     } else {
@@ -11770,7 +12017,8 @@ async function handler(req, res) {
       pmsRows,
       snapshotYmd,
       periodMeta.period_start,
-      periodMeta.period_end
+      periodMeta.period_end,
+      diagnosis
     );
 
     // Phase 2: Monthly granularity — run after the main weekly pipeline is complete.
@@ -11849,6 +12097,16 @@ async function handler(req, res) {
       weekly_pickup_delta_issues: weeklyPickupDeltaIssues,
       cross_segment_synthesis: crossSegmentSynthesis,
       corporate_account_pace_issues: corporateAccountPaceIssues,
+      commercial_verdict: buildCommercialVerdict({
+        focus,
+        driver,
+        diagnosis,
+        forwardIssues: enrichedForwardIssues,
+        forecastGapIssues,
+        corporateAccountPaceIssues,
+        crossSegmentSynthesis,
+        strRows
+      }),
       group_pipeline_issues: groupPipelineIssues,
       mix_shift_issues: mixShiftIssues,
       monthly_issues: monthlyIssues,
