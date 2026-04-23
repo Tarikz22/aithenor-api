@@ -370,12 +370,12 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd, diagn
             .join('\n\n'),
           enforced_decision_line: decisionLine,
           enforced_execution_actions: executionActions,
-          // Surface period STR indices on mix-shift retail cards from the same diagnosis.metrics used elsewhere.
           card_metrics: {
-            avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
-            avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
-            avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
-            avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
+            avgMPI: diagnosis?.metrics?.avgMPI ?? null,
+            avgARI: diagnosis?.metrics?.avgARI ?? null,
+            avgRGI: diagnosis?.metrics?.avgRGI ?? null,
+            avgOcc: diagnosis?.metrics?.avgOcc ?? null,
+            trend_status: diagnosis?.trend_status ?? 'stable'
           },
           quantification: {
             loser_segment:      loser.displayName,
@@ -458,12 +458,12 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd, diagn
       commercial_narrative: [signalPara, analysisPara].join('\n\n'),
       enforced_decision_line: decisionLine,
       enforced_execution_actions: executionActions,
-      // Surface period STR indices on mix-shift retail cards from the same diagnosis.metrics used elsewhere.
       card_metrics: {
-        avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
-        avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
-        avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
-        avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
+        avgMPI: diagnosis?.metrics?.avgMPI ?? null,
+        avgARI: diagnosis?.metrics?.avgARI ?? null,
+        avgRGI: diagnosis?.metrics?.avgRGI ?? null,
+        avgOcc: diagnosis?.metrics?.avgOcc ?? null,
+        trend_status: diagnosis?.trend_status ?? 'stable'
       },
       quantification: {
         dominant_segment:   seg.displayName,
@@ -550,12 +550,12 @@ function buildMixShiftIssues(pmsRows, snapshotYmd, periodStart, periodEnd, diagn
         commercial_narrative: [signalPara, analysisPara].join('\n\n'),
         enforced_decision_line: decisionLine,
         enforced_execution_actions: executionActions,
-        // Surface period STR indices on mix-shift retail cards from the same diagnosis.metrics used elsewhere.
         card_metrics: {
-          avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
-          avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
-          avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
-          avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
+          avgMPI: diagnosis?.metrics?.avgMPI ?? null,
+          avgARI: diagnosis?.metrics?.avgARI ?? null,
+          avgRGI: diagnosis?.metrics?.avgRGI ?? null,
+          avgOcc: diagnosis?.metrics?.avgOcc ?? null,
+          trend_status: diagnosis?.trend_status ?? 'stable'
         },
         quantification: {
           segment:          seg.displayName,
@@ -6486,20 +6486,8 @@ function buildNarrativeEnforcedExecutionActions(issue, pmsRows) {
 function enrichRetailIssue(issue, ctx) {
   const { diagnosis, focus, detection, pmsRows, strRows, period_start, period_end } = ctx;
   const proxy = issueProxyDriver(issue);
-  // Deduplicate library rows by action_id (first wins) per issue, then cap — MAX_ACTIONS_PER_RETAIL_ISSUE applies only after dedupe.
   const libIn = issue._library_actions || [];
-  const seenActionIds = new Set();
-  const dedupedLib = [];
-  for (const row of libIn) {
-    const aid = row?.action_id;
-    if (aid != null && aid !== '') {
-      if (seenActionIds.has(aid)) continue;
-      seenActionIds.add(aid);
-    }
-    dedupedLib.push(row);
-  }
-  const cappedLib = dedupedLib.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
-  const actions = cappedLib.map((row) => {
+  const actionsArray = libIn.map((row) => {
     const base = row.action_id ? mapLibraryRowToActionShape(row) : { ...row };
     return {
       ...base,
@@ -6515,9 +6503,18 @@ function enrichRetailIssue(issue, ctx) {
       })
     };
   });
+  const seenActionIds = new Set();
+  const deduplicatedActions = [];
+  for (const action of actionsArray) {
+    if (!seenActionIds.has(action.action_id)) {
+      seenActionIds.add(action.action_id);
+      deduplicatedActions.push(action);
+    }
+  }
+  const finalActions = deduplicatedActions.slice(0, MAX_ACTIONS_PER_RETAIL_ISSUE);
 
   const { _library_actions, ...rest } = issue;
-  issue = { ...rest, actions };
+  issue = { ...rest, actions: finalActions };
   const mergedDiagnosis = {
     ...(ctx?.diagnosis || {}),
     metrics: {
@@ -8123,12 +8120,12 @@ function buildForwardIssuesFromPmsOtb(pmsRows, strRows, diagnosis, snapshotYmd) 
       commercial_narrative: narrative,
       enforced_decision_line: enforcedDecisionLine,
       enforced_execution_actions,
-      // Forward retail cards reuse period STR indices from diagnosis.metrics (pace fields stay in pace_data).
       card_metrics: {
-        avgMPI: diagnosis?.metrics && 'avgMPI' in diagnosis.metrics ? diagnosis.metrics.avgMPI : null,
-        avgARI: diagnosis?.metrics && 'avgARI' in diagnosis.metrics ? diagnosis.metrics.avgARI : null,
-        avgRGI: diagnosis?.metrics && 'avgRGI' in diagnosis.metrics ? diagnosis.metrics.avgRGI : null,
-        avgOcc: diagnosis?.metrics && 'avgOcc' in diagnosis.metrics ? diagnosis.metrics.avgOcc : null
+        avgMPI: diagnosis?.metrics?.avgMPI ?? null,
+        avgARI: diagnosis?.metrics?.avgARI ?? null,
+        avgRGI: diagnosis?.metrics?.avgRGI ?? null,
+        avgOcc: diagnosis?.metrics?.avgOcc ?? null,
+        trend_status: diagnosis?.trend_status ?? 'stable'
       },
       temporal_layer: 'forward_otb',
       window_label: winLab,
@@ -11812,6 +11809,17 @@ async function handler(req, res) {
         retailTemporalMeta.fallback_used = false;
       }
 
+      const seenFamilies = new Set();
+      const deduplicatedIssues = [];
+      for (const issue of rawIssues) {
+        const familyKey = issue.issue_family + '_' + (issue.segment || 'all');
+        if (!seenFamilies.has(familyKey)) {
+          seenFamilies.add(familyKey);
+          deduplicatedIssues.push(issue);
+        }
+      }
+      rawIssues = deduplicatedIssues;
+
       const enrichCtx = {
         diagnosis,
         focus,
@@ -11821,24 +11829,12 @@ async function handler(req, res) {
         period_start: periodMeta.period_start,
         period_end: periodMeta.period_end
       };
-      // Align each retail issue’s declared driver with the single engine primary_driver; stash the card-level label as secondary_driver when it differed.
-      const enginePrimaryDriver = driver?.primary_driver ?? null;
-      if (Array.isArray(rawIssues) && enginePrimaryDriver != null && enginePrimaryDriver !== '') {
-        for (const ri of rawIssues) {
-          const hasOwnPrimary =
-            ri != null && Object.prototype.hasOwnProperty.call(ri, 'primary_driver');
-          if (!hasOwnPrimary || ri.primary_driver == null || ri.primary_driver === '') {
-            ri.primary_driver = enginePrimaryDriver;
-            const d0 = ri.driver;
-            if (d0 != null && d0 !== '' && d0 !== enginePrimaryDriver) ri.secondary_driver = d0;
-            ri.driver = enginePrimaryDriver;
-          } else if (ri.primary_driver !== enginePrimaryDriver) {
-            ri.secondary_driver = ri.primary_driver;
-            ri.primary_driver = enginePrimaryDriver;
-            ri.driver = enginePrimaryDriver;
-          } else {
-            ri.primary_driver = enginePrimaryDriver;
-            ri.driver = enginePrimaryDriver;
+      const enginePrimaryDriver = driver?.primary_driver || null;
+      if (enginePrimaryDriver) {
+        for (const issue of rawIssues) {
+          if (issue.primary_driver && issue.primary_driver !== enginePrimaryDriver) {
+            issue.secondary_driver = issue.secondary_driver || issue.primary_driver;
+            issue.primary_driver = enginePrimaryDriver;
           }
         }
       }
