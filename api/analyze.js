@@ -2248,6 +2248,10 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
       segment: bucket,
       rnGrowth,
       revGrowth,
+      rnTY: data.rnTY,
+      rnLY: data.rnLY,
+      revTY: data.revTY,
+      revLY: data.revLY,
       adrTY,
       adrLY,
       adrVariance,
@@ -2291,7 +2295,13 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
       rnGrowth: row.rnGrowth,
       adrVariance: row.adrVariance,
       shareShift: row.shareShift,
-      signal_types: types
+      signal_types: types,
+      rnTY: row.rnTY,
+      rnLY: row.rnLY,
+      revTY: row.revTY,
+      revLY: row.revLY,
+      adrTY: row.adrTY,
+      adrLY: row.adrLY
     });
   }
 
@@ -2341,6 +2351,285 @@ function buildFocusFromPMS(pmsRows, diagnosis) {
     overall_adr_ly: overallAdrLy,
     overall_adr_variance: overallAdrVariance
   };
+}
+
+/**
+ * Per-segment issue cards for PMS buckets in active_signals (additive; does not alter retail issues[]).
+ * finding_key: SEG_[bucket]_[S4|S5|S7|opportunity]
+ */
+function buildSegmentIssueCards(active_signals, diagnosis, strRows) {
+  const signals = Array.isArray(active_signals) ? active_signals : [];
+  const dm = diagnosis?.metrics || {};
+  const avgMPI = toFiniteNumberOrNull(dm.avgMPI);
+  const avgARI = toFiniteNumberOrNull(dm.avgARI);
+  const avgRGI = toFiniteNumberOrNull(dm.avgRGI);
+  const mpiV = toFiniteNumberOrNull(diagnosis?.mpiVar);
+  const ariV = toFiniteNumberOrNull(diagnosis?.ariVar);
+  const strDays = Array.isArray(strRows) ? strRows.length : 0;
+
+  const strIndexStory = () => {
+    if (mpiV !== null && ariV !== null) {
+      if (ariV > 0 && mpiV < 0) {
+        return {
+          verdict: 'overpricing',
+          interpretation:
+            'ARI momentum positive while MPI momentum is negative — rate premium is being accepted but competitive share is being lost (overpricing risk versus the set).'
+        };
+      }
+      if (ariV < 0 && mpiV > 0) {
+        return {
+          verdict: 'dilution',
+          interpretation:
+            'ARI momentum negative while MPI momentum is positive — share is being bought at a rate cost (dilution).'
+        };
+      }
+      if (ariV > 0 && mpiV > 0) {
+        return {
+          verdict: 'strategy_working',
+          interpretation: 'ARI and MPI momentum both positive — market strategy is broadly working versus trend.'
+        };
+      }
+      if (ariV < 0 && mpiV < 0) {
+        return {
+          verdict: 'systemic_failure',
+          interpretation:
+            'ARI and MPI momentum both negative — systemic commercial underperformance versus the competitive set.'
+        };
+      }
+    }
+    if (avgARI !== null && avgMPI !== null) {
+      if (avgARI > 100 && avgMPI < 100) {
+        return {
+          verdict: 'overpricing',
+          interpretation:
+            `Hotel ARI ${avgARI.toFixed(1)} above parity with MPI ${avgMPI.toFixed(1)} below — rate premium accepted but share lost versus the set.`
+        };
+      }
+      if (avgARI < 100 && avgMPI > 100) {
+        return {
+          verdict: 'dilution',
+          interpretation:
+            `Hotel ARI ${avgARI.toFixed(1)} below parity with MPI ${avgMPI.toFixed(1)} above — share gained at a rate/discount cost.`
+        };
+      }
+      if (avgARI >= 100 && avgMPI >= 100) {
+        return {
+          verdict: 'strategy_working',
+          interpretation: `MPI ${avgMPI.toFixed(1)} and ARI ${avgARI.toFixed(1)} both at or above parity — positioning is coherent with the market.`
+        };
+      }
+      if (avgARI < 100 && avgMPI < 100) {
+        return {
+          verdict: 'systemic_failure',
+          interpretation: `MPI ${avgMPI.toFixed(1)} and ARI ${avgARI.toFixed(1)} both below parity — broad demand or conversion stress.`
+        };
+      }
+    }
+    return {
+      verdict: 'mixed_signals',
+      interpretation:
+        strDays > 0
+          ? `STR index context is mixed or incomplete for this run (${strDays} daily rows).`
+          : 'STR index context is unavailable for this run.'
+    };
+  };
+
+  const roundImpactEur = (raw) => {
+    if (!Number.isFinite(raw)) return null;
+    return Math.round(raw / 1000) * 1000;
+  };
+
+  const out = [];
+  for (const sig of signals) {
+    const bucket = sig.bucket || sig.segment || 'unknown';
+    const displayName = sig.display_name || usaliBucketToDisplayName(bucket);
+    const rnGrowth = Number(sig.rnGrowth);
+    const adrVariance = Number(sig.adrVariance);
+    const shareShift = Number(sig.shareShift);
+    const rnTY = toFiniteNumberOrNull(sig.rnTY) ?? 0;
+    const rnLY = toFiniteNumberOrNull(sig.rnLY) ?? 0;
+    const revTY = toFiniteNumberOrNull(sig.revTY);
+    const revLY = toFiniteNumberOrNull(sig.revLY);
+    const adrTY = toFiniteNumberOrNull(sig.adrTY);
+    const adrLY = toFiniteNumberOrNull(sig.adrLY);
+
+    if (!Number.isFinite(rnGrowth) || !Number.isFinite(adrVariance)) continue;
+    if (Math.abs(rnGrowth) <= 0.01 && Math.abs(adrVariance) <= 0.01) continue;
+
+    const rnPct = rnGrowth * 100;
+    const adrPct = adrVariance * 100;
+    const sharePts = Number.isFinite(shareShift) ? Math.abs(shareShift) * 100 : 0;
+    const rnDir = rnGrowth >= 0 ? 'ahead' : 'behind';
+    const adrSign = adrPct >= 0 ? '+' : '';
+    const shareVerb = sharePts < 0.05 ? 'held' : 'shifted';
+
+    const situation = `${displayName} is ${Math.abs(rnPct).toFixed(1)}% ${rnDir} LY on room nights, ADR is ${adrSign}${adrPct.toFixed(1)}%, share has ${shareVerb} by ${sharePts.toFixed(1)} points.`;
+
+    let scenarioCode;
+    let issueFamily;
+    let diagnosis;
+    let signal_type;
+    let title;
+
+    if (rnGrowth > 0 && adrVariance > 0) {
+      scenarioCode = 'opportunity';
+      issueFamily = 'segment_volume_rate_upside';
+      signal_type = 'opportunity';
+      title = `${displayName}: aligned volume and rate upside`;
+      diagnosis =
+        'Room nights and segment ADR are both improving versus last year — this is a coordinated commercial gain, not a problem pattern.';
+    } else if (rnGrowth > 0 && adrVariance < 0) {
+      scenarioCode = 'S5';
+      issueFamily = 'volume_without_rate';
+      signal_type = 'volume';
+      title = `${displayName}: volume without rate (S5)`;
+      diagnosis =
+        'Volume is growing while segment ADR dilutes versus last year — volume-without-rate: expansion is not converting into rate integrity.';
+    } else if (rnGrowth < 0 && adrVariance > 0) {
+      scenarioCode = 'S4';
+      issueFamily = 'adr_without_volume';
+      signal_type = 'rate';
+      title = `${displayName}: rate without volume (S4)`;
+      diagnosis =
+        'Room nights are declining while segment ADR holds above last year — rate-without-volume pattern with overpricing risk if MPI does not support the premium.';
+    } else if (rnGrowth < 0 && adrVariance < 0) {
+      scenarioCode = 'S7';
+      issueFamily = 'unconstrained_underperformance';
+      signal_type = 'systemic';
+      title = `${displayName}: systemic underperformance (S7)`;
+      diagnosis =
+        'Both room nights and segment ADR trail last year — systemic underperformance on this bucket; treat as a structural mix or demand problem, not a single lever tweak.';
+    } else {
+      if (rnGrowth >= 0 && adrVariance <= 0 && rnGrowth > 0.01) {
+        scenarioCode = 'S5';
+        issueFamily = 'volume_without_rate';
+        signal_type = 'volume';
+        title = `${displayName}: volume-led mix (S5)`;
+        diagnosis =
+          'Material room-night growth with flat segment ADR versus last year still loads rate risk if discounts or channel mix expand.';
+      } else if (rnGrowth <= 0 && adrVariance >= 0 && adrVariance > 0.01) {
+        scenarioCode = 'S4';
+        issueFamily = 'adr_without_volume';
+        signal_type = 'rate';
+        title = `${displayName}: rate-led posture (S4)`;
+        diagnosis =
+          'ADR is elevated versus last year without matching room-night growth — validate elasticity and competitor positioning before deepening the premium.';
+      } else if (rnGrowth < 0 && adrVariance >= 0) {
+        scenarioCode = 'S4';
+        issueFamily = 'adr_without_volume';
+        signal_type = 'rate';
+        title = `${displayName}: rate without volume (S4)`;
+        diagnosis =
+          'Volume is soft while rate holds — same S4 overpricing-risk structure with a flatter ADR variance print.';
+      } else {
+        scenarioCode = 'S7';
+        issueFamily = 'unconstrained_underperformance';
+        signal_type = 'systemic';
+        title = `${displayName}: commercial drag (S7)`;
+        diagnosis =
+          'Segment momentum is weak on volume with limited ADR defence — treat as underperformance until both legs improve.';
+      }
+    }
+
+    const idxStory = strIndexStory();
+    const str_validation = {
+      verdict: idxStory.verdict,
+      mpi: avgMPI,
+      ari: avgARI,
+      rgi: avgRGI,
+      interpretation: idxStory.interpretation
+    };
+
+    let decision;
+    if (signal_type === 'opportunity') {
+      decision = `${displayName} is outperforming on both volume and rate — protect BAR and allotment discipline on compression dates and push upsell or suite conversion rather than opening new discounts on this bucket.`;
+    } else if (scenarioCode === 'S5') {
+      decision = `${displayName} must recover ADR versus last year while the volume window is open: tighten rate floors and channel terms on this bucket before the growth decays into permanent dilution.`;
+    } else if (scenarioCode === 'S4') {
+      decision = `${displayName} needs a targeted volume recovery plan (length-of-stay, packages, or channel) without surrendering the current ADR premium — test elasticity before any blanket BAR cut.`;
+    } else {
+      decision = `${displayName} requires an integrated fix (mix, rate ladder, and sales intervention) because both volume and rate are trailing last year on this segment.`;
+    }
+    if (idxStory.verdict === 'overpricing' && scenarioCode === 'S4') {
+      decision = `${displayName} combines soft room nights with a rate premium the market is not fully validating — narrow rate on shoulder dates first and rebuild RN through targeted acquisition on this bucket.`;
+    }
+    if (idxStory.verdict === 'dilution' && scenarioCode === 'S5') {
+      decision = `${displayName} is buying share at a rate cost — stop depth discounting on this bucket and re-anchor BAR to last year's achieved segment ADR on peak weeks.`;
+    }
+
+    let revGap = null;
+    if (revTY !== null && revLY !== null && Number.isFinite(revTY) && Number.isFinite(revLY)) {
+      revGap = revTY - revLY;
+    } else if (rnTY > 0 && adrTY !== null && adrLY !== null && Number.isFinite(adrTY) && Number.isFinite(adrLY)) {
+      revGap = rnTY * (adrTY - adrLY);
+    }
+    const impactEur = roundImpactEur(revGap !== null && Number.isFinite(revGap) ? revGap : NaN);
+    const financial_impact =
+      impactEur !== null
+        ? {
+            impact_eur: impactEur,
+            description: `Segment revenue vs LY baseline (rounded to nearest €1,000): €${impactEur.toLocaleString('en-GB')}.`
+          }
+        : {
+            impact_eur: null,
+            description: 'Segment revenue vs LY could not be estimated from available PMS fields.'
+          };
+
+    let execution_actions;
+    if (signal_type === 'opportunity') {
+      execution_actions = [
+        `Hold rate integrity on ${displayName} while the segment is ahead on both RN and ADR — extend LOS or upsell rather than promotional discounting.`,
+        `Ring-fence inventory for ${displayName} on compression weeks identified in the forward OTB view.`,
+        `Weekly checkpoint: confirm ${displayName} ADR premium is not eroding as volume scales.`
+      ];
+    } else if (scenarioCode === 'S5') {
+      execution_actions = [
+        `Set explicit minimum ADR floors by week for ${displayName} at or above last year's achieved segment ADR on high-demand weeks.`,
+        `Audit channel and negotiated contributions within ${displayName} that are dragging blended ADR.`,
+        `Measure MPI/ARI response within one booking cycle after floor changes.`
+      ];
+    } else if (scenarioCode === 'S4') {
+      execution_actions = [
+        `Run a two-week BAR elasticity test on ${displayName} shoulder dates only — avoid hotel-wide discounts.`,
+        `Pair any tactical rate move with distribution or content fixes so volume loss is not misread as pure price resistance.`,
+        `Track RGI weekly; if RGI stays below 100, cut the premium on the weakest sub-channel first.`
+      ];
+    } else {
+      execution_actions = [
+        `Convene a segment war-room for ${displayName}: sales, revenue, and marketing with one blended ADR and RN target versus LY.`,
+        `Map ${displayName} displacement versus retail BAR on forward compression dates.`,
+        `Publish a 30-day recovery plan with weekly RN and ADR gates versus last year.`
+      ];
+    }
+
+    const finding_key = `SEG_${bucket}_${scenarioCode}`;
+    const priority =
+      scenarioCode === 'S7' || (scenarioCode === 'S4' && idxStory.verdict === 'overpricing') ? 'high' : 'medium';
+
+    out.push({
+      finding_key,
+      issue_family: issueFamily,
+      card_type: 'segment_issue',
+      segment: bucket,
+      display_name: displayName,
+      signal_type,
+      scenario_type: scenarioCode,
+      scenario: issueFamily,
+      priority,
+      title,
+      driver: 'mix_strategy',
+      situation,
+      diagnosis,
+      str_validation,
+      decision,
+      financial_impact,
+      execution_actions,
+      rule_triggered: issueFamily,
+      card_metrics: snapshotCardMetricsFromDiagnosisLike(diagnosis)
+    });
+  }
+
+  return out;
 }
 
 function buildDriverFromDiagnosis(diagnosis, focus, strRows = [], pmsRows = []) {
@@ -11504,6 +11793,22 @@ function buildCrossSegmentSynthesis({
     detectedScenarios.sort((a, b) => (a.priority || 99) - (b.priority || 99));
     const primary_story = detectedScenarios[0] || null;
 
+    const scenarioAliasById = {
+      S1: 'negotiated_displacement',
+      S2: 'retail_vs_packages',
+      S3: 'group_volume_strategy',
+      S4: 'adr_without_volume',
+      S5: 'volume_without_rate',
+      S6: 'pace_timing_misread',
+      S7: 'unconstrained_underperformance',
+      S8: 'segment_cannibalization'
+    };
+    for (const c of detectedScenarios) {
+      if (!c) continue;
+      if (!c.scenario_type && c.scenario_id) c.scenario_type = c.scenario_id;
+      if (!c.scenario) c.scenario = scenarioAliasById[c.scenario_id] || c.scenario_id;
+    }
+
     return {
       scenarios_detected: detectedScenarios.map((s) => s.scenario_id),
       scenario_count: detectedScenarios.length,
@@ -11778,6 +12083,7 @@ async function handler(req, res) {
     const detection = detectDataContext(workbook);
     const diagnosis = buildDiagnosisFromSTR(strRows);
     const focus = buildFocusFromPMS(pmsRows, diagnosis);
+    const segmentIssueCards = buildSegmentIssueCards(focus?.active_signals || [], diagnosis, strRows);
     const isTransientFocus = ['retail', 'negotiated', 'discount', 'qualified', 'wholesale'].includes(
       focus?.focus_segment || ''
     );
@@ -12133,7 +12439,8 @@ async function handler(req, res) {
       /** Hidden decision arbitration layer to resolve cross-issue strategic conflicts. */
       decision_arbitration_summary: decisionArbitrationSummary,
       // Back-compat: flattened per-action rows; each carries issue finding_key for joins.
-      actions: enrichedActions
+      actions: enrichedActions,
+      segment_issue_cards: segmentIssueCards
     };
 
     enginePayload.active_segment_signals = focus?.active_signals || [];
@@ -12179,7 +12486,8 @@ if (engineSaveError) {
       ...(Array.isArray(corporateAccountPaceIssues) ? corporateAccountPaceIssues : []),
       ...(Array.isArray(groupPipelineIssues) ? groupPipelineIssues : []),
       ...(Array.isArray(mixShiftIssues) ? mixShiftIssues : []),
-      ...(Array.isArray(monthlyIssues) ? monthlyIssues : [])
+      ...(Array.isArray(monthlyIssues) ? monthlyIssues : []),
+      ...(Array.isArray(segmentIssueCards) ? segmentIssueCards : [])
     ];
     const decisionTrackingRows = buildDecisionTrackingRows({
       hotelCode,

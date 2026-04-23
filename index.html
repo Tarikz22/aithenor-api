@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aithenor — Engine output</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --text: #e7ecf1;
+      --muted: #8b98a5;
+      --accent: #f5a623;
+      --ok: #2ecc71;
+      --border: #2a3542;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+    .toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; flex: 1; }
+    input[type="text"] {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.45rem 0.65rem;
+      border-radius: 6px;
+      min-width: 200px;
+    }
+    button {
+      background: var(--accent);
+      color: #111;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    main { padding: 1rem 1.25rem 2rem; max-width: 1100px; margin: 0 auto; }
+    .group-title {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 1.5rem 0 0.75rem;
+    }
+    .cards { display: flex; flex-direction: column; gap: 1rem; }
+    .card {
+      background: var(--panel);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      padding: 1rem 1.1rem;
+    }
+    .card.card-opportunity {
+      border-left-color: var(--ok);
+    }
+    .card h2 { margin: 0 0 0.25rem; font-size: 1.05rem; }
+    .card .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 0.75rem; }
+    .section-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-top: 0.75rem;
+      margin-bottom: 0.2rem;
+    }
+    .section-body { font-size: 0.92rem; }
+    .str-block {
+      background: rgba(0,0,0,0.2);
+      border-radius: 8px;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.88rem;
+    }
+    ul.exec { margin: 0.25rem 0 0; padding-left: 1.1rem; }
+    ul.exec li { margin: 0.2rem 0; }
+    .err { color: #ff6b6b; padding: 1rem; }
+    .muted { color: var(--muted); font-size: 0.88rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Engine output</h1>
+    <div class="toolbar">
+      <input type="text" id="hotelCode" placeholder="hotelCode" />
+      <button type="button" id="loadBtn">Load</button>
+      <span class="muted" id="status"></span>
+    </div>
+  </header>
+  <main id="app"></main>
+  <script>
+    const segmentationScenarios = new Set([
+      'S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8',
+      'negotiated_displacement', 'retail_vs_packages', 'group_volume_strategy',
+      'adr_without_volume', 'volume_without_rate', 'unconstrained_underperformance',
+      'segment_cannibalization'
+    ]);
+    const paceScenarios = new Set(['S6', 'pace_timing_misread']);
+
+    function routeSynthesisCard(card) {
+      const keys = [card.scenario_type, card.scenario, card.scenario_id].filter(Boolean);
+      for (const k of keys) {
+        if (paceScenarios.has(k)) return 'pace';
+      }
+      for (const k of keys) {
+        if (segmentationScenarios.has(k)) return 'segmentation';
+      }
+      const sit = String(card.situation || '').toLowerCase();
+      if (sit.includes('otb') || sit.includes('window') || sit.includes('pace')) return 'pace';
+      return 'segmentation';
+    }
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function renderStrValidation(sv) {
+      if (!sv || typeof sv !== 'object') return '';
+      const interp = sv.interpretation != null ? String(sv.interpretation) : '';
+      const mpi = sv.mpi != null && Number.isFinite(Number(sv.mpi)) ? Number(sv.mpi).toFixed(1) : '—';
+      const ari = sv.ari != null && Number.isFinite(Number(sv.ari)) ? Number(sv.ari).toFixed(1) : '—';
+      const rgi = sv.rgi != null && Number.isFinite(Number(sv.rgi)) ? Number(sv.rgi).toFixed(1) : '—';
+      const verdict = sv.verdict != null ? String(sv.verdict) : '';
+      return (
+        '<div class="str-block">' +
+        '<div><strong>MPI</strong> ' + esc(mpi) + ' · <strong>ARI</strong> ' + esc(ari) + ' · <strong>RGI</strong> ' + esc(rgi) + '</div>' +
+        (verdict ? '<div class="muted" style="margin-top:0.35rem">Verdict: ' + esc(verdict) + '</div>' : '') +
+        (interp ? '<div style="margin-top:0.35rem">' + esc(interp) + '</div>' : '') +
+        '</div>'
+      );
+    }
+
+    function renderFinancialImpact(fi) {
+      if (!fi) return '—';
+      if (typeof fi === 'string') return esc(fi);
+      if (fi.description) return esc(fi.description);
+      if (fi.impact_eur != null && Number.isFinite(fi.impact_eur)) {
+        return '€' + esc(fi.impact_eur.toLocaleString('en-GB'));
+      }
+      return esc(JSON.stringify(fi));
+    }
+
+    function renderExecutionList(actions) {
+      const list = Array.isArray(actions) ? actions : [];
+      if (!list.length) return '<span class="muted">—</span>';
+      return '<ul class="exec">' + list.map((a) => '<li>' + esc(a) + '</li>').join('') + '</ul>';
+    }
+
+    /** Retail-style five-section card (synthesis + segment_issue_cards). */
+    function renderStructuredCard(card, opts) {
+      const subtitle = (opts && opts.subtitle) || '';
+      const variant = (opts && opts.variant) || 'problem';
+      const cls = variant === 'opportunity' ? 'card card-opportunity' : 'card';
+      const title = card.title || card.scenario_name || card.finding_key || 'Card';
+      return (
+        '<article class="' + cls + '">' +
+        '<h2>' + esc(title) + '</h2>' +
+        (subtitle ? '<div class="subtitle">' + esc(subtitle) + '</div>' : '') +
+        '<div class="section-label">SIGNAL</div><div class="section-body">' + esc(card.situation || '—') + '</div>' +
+        '<div class="section-label">ANALYSIS</div><div class="section-body">' + esc(card.diagnosis || '—') + '</div>' +
+        '<div class="section-label">STR VALIDATION</div>' + renderStrValidation(card.str_validation) +
+        '<div class="section-label">DECISION</div><div class="section-body">' + esc(card.decision || '—') + '</div>' +
+        '<div class="section-label">IMPACT</div><div class="section-body">' + renderFinancialImpact(card.financial_impact) + '</div>' +
+        '<div class="section-label">EXECUTION</div>' + renderExecutionList(card.execution_actions) +
+        '</article>'
+      );
+    }
+
+    function renderRetailIssueCard(issue) {
+      const subtitle = issue.segment === 'retail' ? '' : String(issue.segment || '');
+      const situation = issue.situation || issue.finding || '—';
+      const diagnosis = issue.diagnosis || issue.root_cause || '—';
+      const decision = issue.decision || issue.enforced_decision_line || '—';
+      const cm = issue.card_metrics || {};
+      const strVal = {
+        mpi: cm.avgMPI,
+        ari: cm.avgARI,
+        rgi: cm.avgRGI,
+        verdict: issue.issue_family || null,
+        interpretation: issue.commercial_narrative
+          ? String(issue.commercial_narrative).split('\n\n')[0]
+          : null
+      };
+      let impact = '—';
+      const acts = issue.actions || [];
+      if (acts[0] && acts[0].financial_impact) {
+        const r = acts[0].financial_impact.impact_range;
+        if (r && (r.high != null || r.low != null)) {
+          impact = 'Range €' + (r.low != null ? Number(r.low).toLocaleString('en-GB') : '?') +
+            ' – €' + (r.high != null ? Number(r.high).toLocaleString('en-GB') : '?');
+        }
+      }
+      const synthetic = {
+        title: issue.title,
+        situation,
+        diagnosis,
+        str_validation: strVal,
+        decision,
+        financial_impact: impact,
+        execution_actions: issue.enforced_execution_actions || []
+      };
+      return renderStructuredCard(synthetic, { subtitle, variant: 'problem' });
+    }
+
+    function renderEngine(j) {
+      const segHtml = [];
+      const paceHtml = [];
+
+      const issues = Array.isArray(j.issues) ? j.issues : [];
+      for (const issue of issues) {
+        segHtml.push(renderRetailIssueCard(issue));
+      }
+
+      const segExtras = Array.isArray(j.segment_issue_cards) ? j.segment_issue_cards : [];
+      const segProblems = segExtras.filter((c) => c && c.signal_type !== 'opportunity');
+      const segOpps = segExtras.filter((c) => c && c.signal_type === 'opportunity');
+      for (const c of segProblems) {
+        segHtml.push(renderStructuredCard(c, { subtitle: c.display_name || c.segment, variant: 'problem' }));
+      }
+
+      const synthRoot = j.cross_segment_synthesis || {};
+      const synthCards = Array.isArray(synthRoot.synthesis_cards) ? synthRoot.synthesis_cards : [];
+      const paceSynthHtml = [];
+      for (const card of synthCards) {
+        const route = routeSynthesisCard(card);
+        const html = renderStructuredCard(card, { variant: 'problem' });
+        if (route === 'pace') paceSynthHtml.push(html);
+        else segHtml.push(html);
+      }
+
+      const forward = Array.isArray(j.forward_issues) ? j.forward_issues : [];
+      for (const f of forward) {
+        const synthetic = {
+          title: f.title,
+          situation: (f.commercial_narrative || '').split('\n\n')[0] || f.title,
+          diagnosis: (f.commercial_narrative || '').split('\n\n').slice(1).join('\n\n') || '—',
+          str_validation: {
+            mpi: f.card_metrics && f.card_metrics.avgMPI,
+            ari: f.card_metrics && f.card_metrics.avgARI,
+            rgi: f.card_metrics && f.card_metrics.avgRGI,
+            interpretation: f.window_label ? 'Window: ' + f.window_label : null
+          },
+          decision: f.enforced_decision_line || '—',
+          financial_impact: null,
+          execution_actions: f.enforced_execution_actions || []
+        };
+        paceHtml.push(renderStructuredCard(synthetic, { subtitle: f.window_label || 'Forward OTB', variant: 'problem' }));
+      }
+      for (const h of paceSynthHtml) paceHtml.push(h);
+
+      for (const c of segOpps) {
+        segHtml.push(renderStructuredCard(c, { subtitle: c.display_name || c.segment, variant: 'opportunity' }));
+      }
+
+      let out = '';
+      out += '<div class="group-title">Segmentation</div><div class="cards">';
+      out += segHtml.length ? segHtml.join('') : '<p class="muted">No segmentation cards.</p>';
+      out += '</div>';
+
+      out += '<div class="group-title">Pace analysis</div><div class="cards">';
+      out += paceHtml.length ? paceHtml.join('') : '<p class="muted">No pace cards.</p>';
+      out += '</div>';
+
+      return out;
+    }
+
+    async function load() {
+      const hotelCode = document.getElementById('hotelCode').value.trim();
+      const btn = document.getElementById('loadBtn');
+      const status = document.getElementById('status');
+      const app = document.getElementById('app');
+      if (!hotelCode) {
+        app.innerHTML = '<p class="err">Enter hotelCode.</p>';
+        return;
+      }
+      btn.disabled = true;
+      status.textContent = 'Loading…';
+      app.innerHTML = '';
+      try {
+        const res = await fetch('/api/engine-output?hotelCode=' + encodeURIComponent(hotelCode));
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          app.innerHTML = '<p class="err">' + esc(data.error || res.statusText) + '</p>';
+          status.textContent = '';
+          return;
+        }
+        app.innerHTML = renderEngine(data);
+        status.textContent = 'OK';
+      } catch (e) {
+        app.innerHTML = '<p class="err">' + esc(e.message) + '</p>';
+        status.textContent = '';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById('loadBtn').addEventListener('click', load);
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get('hotelCode');
+    if (q) {
+      document.getElementById('hotelCode').value = q;
+    }
+  </script>
+</body>
+</html>

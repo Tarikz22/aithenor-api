@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const getEngineOutputHandler = require('./api/engine-output');
@@ -22,7 +23,7 @@ app.post('/api/analyze', (req, res) => analyzeHandler(req, res));
 app.get('/api/engine-output', (req, res) => getEngineOutputHandler(req, res));
 
 app.get('/', (req, res) => {
-  res.send('Aithenor API is running');
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
