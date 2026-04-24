@@ -2546,7 +2546,17 @@ function buildSegmentIssueCards(active_signals, diagnosis, strRows) {
     } else if (scenarioCode === 'S5') {
       decision = `${displayName} must recover ADR versus last year while the volume window is open: tighten rate floors and channel terms on this bucket before the growth decays into permanent dilution.`;
     } else if (scenarioCode === 'S4') {
-      decision = `${displayName} needs a targeted volume recovery plan (length-of-stay, packages, or channel) without surrendering the current ADR premium — test elasticity before any blanket BAR cut.`;
+      const s4DecisionByBucket = {
+        transient_negotiated: `${displayName} is losing room nights while holding rate — audit the three lowest-producing accounts this week and determine whether the shortfall is recoverable through account activation or requires replacement from retail or group pipeline.`,
+        transient_discount: `${displayName} is losing room nights while rate holds — validate OTA rate competitiveness on the specific arrival dates with the highest shortfall before any BAR adjustment. The problem is likely channel positioning, not rate level.`,
+        transient_retail: `${displayName} is losing room nights while ADR holds — run a targeted BAR elasticity test on shoulder dates only. Do not reduce the rate floor on peak dates; the ADR premium is being accepted by the market.`,
+        transient_wholesale: `${displayName} is declining in volume while rate holds — review allotment release policy and channel terms. If wholesale ADR is below the blended hotel ADR, consider tightening allocation rather than stimulating volume.`,
+        group_corporate: `${displayName} room nights are flat or declining while rate holds — this is a pipeline and conversion problem, not a pricing problem. Review group RFPs in the forward window and activate the sales team on the two largest tentative accounts.`,
+        group_association: `${displayName} volume is trailing LY while rate holds — review the forward group pipeline and identify whether lost bids can be re-engaged or replaced from the prospect list.`
+      };
+      decision =
+        s4DecisionByBucket[bucket] ||
+        `${displayName} needs volume recovery without surrendering the current ADR premium — investigate the specific channel or account driving the shortfall before taking any rate action.`;
     } else {
       decision = `${displayName} requires an integrated fix (mix, rate ladder, and sales intervention) because both volume and rate are trailing last year on this segment.`;
     }
@@ -2563,16 +2573,20 @@ function buildSegmentIssueCards(active_signals, diagnosis, strRows) {
     } else if (rnTY > 0 && adrTY !== null && adrLY !== null && Number.isFinite(adrTY) && Number.isFinite(adrLY)) {
       revGap = rnTY * (adrTY - adrLY);
     }
-    const impactEur = roundImpactEur(revGap !== null && Number.isFinite(revGap) ? revGap : NaN);
+    const impactDirection = revGap !== null ? (revGap >= 0 ? 'ahead' : 'behind') : null;
+    const absImpact = revGap !== null ? Math.abs(revGap) : null;
+
     const financial_impact =
-      impactEur !== null
+      absImpact !== null && absImpact > 0
         ? {
-            impact_eur: impactEur,
-            description: `Segment revenue vs LY baseline (rounded to nearest €1,000): €${impactEur.toLocaleString('en-GB')}.`
+            impact_eur: Math.round(revGap / 1000) * 1000,
+            description: `${displayName} revenue is €${Math.abs(
+              Math.round(revGap / 1000) * 1000
+            ).toLocaleString('en-GB')} ${impactDirection} last year on this segment.`
           }
         : {
-            impact_eur: null,
-            description: 'Segment revenue vs LY could not be estimated from available PMS fields.'
+            impact_eur: 0,
+            description: `${displayName} revenue is tracking in line with last year.`
           };
 
     let execution_actions;
@@ -2589,7 +2603,29 @@ function buildSegmentIssueCards(active_signals, diagnosis, strRows) {
         `Measure MPI/ARI response within one booking cycle after floor changes.`
       ];
     } else if (scenarioCode === 'S4') {
-      execution_actions = [
+      const s4ExecutionByBucket = {
+        transient_negotiated: [
+          `Identify the three negotiated accounts with the largest YoY RN shortfall and schedule account manager calls this week.`,
+          `Confirm whether shortfall is a travel policy change, a lost RFP, or a competitor switch — each requires a different response.`,
+          `Do not reduce negotiated rates without first understanding the cause of the production shortfall.`
+        ],
+        transient_discount: [
+          `Run a rate parity audit on OTA channels for the top 5 arrival dates with the highest Discount/OTA shortfall vs LY.`,
+          `Check if availability restrictions are suppressing OTA pickup on the shortfall dates before assuming rate is the cause.`,
+          `If rate is competitive and availability is open, escalate to content and ranking review on the primary OTA channels.`
+        ],
+        transient_retail: [
+          `Run a two-week BAR elasticity test on shoulder dates only — avoid hotel-wide rate changes.`,
+          `Compare direct booking conversion rate this period vs LY — if conversion is stable, the issue is top-of-funnel, not rate.`,
+          `Track MPI weekly; if MPI stays below 98 despite rate test, shift focus to distribution and visibility, not pricing.`
+        ],
+        group_corporate: [
+          `Review all definite and tentative corporate groups in the forward window — identify accounts behind pace and activate.`,
+          `Check whether preferred rate agreements are being honoured on high-demand dates — corporate displacement is the risk.`,
+          `For accounts more than 20% behind pace, escalate to direct sales contact within 48 hours.`
+        ]
+      };
+      execution_actions = s4ExecutionByBucket[bucket] || [
         `Run a two-week BAR elasticity test on ${displayName} shoulder dates only — avoid hotel-wide discounts.`,
         `Pair any tactical rate move with distribution or content fixes so volume loss is not misread as pure price resistance.`,
         `Track RGI weekly; if RGI stays below 100, cut the premium on the weakest sub-channel first.`
