@@ -6804,6 +6804,19 @@ function enrichRetailIssue(issue, ctx) {
 
   const { _library_actions, ...rest } = issue;
   issue = { ...rest, actions: finalActions };
+  // Ensure card_metrics reflects actual STR values from diagnosis.
+  // The episode window may have null metrics if STR data was sparse —
+  // fall back to the global diagnosis metrics which are always populated.
+  const diagMetrics = ctx?.diagnosis?.metrics || {};
+  if (diagMetrics.avgMPI != null || diagMetrics.avgARI != null) {
+    issue.card_metrics = {
+      avgMPI: issue.card_metrics?.avgMPI ?? diagMetrics.avgMPI ?? null,
+      avgARI: issue.card_metrics?.avgARI ?? diagMetrics.avgARI ?? null,
+      avgRGI: issue.card_metrics?.avgRGI ?? diagMetrics.avgRGI ?? null,
+      avgOcc: issue.card_metrics?.avgOcc ?? diagMetrics.avgOcc ?? null,
+      trend_status: issue.card_metrics?.trend_status ?? ctx?.diagnosis?.trend_status ?? 'stable'
+    };
+  }
   const mergedDiagnosis = {
     ...(ctx?.diagnosis || {}),
     metrics: {
@@ -10166,6 +10179,7 @@ function applyArbitrationOverlayToRetailIssues(issues, decisionArbitrationSummar
       const base = existingActions[i] || existingActions[0] || {};
       normalized.push({
         ...base,
+        action_id: i === 0 ? (base.action_id || 'ARB_ACTION_0') : `${base.action_id || 'ARB_ACTION'}_${i}`,
         title:
           arb.arbitration_role === 'monitor'
             ? 'Monitor this issue'
